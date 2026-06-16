@@ -29,6 +29,7 @@ import {
   deleteProject,
   getProject,
   getProjectFilesDirectory,
+  getProjectManifest,
   getProjectWithFiles,
   listProjects,
   readProjectFile
@@ -319,11 +320,14 @@ app.get("/admin/projects/:projectId", async (req, res) => {
       }
     }
 
+    const manifest = await getProjectManifest(projectRoot, req.params.projectId);
+
     res.type("html").send(renderProjectPage({
       publicBaseUrl,
       adminToken: adminPasscode,
       project: project.metadata,
       files: project.files,
+      manifest,
       selectedPath,
       selectedContent,
       error

@@ -221,7 +221,7 @@ const checkUrlTool: ToolModule = {
       additionalProperties: false
     }
   },
-  enabledByDefault: true,
+  enabledByDefault: false,
   schema: checkUrlSchema,
   handler: async (input, ctx) => {
     const parsed = input as z.infer<typeof checkUrlSchema>;
@@ -276,7 +276,7 @@ const openLocalServerTool: ToolModule = {
       additionalProperties: false
     }
   },
-  enabledByDefault: true,
+  enabledByDefault: false,
   schema: openLocalServerSchema,
   handler: async (input, ctx) => {
     const parsed = input as z.infer<typeof openLocalServerSchema>;
@@ -393,7 +393,7 @@ const stopLocalServerTool: ToolModule = {
       additionalProperties: false
     }
   },
-  enabledByDefault: true,
+  enabledByDefault: false,
   schema: stopLocalServerSchema,
   handler: async (input, ctx) => {
     const parsed = input as z.infer<typeof stopLocalServerSchema>;
@@ -540,7 +540,7 @@ export const commandTools: ToolModule[] = [
       description: "Run npm run lint in workspace.",
       inputSchema: { type: "object", properties: { command: { type: "string", enum: ["npm run lint"] }, timeoutMs: { type: "number" } }, required: ["command"], additionalProperties: false }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: lintRunCommandSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof lintRunCommandSchema>;
@@ -554,7 +554,7 @@ export const commandTools: ToolModule[] = [
       description: "Run npm run format -- --check in workspace.",
       inputSchema: { type: "object", properties: { command: { type: "string", enum: ["npm run format -- --check"] }, timeoutMs: { type: "number" } }, required: ["command"], additionalProperties: false }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: formatCheckRunCommandSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof formatCheckRunCommandSchema>;
@@ -568,7 +568,7 @@ export const commandTools: ToolModule[] = [
       description: "Run npm run format in workspace.",
       inputSchema: { type: "object", properties: { command: { type: "string", enum: ["npm run format"] }, timeoutMs: { type: "number" } }, required: ["command"], additionalProperties: false }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: formatWriteRunCommandSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof formatWriteRunCommandSchema>;
@@ -582,7 +582,7 @@ export const commandTools: ToolModule[] = [
       description: "Run lint, typecheck, and tests in sequence.",
       inputSchema: { type: "object", properties: { command: { type: "string", enum: ["diagnostic_bundle"] }, timeoutMs: { type: "number" } }, required: ["command"], additionalProperties: false }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: diagnosticBundleRunCommandSchema,
     handler: async (_input, ctx) => {
       const parsed = _input as z.infer<typeof diagnosticBundleRunCommandSchema>;
@@ -614,7 +614,7 @@ export const commandTools: ToolModule[] = [
       description: "Run lint, typecheck, and tests and collect all results in one run.",
       inputSchema: { type: "object", properties: { command: { type: "string", enum: ["diagnostic_bundle_full"] }, timeoutMs: { type: "number" } }, required: ["command"], additionalProperties: false }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: diagnosticBundleFullRunCommandSchema,
     handler: async (_input, ctx) => {
       const parsed = _input as z.infer<typeof diagnosticBundleFullRunCommandSchema>;
@@ -643,7 +643,7 @@ export const commandTools: ToolModule[] = [
       description: "Validate URL accessibility and return HTTP status with response preview.",
       inputSchema: { type: "object", properties: { url: { type: "string" }, method: { type: "string", enum: ["GET", "HEAD"] }, timeoutMs: { type: "number" }, maxBodyBytes: { type: "number" } }, required: ["url"], additionalProperties: false }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: checkUrlSchema,
     handler: checkUrlTool.handler
   },
@@ -653,7 +653,7 @@ export const commandTools: ToolModule[] = [
       description: "Start a local dev or start server in workspace for page preview.",
       inputSchema: { type: "object", properties: { script: { type: "string", enum: ["dev", "start"] }, port: { type: "number" }, host: { type: "string" }, cwd: { type: "string" }, keepAlive: { type: "boolean" } }, additionalProperties: false }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: openLocalServerSchema,
     handler: openLocalServerTool.handler
   },
@@ -663,7 +663,7 @@ export const commandTools: ToolModule[] = [
       description: "Stop a tracked local server.",
       inputSchema: { type: "object", properties: { port: { type: "number" }, host: { type: "string" }, all: { type: "boolean" } }, additionalProperties: false }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: stopLocalServerSchema,
     handler: stopLocalServerTool.handler
   },
@@ -687,7 +687,7 @@ export const commandTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: openLocalServerAndCheckSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof openLocalServerAndCheckSchema>;

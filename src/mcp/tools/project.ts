@@ -3,10 +3,13 @@ import {
   createProject,
   deleteProject,
   deleteProjectFile,
+  getProjectManifest,
   getProjectWithFiles,
   listProjects,
+  publishProjectAndReport,
   publishProject,
   readProjectFile,
+  validateProject,
   writeProjectFile
 } from "../../projects/store.js";
 import type { ToolModule } from "../types.js";
@@ -44,6 +47,11 @@ const deleteProjectFileInputSchema = z.object({
 });
 
 const publishProjectInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  entryFile: z.string().min(1).max(240).optional()
+});
+
+const validateProjectInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   entryFile: z.string().min(1).max(240).optional()
 });
@@ -112,6 +120,29 @@ export const projectTools: ToolModule[] = [
   },
   {
     definition: {
+      name: "get_project_manifest",
+      description: "Get the agent-readable project manifest: metadata, files, entry file, published URL, last validation, and task history.",
+      inputSchema: { type: "object", properties: { projectId: { type: "string" } }, required: ["projectId"], additionalProperties: false }
+    },
+    enabledByDefault: true,
+    schema: projectIdInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = input as z.infer<typeof projectIdInputSchema>;
+      const manifest = await getProjectManifest(ctx.projectRoot, parsed.projectId);
+      return {
+        ok: true,
+        summary: `Loaded agent manifest for project ${parsed.projectId}.`,
+        jobId: parsed.projectId,
+        previewUrl: manifest.publishedUrl,
+        shareUrl: manifest.publishedUrl,
+        artifacts: manifest.files.map((file) => file.path),
+        logs: [JSON.stringify(manifest, null, 2)],
+        errors: []
+      };
+    }
+  },
+  {
+    definition: {
       name: "write_project_file",
       description: "Write a UTF-8 file inside a persistent project.",
       inputSchema: { type: "object", properties: { projectId: { type: "string" }, relativePath: { type: "string", description: "Project-relative path. No absolute paths, dotfiles, or parent traversal." }, content: { type: "string", description: "UTF-8 text content. Max 1 MiB." } }, required: ["projectId", "relativePath", "content"], additionalProperties: false }
@@ -154,6 +185,37 @@ export const projectTools: ToolModule[] = [
   },
   {
     definition: {
+      name: "validate_project",
+      description: "Validate a project before delivery. Checks entry file, safe paths, file sizes, basic HTML structure, and whether a public URL can be generated.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          entryFile: { type: "string", description: "Entry file to validate. Defaults to project entryFile." }
+        },
+        required: ["projectId"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: validateProjectInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = input as z.infer<typeof validateProjectInputSchema>;
+      const validation = await validateProject(ctx.projectRoot, parsed.projectId, parsed.entryFile);
+      return {
+        ok: validation.ok,
+        summary: validation.ok
+          ? `Project ${parsed.projectId} validation passed.`
+          : `Project ${parsed.projectId} validation failed.`,
+        jobId: parsed.projectId,
+        artifacts: [validation.entryFile],
+        logs: [JSON.stringify(validation, null, 2)],
+        errors: validation.errors
+      };
+    }
+  },
+  {
+    definition: {
       name: "publish_project",
       description: "Publish a project entry file and return a public share URL.",
       inputSchema: { type: "object", properties: { projectId: { type: "string" }, entryFile: { type: "string", description: "Entry file to publish. Defaults to project entryFile." } }, required: ["projectId"], additionalProperties: false }
@@ -164,6 +226,37 @@ export const projectTools: ToolModule[] = [
       const parsed = input as z.infer<typeof publishProjectInputSchema>;
       const project = await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile);
       return { ok: true, summary: `Published project ${parsed.projectId}.`, jobId: parsed.projectId, previewUrl: project.publishedUrl, shareUrl: project.publishedUrl, artifacts: [project.entryFile], logs: [JSON.stringify(project, null, 2)], errors: [] };
+    }
+  },
+  {
+    definition: {
+      name: "publish_and_report",
+      description: "Recommended ChatGPT project delivery tool. Validate the project, publish it if valid, and return a stable public URL plus structured delivery report.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          entryFile: { type: "string", description: "Entry file to publish. Defaults to project entryFile." }
+        },
+        required: ["projectId"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: validateProjectInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = input as z.infer<typeof validateProjectInputSchema>;
+      const report = await publishProjectAndReport(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile);
+      return {
+        ok: report.ok,
+        summary: report.summary,
+        jobId: report.projectId,
+        previewUrl: report.publishedUrl,
+        shareUrl: report.publishedUrl,
+        artifacts: report.files.map((file) => file.path),
+        logs: [JSON.stringify(report, null, 2)],
+        errors: report.validation.errors
+      };
     }
   },
   {

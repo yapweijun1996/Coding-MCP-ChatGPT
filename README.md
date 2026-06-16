@@ -173,6 +173,18 @@
 - `artifacts`
 - `logs`
 
+### 推荐 Agent 项目交付流程
+
+ChatGPT 或其他 AI agent 交付编码项目时，应优先使用持久化 Project 工具链：
+
+1. `create_project`：创建项目并取得 `projectId`
+2. `write_project_file`：写入 `index.html`、CSS、JS、Markdown 等文件
+3. `get_project_manifest`：读取 agent-readable 项目上下文
+4. `validate_project`：检查入口文件、路径安全、文件大小和 HTML 基本结构
+5. `publish_and_report`：验证通过后发布，并返回稳定的 `publishedUrl`
+
+不要用 legacy `create_share` 交付项目。它默认关闭，仅保留给兼容测试；正式项目链接应来自 `publish_and_report`，格式为 `https://gmb01.xyz/share/{projectId}/index.html`。
+
 ## 运维与安全
 
 - 建议 MCP token、静态 key、OAuth passcode 放在 `http.env` 或加密配置管理中，不直接写入代码仓库
@@ -291,10 +303,6 @@ Some tools exist but are disabled by default and must be temporarily enabled fro
 
 - `delete_project`
 - `create_share`
-- `check_url`
-- `open_local_server`
-- `stop_local_server`
-- `open_local_server_and_check`
 
 For project deliverables, ChatGPT should use `create_project`, `write_project_file`, and `publish_project`. Do not use legacy `create_share` for project outcomes because it is not restart-safe.
 
@@ -306,14 +314,17 @@ npm run check:mcp
 
 ## Command tool defaults
 
-Only stable command checks backed by current package scripts are enabled by default: `run_command`, `run_typecheck`, `run_tests`, and `run_build`.
-
-The following command helpers exist but stay disabled by default until explicitly enabled from Admin:
+Stable command and browser-inspection helpers are enabled by default:
 
 - `run_lint`
 - `run_format_check`
 - `run_format_write`
 - `diagnostic_bundle`
 - `diagnostic_bundle_full`
+- `check_url`
+- `open_local_server`
+- `stop_local_server`
+- `open_local_server_and_check`
+- `inspect_webpage`
 
-`run_format_write` is mutating and should remain disabled unless you intentionally want ChatGPT to rewrite repository files through a formatter.
+`run_format_write` is mutating and should only be used when you intentionally want ChatGPT to rewrite repository files through a formatter.

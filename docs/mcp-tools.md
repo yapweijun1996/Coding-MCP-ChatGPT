@@ -12,7 +12,7 @@ The MCP server uses a single source of truth registry for tool metadata, handler
 ## Tool groups
 
 - `src/mcp/tools/preview.ts`: `ping`, `create_preview`.
-- `src/mcp/tools/project.ts`: persistent Project CRUD and publish tools.
+- `src/mcp/tools/project.ts`: persistent Project CRUD, manifest, validation, and publish tools.
 - `src/mcp/tools/share.ts`: legacy standalone HTML share tool, disabled by default.
 - `src/mcp/tools/workspace.ts`: workspace file tools delegated to legacy implementation.
 - `src/mcp/tools/command.ts`: stable npm checks plus disabled high-risk diagnostics/server helpers.
@@ -23,7 +23,7 @@ The MCP server uses a single source of truth registry for tool metadata, handler
 Enabled by default:
 
 - Connectivity and preview: `ping`, `create_preview`.
-- Project delivery: `create_project`, `list_projects`, `get_project`, `write_project_file`, `read_project_file`, `delete_project_file`, `publish_project`.
+- Project delivery: `create_project`, `list_projects`, `get_project`, `get_project_manifest`, `write_project_file`, `read_project_file`, `delete_project_file`, `validate_project`, `publish_project`, `publish_and_report`.
 - Stable command checks backed by current package scripts: `run_command`, `run_typecheck`, `run_tests`, `run_build`.
 - Workspace and git tools delegated from the legacy implementation.
 
@@ -54,3 +54,15 @@ The check builds `dist/`, verifies registry uniqueness, confirms critical tools 
 ## Compatibility note
 
 `src/mcp/tools.ts` is intentionally kept as a compatibility re-export during the transition. New code should import from `registry.ts`, `router.ts`, or `types.ts` directly.
+
+## Recommended agent workflow
+
+ChatGPT and other coding agents should use the persistent Project workflow for deliverables:
+
+1. `create_project`
+2. `write_project_file`
+3. `get_project_manifest`
+4. `validate_project`
+5. `publish_and_report`
+
+`publish_and_report` is the preferred final delivery tool because it validates first, publishes only when valid, and returns a stable structured report with the public `publishedUrl`.

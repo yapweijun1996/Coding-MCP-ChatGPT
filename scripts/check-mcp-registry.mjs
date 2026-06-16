@@ -11,24 +11,19 @@ const criticalTools = [
   "create_project",
   "write_project_file",
   "read_project_file",
+  "get_project_manifest",
+  "validate_project",
   "publish_project",
+  "publish_and_report",
   "run_command",
   "run_typecheck",
   "run_tests",
-  "run_build"
+  "run_build",
+  "inspect_webpage"
 ];
 const defaultDisabledTools = [
   "delete_project",
-  "create_share",
-  "check_url",
-  "open_local_server",
-  "stop_local_server",
-  "open_local_server_and_check",
-  "run_lint",
-  "run_format_check",
-  "run_format_write",
-  "diagnostic_bundle",
-  "diagnostic_bundle_full"
+  "create_share"
 ];
 const enabledToolRequiredScripts = new Map([
   ["run_typecheck", "typecheck"],
