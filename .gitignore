@@ -8,5 +8,6 @@ ecosystem.local.cjs
 .cache/
 coverage/
 .shares/
+.artifacts/
 .projects/
 .state/

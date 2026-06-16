@@ -1,6 +1,7 @@
 import { ZipArchive } from "archiver";
 import express from "express";
 import { listActivity, recordActivity } from "./activity.js";
+import { readArtifact } from "./artifacts/store.js";
 import { renderAdminPage, renderPublicSharePage, renderProjectPage, type PublicShareLocale } from "./admin.js";
 import { countJobs, getJob } from "./jobs/store.js";
 import { toolDefinitions } from "./mcp/registry.js";
@@ -56,6 +57,7 @@ const host = process.env.HOST ?? "127.0.0.1";
 const publicBaseUrl = process.env.PUBLIC_BASE_URL ?? "https://gmb01.xyz";
 const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
 const shareRoot = process.env.SHARE_ROOT ?? `${workspaceRoot}/.shares`;
+const artifactRoot = process.env.ARTIFACT_ROOT ?? `${workspaceRoot}/.artifacts`;
 const projectRoot = process.env.PROJECT_ROOT ?? `${workspaceRoot}/.projects`;
 const commandTimeoutMs = Number.parseInt(process.env.COMMAND_TIMEOUT_MS ?? "30000", 10);
 const devToken = process.env.MCP_DEV_TOKEN;
@@ -283,6 +285,7 @@ app.post("/mcp", async (req, res) => {
       workspaceRoot,
       commandTimeoutMs,
       shareRoot,
+      artifactRoot,
       projectRoot,
       clientId
     });
@@ -501,6 +504,19 @@ app.get("/share/:shareId/:filename(*)", async (req, res) => {
     return;
   }
   res.type("html").send(artifact.html);
+});
+
+app.get("/artifact/:artifactId/:filename(*)", async (req, res) => {
+  try {
+    const artifact = await readArtifact(artifactRoot, req.params.artifactId, req.params.filename);
+    if (!artifact) {
+      res.status(404).type("text/plain").send("Artifact not found.");
+      return;
+    }
+    res.type(artifact.record.contentType).send(artifact.content);
+  } catch {
+    res.status(404).type("text/plain").send("Artifact not found.");
+  }
 });
 
 app.listen(port, host, () => {

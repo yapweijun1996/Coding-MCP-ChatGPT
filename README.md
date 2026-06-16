@@ -346,6 +346,11 @@ Stable command and browser-inspection helpers enabled by default:
 - `run_tests`
 - `run_build`
 - `inspect_webpage`
+- `inspect_webpage_plus`
+- `audit_accessibility`
+- `audit_lighthouse`
+- `inspect_interaction_flow`
+- `inspect_local_project`
 
 The following command and network/process helpers are disabled by default and must be enabled from Admin before use:
 
@@ -360,3 +365,13 @@ The following command and network/process helpers are disabled by default and mu
 - `open_local_server_and_check`
 
 `run_format_write` is mutating and should only be used when you intentionally want ChatGPT to rewrite repository files through a formatter.
+
+Browser QA tools:
+
+- `check_url`: fast HTTP reachability and response preview.
+- `inspect_webpage`: lightweight Chromium responsive screenshot and layout check.
+- `inspect_webpage_plus`: deeper browser debugging with console, page, network, screenshot, and optional trace artifacts.
+- `audit_accessibility`: axe-powered WCAG-style accessibility scan.
+- `audit_lighthouse`: Lighthouse quality audit for performance, accessibility, best practices, SEO, and PWA.
+- `inspect_interaction_flow`: safe declarative browser flow test without arbitrary JavaScript execution.
+- `inspect_local_project`: starts the local project server, runs browser QA, and stops the server by default.

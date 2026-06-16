@@ -13,8 +13,11 @@
     "check:mcp": "npm run build && node scripts/check-mcp-registry.mjs"
   },
   "dependencies": {
+    "@axe-core/playwright": "^4.11.3",
     "archiver": "^8.0.0",
+    "chrome-launcher": "^1.2.1",
     "express": "^4.19.2",
+    "lighthouse": "^13.4.0",
     "playwright": "^1.61.0",
     "pptxgenjs": "^4.0.1",
     "reveal.js": "^6.0.1",

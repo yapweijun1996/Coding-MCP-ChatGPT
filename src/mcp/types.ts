@@ -23,6 +23,7 @@ export interface ToolContext {
   workspaceRoot: string;
   commandTimeoutMs: number;
   shareRoot: string;
+  artifactRoot: string;
   projectRoot: string;
   clientId: string;
 }

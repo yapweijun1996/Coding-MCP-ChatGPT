@@ -4,6 +4,7 @@ import { presentationTools } from "./presentation.js";
 import { previewTools } from "./preview.js";
 import { projectTools } from "./project.js";
 import { researchTools } from "./research.js";
+import { browserTools } from "./browser.js";
 import { shareTools } from "./share.js";
 import { webInspectTools } from "./web-inspect.js";
 import { webRebuildTools } from "./web-rebuild.js";
@@ -14,6 +15,7 @@ export const allToolModules: ToolModule[] = [
   ...previewTools,
   ...workspaceTools,
   ...commandTools,
+  ...browserTools,
   ...webInspectTools,
   ...webRebuildTools,
   ...presentationTools,
