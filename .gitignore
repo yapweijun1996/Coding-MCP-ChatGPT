@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+http.env
+ecosystem.local.cjs
+*.log
+.DS_Store
+.cache/
+coverage/
+.shares/
+.projects/
+.state/

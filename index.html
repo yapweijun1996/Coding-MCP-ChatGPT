@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Harness Engineering PPT</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --card: #111a33;
+      --card2: #172446;
+      --text: #f7f9ff;
+      --muted: #aab7d8;
+      --line: rgba(255,255,255,.12);
+      --accent: #7dd3fc;
+      --accent2: #a78bfa;
+      --good: #86efac;
+      --warn: #fde68a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 20% 10%, rgba(125,211,252,.22), transparent 30%),
+        radial-gradient(circle at 80% 20%, rgba(167,139,250,.20), transparent 30%),
+        linear-gradient(180deg, #080c18 0%, var(--bg) 100%);
+      color: var(--text);
+    }
+    .deck {
+      scroll-snap-type: y mandatory;
+      height: 100vh;
+      overflow-y: auto;
+    }
+    .slide {
+      min-height: 100vh;
+      padding: 64px clamp(24px, 5vw, 80px);
+      display: grid;
+      align-items: center;
+      scroll-snap-align: start;
+      border-bottom: 1px solid var(--line);
+    }
+    .hero {
+      display: grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap: 48px;
+      align-items: center;
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 {
+      font-size: clamp(44px, 7vw, 88px);
+      line-height: .95;
+      letter-spacing: -0.06em;
+      margin-bottom: 28px;
+    }
+    h2 {
+      font-size: clamp(34px, 5vw, 64px);
+      line-height: 1;
+      letter-spacing: -0.05em;
+      margin-bottom: 22px;
+    }
+    h3 {
+      font-size: 22px;
+      margin-bottom: 10px;
+    }
+    p, li {
+      font-size: clamp(17px, 2vw, 22px);
+      line-height: 1.55;
+      color: var(--muted);
+    }
+    .kicker {
+      display: inline-flex;
+      gap: 10px;
+      align-items: center;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 14px;
+      color: var(--accent);
+      font-weight: 700;
+      margin-bottom: 24px;
+      background: rgba(255,255,255,.04);
+    }
+    .gradient {
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.035));
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      padding: 28px;
+      box-shadow: 0 24px 80px rgba(0,0,0,.35);
+    }
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 22px;
+      margin-top: 34px;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 24px;
+      margin-top: 34px;
+    }
+    .number {
+      width: 44px;
+      height: 44px;
+      border-radius: 14px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #06101f;
+      font-weight: 900;
+      margin-bottom: 20px;
+    }
+    .flow {
+      display: grid;
+      gap: 16px;
+      margin-top: 34px;
+    }
+    .step {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 18px;
+      align-items: start;
+      padding: 22px;
+      background: rgba(255,255,255,.05);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+    }
+    .tag {
+      color: #06101f;
+      background: var(--good);
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-weight: 900;
+      text-align: center;
+      font-size: 14px;
+    }
+    .diagram {
+      aspect-ratio: 1;
+      border-radius: 36px;
+      background:
+        linear-gradient(135deg, rgba(125,211,252,.20), rgba(167,139,250,.20)),
+        var(--card);
+      border: 1px solid var(--line);
+      padding: 28px;
+      position: relative;
+      overflow: hidden;
+    }
+    .node {
+      position: absolute;
+      width: 150px;
+      min-height: 86px;
+      border-radius: 22px;
+      padding: 14px;
+      background: rgba(8,12,24,.82);
+      border: 1px solid var(--line);
+      display: grid;
+      align-content: center;
+      text-align: center;
+      font-weight: 800;
+      box-shadow: 0 18px 40px rgba(0,0,0,.25);
+    }
+    .n1 { left: 50%; top: 8%; transform: translateX(-50%); }
+    .n2 { left: 8%; top: 42%; }
+    .n3 { right: 8%; top: 42%; }
+    .n4 { left: 50%; bottom: 8%; transform: translateX(-50%); }
+    .center {
+      left: 50%; top: 50%; transform: translate(-50%, -50%);
+      width: 180px; min-height: 110px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #06101f;
+    }
+    .line {
+      position: absolute;
+      height: 2px;
+      background: rgba(255,255,255,.26);
+      transform-origin: left center;
+    }
+    .l1 { width: 160px; left: 47%; top: 31%; transform: rotate(92deg); }
+    .l2 { width: 170px; left: 30%; top: 48%; transform: rotate(0deg); }
+    .l3 { width: 170px; right: 30%; top: 48%; transform: rotate(180deg); }
+    .l4 { width: 160px; left: 47%; bottom: 31%; transform: rotate(-92deg); }
+    .footer {
+      position: fixed;
+      bottom: 18px;
+      left: 24px;
+      right: 24px;
+      display: flex;
+      justify-content: space-between;
+      color: rgba(255,255,255,.45);
+      font-size: 13px;
+      pointer-events: none;
+    }
+    .pill-row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 10px 14px;
+      color: var(--muted);
+      background: rgba(255,255,255,.04);
+      font-weight: 700;
+    }
+    .big-stat {
+      font-size: clamp(42px, 6vw, 82px);
+      font-weight: 950;
+      letter-spacing: -0.06em;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    @media (max-width: 900px) {
+      .hero, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .slide { padding: 44px 20px; }
+      .step { grid-template-columns: 1fr; }
+      .diagram { min-height: 420px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="deck">
+    <section class="slide">
+      <div class="hero">
+        <div>
+          <div class="kicker">AI-First Delivery Model</div>
+          <h1>Harness <span class="gradient">Engineering</span></h1>
+          <p>Build reliable AI-agent workflows by giving the agent a clear harness: context, tools, rules, checks, memory, and evidence.</p>
+          <div class="pill-row">
+            <span class="pill">Agent Workflow</span>
+            <span class="pill">MCP Tools</span>
+            <span class="pill">Knowledge Base</span>
+            <span class="pill">Verification</span>
+          </div>
+        </div>
+        <div class="diagram">
+          <div class="line l1"></div><div class="line l2"></div><div class="line l3"></div><div class="line l4"></div>
+          <div class="node n1">Context</div>
+          <div class="node n2">Tools</div>
+          <div class="node center">Agent Harness</div>
+          <div class="node n3">Rules</div>
+          <div class="node n4">Evidence</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div>
+        <div class="kicker">Problem</div>
+        <h2>Normal AI agent work is powerful, but easy to lose control.</h2>
+        <div class="grid-3">
+          <div class="card"><div class="number">1</div><h3>Wrong Context</h3><p>The agent guesses instead of reading the correct project knowledge.</p></div>
+          <div class="card"><div class="number">2</div><h3>Wrong Action</h3><p>The agent edits files, calls tools, or changes logic without enough guardrails.</p></div>
+          <div class="card"><div class="number">3</div><h3>Weak Proof</h3><p>The agent says it is done, but there is no build, test, preview, or evidence.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div>
+        <div class="kicker">Core Idea</div>
+        <h2>A harness turns an AI agent from “chat” into a controlled engineering worker.</h2>
+        <div class="grid-2">
+          <div class="card"><div class="big-stat">01</div><h3>Define the Work Boundary</h3><p>What the agent can read, write, call, change, and verify.</p></div>
+          <div class="card"><div class="big-stat">02</div><h3>Force Evidence</h3><p>Every final answer must be backed by logs, preview links, tests, screenshots, or file output.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div>
+        <div class="kicker">Harness Components</div>
+        <h2>The engineering harness has six layers.</h2>
+        <div class="grid-3">
+          <div class="card"><h3>Memory</h3><p>Project facts, user rules, business logic, and historical decisions.</p></div>
+          <div class="card"><h3>Tool Access</h3><p>MCP tools for code, browser, database, email, calendar, or knowledge base.</p></div>
+          <div class="card"><h3>Planning</h3><p>Break work into steps before touching production logic.</p></div>
+          <div class="card"><h3>Execution</h3><p>Make controlled changes inside a known workspace.</p></div>
+          <div class="card"><h3>Verification</h3><p>Run build, typecheck, tests, preview, or SQL validation.</p></div>
+          <div class="card"><h3>Report</h3><p>Return what changed, what passed, what failed, and next action.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div>
+        <div class="kicker">Workflow</div>
+        <h2>Recommended agent execution flow.</h2>
+        <div class="flow">
+          <div class="step"><div class="tag">READ</div><p>Load project context from KB, files, tickets, or user instructions.</p></div>
+          <div class="step"><div class="tag">PLAN</div><p>Decide the safest implementation path and identify dependent files.</p></div>
+          <div class="step"><div class="tag">BUILD</div><p>Apply the smallest complete change that solves the real business problem.</p></div>
+          <div class="step"><div class="tag">VERIFY</div><p>Run tests, build, preview, and compare output against expected behavior.</p></div>
+          <div class="step"><div class="tag">REPORT</div><p>Show evidence. No evidence means the task is not truly complete.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div>
+        <div class="kicker">Business Value</div>
+        <h2>Why this matters for ERP and system development.</h2>
+        <div class="grid-3">
+          <div class="card"><h3>Faster Delivery</h3><p>Agents can draft screens, SQL, reports, test data, and documentation quickly.</p></div>
+          <div class="card"><h3>Lower Risk</h3><p>Harness rules prevent random production edits and force validation before release.</p></div>
+          <div class="card"><h3>Reusable Knowledge</h3><p>Every solved issue becomes memory for the next project, customer, or module.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div>
+        <div class="kicker">Conclusion</div>
+        <h2>Harness Engineering is the bridge between AI agent power and real software reliability.</h2>
+        <p>Without a harness, the agent is only a smart chat box. With a harness, it becomes a controlled worker that can read, act, verify, and report with evidence.</p>
+      </div>
+    </section>
+  </main>
+  <div class="footer"><span>Harness Engineering PPT</span><span>Scroll to present ↓</span></div>
+</body>
+</html>

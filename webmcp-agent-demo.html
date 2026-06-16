@@ -1,0 +1,622 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebMCP Agent Demo</title>
+    <link rel="icon" href="data:," />
+    <style>
+      :root {
+        --bg: #0b1020;
+        --panel: #141c35;
+        --panel-2: #1a2547;
+        --text: #eef2ff;
+        --muted: #aab2d5;
+        --accent: #7c9bff;
+        --ok: #36d399;
+        --warn: #f59e0b;
+        --bad: #ef4444;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, -apple-system, Segoe UI, sans-serif;
+        background: linear-gradient(140deg, #090d18, #111831 45%, #0b1020 100%);
+        color: var(--text);
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+      .app {
+        width: min(960px, 100%);
+        background: var(--panel);
+        border: 1px solid #334;
+        border-radius: 18px;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.35);
+        overflow: hidden;
+      }
+      header {
+        padding: 18px 20px;
+        border-bottom: 1px solid #233;
+        background: linear-gradient(90deg, #131d3f, #1c2a55);
+      }
+      h1 {
+        margin: 0;
+        font-size: 1.25rem;
+      }
+      .sub {
+        margin-top: 6px;
+        color: var(--muted);
+      }
+      .body {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: 1fr 1fr;
+        padding: 18px;
+      }
+      .panel {
+        background: var(--panel-2);
+        border: 1px solid #253;
+        border-radius: 14px;
+        padding: 14px;
+      }
+      .panel h2 {
+        margin: 0 0 8px;
+        font-size: 1rem;
+      }
+      .row {
+        display: grid;
+        gap: 10px;
+      }
+      label {
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+      input, button, textarea, select {
+        border: 1px solid #385;
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: #0a1126;
+        color: var(--text);
+      }
+      button {
+        cursor: pointer;
+        background: linear-gradient(180deg, #2a3d89, #22356e);
+        border: none;
+        transition: transform 0.1s ease, opacity 0.1s ease;
+      }
+      button:hover { opacity: 0.95; }
+      button:active { transform: translateY(1px); }
+      pre {
+        white-space: pre-wrap;
+        background: #0a1023;
+        border: 1px dashed #2f3f72;
+        border-radius: 10px;
+        padding: 10px;
+        min-height: 120px;
+      }
+      .status {
+        font-weight: 700;
+      }
+      .ok { color: var(--ok); }
+      .warn { color: var(--warn); }
+      .bad { color: var(--bad); }
+      .chip {
+        display: inline-block;
+        border: 1px solid #445;
+        border-radius: 999px;
+        padding: 3px 10px;
+        margin: 2px;
+        font-size: 0.8rem;
+        color: #dbe2ff;
+      }
+      .agent-log {
+        margin-top: 10px;
+        max-height: 260px;
+        overflow: auto;
+      }
+      @media (max-width: 900px) {
+        .body { grid-template-columns: 1fr; }
+      }
+      .tools {
+        display: grid;
+        gap: 10px;
+      }
+      .tool-card {
+        padding: 10px;
+        border: 1px solid #2c3a67;
+        border-radius: 12px;
+        background: #0d1630;
+      }
+      .tool-card b {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <h1>WebMCP 端到端演示（含 AI Agent 调用）</h1>
+        <div class="sub">网页声明可调用工具 → 代理发现并执行工具，而不是抓 DOM</div>
+      </header>
+      <div class="body">
+        <section class="panel">
+          <h2>网页工具（页面侧）</h2>
+          <div class="tools" id="toolPanel"></div>
+          <div class="row" style="margin-top: 14px;">
+            <label>人工操作入口</label>
+            <form id="bookingForm" onsubmit="event.preventDefault(); manualBook();">
+              <input id="nameInput" placeholder="姓名，例如 Alice" />
+              <input id="dateInput" type="date" />
+              <input id="timeInput" type="time" />
+              <input id="emailInput" type="email" placeholder="邮箱" />
+              <button type="submit">手动提交 booking</button>
+            </form>
+          </div>
+          <div class="row" style="margin-top: 14px;">
+            <label>会话日志</label>
+            <pre id="pageLog"></pre>
+          </div>
+        </section>
+
+      <section class="panel">
+        <h2>Real AI Agent</h2>
+          <label>输入指令（自然语言）</label>
+          <textarea id="agentPrompt" rows="4">Book a meeting for Alice tomorrow at 14:30, email alice@example.com.</textarea>
+          <button id="runAgentBtn">运行 agent</button>
+          <button id="listToolsBtn" style="margin-top: 8px;">显示 discoverTools() 结果</button>
+          <div class="row" style="margin-top: 10px;">
+            <label>Agent 配置（BYOK，必填）</label>
+            <input id="llmEndpoint" type="text" placeholder="https://api.openai.com/v1/chat/completions" />
+            <input id="llmModel" type="text" placeholder="例如: gpt-4o-mini" value="gpt-4o-mini" />
+            <input id="llmApiKey" type="password" placeholder="LLM API Key（不会存到磁盘）" />
+            <button id="clearConfigBtn" type="button">清除本地配置</button>
+            <span class="sub">BYOK：真实 LLM 负责选择工具和参数，endpoint、model、API key 会保存到此浏览器的 localStorage。</span>
+          </div>
+
+          <div style="margin-top: 12px;">
+            <div class="status" id="agentStatus">Agent 状态：空闲</div>
+            <div id="agentToolUsed"></div>
+          </div>
+          <div class="agent-log">
+            <pre id="agentLog"></pre>
+          </div>
+
+          <div style="margin-top: 8px;">
+            <span class="chip">可用工具：bookSlot</span>
+            <span class="chip">可用工具：getAvailability</span>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <script>
+      const toolCards = document.getElementById("toolPanel");
+      const pageLog = document.getElementById("pageLog");
+      const agentLog = document.getElementById("agentLog");
+      const agentStatus = document.getElementById("agentStatus");
+      const agentToolUsed = document.getElementById("agentToolUsed");
+      const promptInput = document.getElementById("agentPrompt");
+      const runAgentBtn = document.getElementById("runAgentBtn");
+      const listToolsBtn = document.getElementById("listToolsBtn");
+      const llmEndpointInput = document.getElementById("llmEndpoint");
+      const llmModelInput = document.getElementById("llmModel");
+      const llmApiKeyInput = document.getElementById("llmApiKey");
+      const clearConfigBtn = document.getElementById("clearConfigBtn");
+
+      const config = {
+        endpoint: "https://api.openai.com/v1/chat/completions",
+        model: "gpt-4o-mini",
+        storageKey: "webmcp-agent-demo-config"
+      };
+
+      const state = {
+        bookings: [],
+        nextId: 1,
+        registeredTools: new Map()
+      };
+
+      function log(container, text, cls = "") {
+        const line = `[${new Date().toLocaleTimeString()}] ${text}`;
+        container.textContent += (container.textContent ? "\n" : "") + line;
+        container.scrollTop = container.scrollHeight;
+        if (cls) {
+          const span = document.createElement("span");
+          span.className = cls;
+          span.textContent = line;
+          container.appendChild(document.createElement("br"));
+          container.appendChild(span);
+        }
+      }
+
+      function loadAgentConfig() {
+        let saved = {};
+        try {
+          saved = JSON.parse(localStorage.getItem(config.storageKey) || "{}");
+        } catch {
+          saved = {};
+        }
+
+        llmEndpointInput.value = saved.endpoint || config.endpoint;
+        llmModelInput.value = saved.model || config.model;
+        llmApiKeyInput.value = saved.apiKey || "";
+      }
+
+      function saveAgentConfig() {
+        const value = {
+          endpoint: (llmEndpointInput.value || config.endpoint).trim(),
+          model: (llmModelInput.value || config.model).trim(),
+          apiKey: (llmApiKeyInput.value || "").trim()
+        };
+        localStorage.setItem(config.storageKey, JSON.stringify(value));
+      }
+
+      function clearAgentConfig() {
+        localStorage.removeItem(config.storageKey);
+        llmEndpointInput.value = config.endpoint;
+        llmModelInput.value = config.model;
+        llmApiKeyInput.value = "";
+        log(agentLog, "Local BYOK config cleared.");
+      }
+
+      function getWebMCPContext() {
+        const ctx = window.document?.modelContext || window.navigator?.modelContext;
+        if (!ctx) {
+          throw new Error(
+            "No native WebMCP context found. Use Chrome with WebMCP enabled and load this page via http(s), not file://."
+          );
+        }
+        if (typeof ctx.registerTool !== "function") {
+          throw new Error("WebMCP context exists but registerTool is not available in this browser version.");
+        }
+        return ctx;
+      }
+
+      function renderToolList() {
+        const tools = [
+          {
+            name: "bookSlot",
+            title: "Book a consultation",
+            description: "Create a booking with date/time and user info"
+          },
+          {
+            name: "getAvailability",
+            title: "Get availability",
+            description: "Check available time slots for a given date range"
+          }
+        ];
+        toolCards.innerHTML = "";
+        for (const t of tools) {
+          const el = document.createElement("div");
+          el.className = "tool-card";
+          el.innerHTML = `<b>${t.title}</b><div class="sub">${t.description}</div><div class="status ok">${t.name}</div>`;
+          toolCards.appendChild(el);
+        }
+      }
+
+      function parseDateInput(input) {
+        // Fallback for phrase "tomorrow"
+        const d = new Date();
+        if (/tomorrow/i.test(input)) {
+          const tomorrow = new Date(d);
+          tomorrow.setDate(d.getDate() + 1);
+          return tomorrow.toISOString().slice(0, 10);
+        }
+        const m = input.match(/(\d{4}-\d{2}-\d{2})/);
+        return m ? m[1] : d.toISOString().slice(0, 10);
+      }
+
+      function parseTimeFromText(input) {
+        const m = input.match(/(\d{1,2}:\d{2})/);
+        if (m) return m[1].padStart(5, "0");
+        const hm = input.match(/(\d{1,2})\s*(am|pm)/i);
+        if (hm) {
+          let hour = Number(hm[1]);
+          const suffix = hm[2].toLowerCase();
+          if (suffix === "pm" && hour !== 12) hour += 12;
+          if (suffix === "am" && hour === 12) hour = 0;
+          return `${String(hour).padStart(2, "0")}:00`;
+        }
+        return "09:00";
+      }
+
+      function parseName(input) {
+        const m = input.match(
+          /(?:for|name\s*is)\s+([A-Za-z\u4e00-\u9fff][A-Za-z0-9\u4e00-\u9fff _.'-]{1,30}?)(?=(?:\s+(?:at|email|tomorrow|today|next|on|for)|$|[,.]))/i
+        );
+        if (m) return m[1].trim();
+        const emailMatch = input.match(/([a-zA-Z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i);
+        return emailMatch ? "Guest" : "Guest";
+      }
+
+      function parseEmail(input) {
+        const m = input.match(/([a-zA-Z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i);
+        return m ? m[1] : "guest@example.com";
+      }
+
+      function chooseToolFromPrompt(prompt) {
+        const lower = (prompt || "").toLowerCase();
+        if (lower.includes("available") || lower.includes("slots") || lower.includes("availability")) {
+          return "getAvailability";
+        }
+        return "bookSlot";
+      }
+
+      function normalizeSchema(schema) {
+        if (!schema) {
+          return { type: "object", properties: {}, additionalProperties: true };
+        }
+        if (typeof schema === "string") {
+          return tryParseJSON(schema) || { type: "object", properties: {}, additionalProperties: true };
+        }
+        return schema;
+      }
+
+      function toOpenAiFunctions(tools) {
+        return tools
+          .filter((t) => t && t.name)
+          .map((tool) => ({
+            type: "function",
+            function: {
+              name: tool.name,
+              description: `${tool.title || tool.name}: ${tool.description || ""}`.trim(),
+              parameters: normalizeSchema(tool.inputSchema) || {
+                type: "object",
+                properties: {},
+                additionalProperties: true
+              }
+            }
+          }));
+      }
+
+      function buildAgentInstructions(tools, prompt) {
+        const today = new Date().toISOString().slice(0, 10);
+        return `You are a browser agent. Available tools: ${tools.map((t) => t.name).join(", ")}.
+Today's date is ${today}. Resolve relative dates such as "today" and "tomorrow" from this date.
+For this user request: "${prompt}", reply with JSON only: {"tool":"<toolName>","arguments":{...}}.
+Use tool input keys that match the tool schema exactly.`;
+      }
+
+      function tryParseJSON(text) {
+        try {
+          return JSON.parse(text);
+        } catch {
+          const m = text && text.match(/\{[\s\S]*\}/);
+          if (!m) return null;
+          try {
+            return JSON.parse(m[0]);
+          } catch {
+            return null;
+          }
+        }
+      }
+
+      async function planWithLLM(prompt, tools) {
+        const endpoint = (llmEndpointInput.value || "").trim();
+        const model = (llmModelInput.value || "gpt-4o-mini").trim();
+        const apiKey = (llmApiKeyInput.value || "").trim();
+
+        if (!endpoint || !apiKey) {
+          throw new Error("Missing BYOK endpoint or API key.");
+        }
+
+        const body = {
+          model,
+          messages: [
+            { role: "system", content: buildAgentInstructions(tools, prompt) },
+            { role: "user", content: prompt }
+          ],
+          tools: toOpenAiFunctions(tools),
+          tool_choice: "required",
+          temperature: 0
+        };
+
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`
+          },
+          body: JSON.stringify(body)
+        });
+
+        if (!response.ok) {
+          const err = await response.text();
+          throw new Error(`LLM call failed: ${response.status} ${response.statusText} ${err}`);
+        }
+
+        const data = await response.json();
+        const message = data?.choices?.[0]?.message;
+        const toolCall = message?.tool_calls?.[0];
+        if (toolCall?.function?.arguments) {
+          return {
+            tool: toolCall.function.name,
+            arguments: tryParseJSON(toolCall.function.arguments) || {}
+          };
+        }
+
+        const jsonFallback = tryParseJSON(message?.content || "");
+        if (jsonFallback && jsonFallback.tool) {
+          return jsonFallback;
+        }
+
+        throw new Error("LLM response does not contain a valid tool call payload.");
+      }
+
+      async function executeToolByName(toolName, args) {
+        const mcp = getWebMCPContext();
+        const tools = await mcp.getTools();
+        const tool = Array.isArray(tools) ? tools.find((t) => t.name === toolName) : null;
+        if (!tool) throw new Error(`Tool "${toolName}" not found`);
+
+        return mcp.executeTool(tool, JSON.stringify(args));
+      }
+
+      async function registerTools() {
+        const mcp = getWebMCPContext();
+
+        const bookSlotTool = await mcp.registerTool({
+          name: "bookSlot",
+          title: "Book a consultation",
+          description: "Create a consultation booking",
+          inputSchema: {
+            type: "object",
+            required: ["date", "time", "name", "email"],
+            properties: {
+              date: { type: "string", description: "Booking date YYYY-MM-DD" },
+              time: { type: "string", description: "Time HH:mm" },
+              name: { type: "string", description: "Full name" },
+              email: { type: "string", description: "Email for confirmation" }
+            }
+          },
+          annotations: { readOnlyHint: false },
+          execute: async (input) => {
+            const booking = {
+              id: state.nextId++,
+              ...input
+            };
+            state.bookings.push(booking);
+            const msg = `Booked successfully: #${booking.id} ${booking.name} -> ${booking.date} ${booking.time}`;
+            log(pageLog, `bookSlot executed: ${msg}`, "ok");
+            return {
+              content: [{
+                type: "text",
+                text: JSON.stringify(booking, null, 2)
+              }]
+            };
+          }
+        });
+        state.registeredTools.set("bookSlot", bookSlotTool);
+
+        const getAvailabilityTool = await mcp.registerTool({
+          name: "getAvailability",
+          title: "Get availability",
+          description: "List available times for a date",
+          inputSchema: {
+            type: "object",
+            required: ["date"],
+            properties: {
+              date: { type: "string", description: "Date YYYY-MM-DD" }
+            }
+          },
+          annotations: { readOnlyHint: true },
+          execute: async ({ date }) => {
+            const taken = new Set(state.bookings.filter((b) => b.date === date).map((b) => b.time));
+            const all = ["09:00", "10:30", "14:00", "14:30", "15:00", "16:30"];
+            const available = all.filter((t) => !taken.has(t));
+            log(pageLog, `getAvailability executed for ${date}`, "ok");
+            return { content: [{ type: "text", text: JSON.stringify(available, null, 2) }] };
+          }
+        });
+        state.registeredTools.set("getAvailability", getAvailabilityTool);
+
+        log(pageLog, "Tools registered via document.modelContext", "ok");
+      }
+
+      async function runRealAgent() {
+        agentLog.textContent = "";
+        agentStatus.textContent = "Agent 状态：处理中...";
+        agentToolUsed.textContent = "";
+        const prompt = promptInput.value.trim();
+        let mcp;
+        try {
+          mcp = getWebMCPContext();
+        } catch (err) {
+          log(agentLog, `Error: ${err.message}`);
+          agentStatus.textContent = "Agent 状态：环境不支持";
+          agentStatus.className = "status bad";
+          return;
+        }
+        const tools = await mcp.getTools();
+        log(agentLog, `Discovered tools: ${tools.map((t) => t.name).join(", ")}`);
+
+        let planned;
+        try {
+          planned = await planWithLLM(prompt, tools);
+        } catch (err) {
+          log(agentLog, `Real agent failed before tool execution: ${err.message}`, "bad");
+          agentStatus.textContent = "Agent 状态：失败";
+          agentStatus.className = "status bad";
+          return;
+        }
+        const toolName = planned.tool;
+        const args = planned.arguments || {};
+
+        log(agentLog, `Agent LLM plan: ${JSON.stringify(planned)}`);
+
+        log(agentLog, `Agent decided tool=${toolName}, args=${JSON.stringify(args)}`);
+        agentToolUsed.innerHTML = `<span class="status ok">Agent 调用：${toolName}</span>`;
+        runAgentBtn.disabled = true;
+
+        try {
+          const result = await executeToolByName(toolName, args);
+          log(agentLog, `executeTool success: ${JSON.stringify(result, null, 2)}`);
+          agentStatus.textContent = "Agent 状态：完成";
+          agentStatus.className = "status ok";
+          log(agentLog, "页面已执行工具，未使用 DOM 点选流程。");
+        } catch (err) {
+          log(agentLog, `executeTool failed: ${err.message}`, "bad");
+          agentStatus.textContent = "Agent 状态：失败";
+          agentStatus.className = "status bad";
+        } finally {
+          runAgentBtn.disabled = false;
+        }
+      }
+
+      async function showTools() {
+        let mcp;
+        try {
+          mcp = getWebMCPContext();
+        } catch (err) {
+          log(agentLog, `Error: ${err.message}`, "bad");
+          return;
+        }
+        const tools = await mcp.getTools();
+        log(agentLog, `discoverTools() -> ${tools.length} tools`);
+        tools.forEach((tool) => {
+          log(agentLog, `  - ${tool.name}: ${tool.description}`);
+        });
+      }
+
+      async function manualBook() {
+        const name = document.getElementById("nameInput").value || "Alice";
+        const date = document.getElementById("dateInput").value || new Date().toISOString().slice(0, 10);
+        const time = document.getElementById("timeInput").value || "10:00";
+        const email = document.getElementById("emailInput").value || "alice@example.com";
+        let mcp;
+        try {
+          mcp = getWebMCPContext();
+        } catch (err) {
+          log(pageLog, `Error: ${err.message}`, "bad");
+          return;
+        }
+        await executeToolByName("bookSlot", { name, date, time, email });
+      }
+
+      runAgentBtn.addEventListener("click", runRealAgent);
+      listToolsBtn.addEventListener("click", showTools);
+      llmEndpointInput.addEventListener("input", saveAgentConfig);
+      llmModelInput.addEventListener("input", saveAgentConfig);
+      llmApiKeyInput.addEventListener("input", saveAgentConfig);
+      clearConfigBtn.addEventListener("click", clearAgentConfig);
+
+      async function bootDemo() {
+        loadAgentConfig();
+        renderToolList();
+        try {
+          await registerTools();
+        } catch (e) {
+          log(pageLog, `WebMCP 初始化失败：${e.message}`, "bad");
+          agentStatus.textContent = "Agent 状态：尚未连接真实 WebMCP";
+          agentStatus.className = "status bad";
+          runAgentBtn.disabled = true;
+          listToolsBtn.disabled = true;
+          return;
+        }
+      }
+
+      bootDemo();
+    </script>
+  </body>
+</html>
