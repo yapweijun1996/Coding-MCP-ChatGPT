@@ -290,6 +290,23 @@ Admin endpoints:
 
 See `docs/project-management.md` for details.
 
+## Research Delivery MCP
+
+ChatGPT should use its own web search for discovery and reasoning. This MCP provides the persistent research workspace: source records, notes, evidence links, agent-authored `report.md` / `report.html`, validation, and publishing.
+
+Key research tools:
+
+- `create_research_project`
+- `add_research_source`
+- `list_research_sources`
+- `add_research_note`
+- `record_research_evidence`
+- `get_research_manifest`
+- `write_research_report`
+- `publish_research_report`
+
+Research projects are backed by normal Project storage under `.projects/{projectId}/files/` and publish through `/share/{projectId}/report.html`. See `docs/research-workflow.md` for the recommended agent workflow and validation rules.
+
 ## Tool registry architecture
 
 MCP tools are registered through `src/mcp/registry.ts`. Each tool module owns its definition, validation schema, handler, and `enabledByDefault` flag. `src/mcp/tools.ts` remains as a compatibility re-export during the transition.
@@ -302,6 +319,15 @@ Some tools exist but are disabled by default and must be temporarily enabled fro
 
 - `delete_project`
 - `create_share`
+- `check_url`
+- `open_local_server`
+- `stop_local_server`
+- `open_local_server_and_check`
+- `run_lint`
+- `run_format_check`
+- `run_format_write`
+- `diagnostic_bundle`
+- `diagnostic_bundle_full`
 
 For project deliverables, ChatGPT should use `create_project`, `write_project_file`, and `publish_project`. Do not use legacy `create_share` for project outcomes because it is not restart-safe.
 
@@ -313,7 +339,15 @@ npm run check:mcp
 
 ## Command tool defaults
 
-Stable command and browser-inspection helpers are enabled by default:
+Stable command and browser-inspection helpers enabled by default:
+
+- `run_command`
+- `run_typecheck`
+- `run_tests`
+- `run_build`
+- `inspect_webpage`
+
+The following command and network/process helpers are disabled by default and must be enabled from Admin before use:
 
 - `run_lint`
 - `run_format_check`
@@ -324,6 +358,5 @@ Stable command and browser-inspection helpers are enabled by default:
 - `open_local_server`
 - `stop_local_server`
 - `open_local_server_and_check`
-- `inspect_webpage`
 
 `run_format_write` is mutating and should only be used when you intentionally want ChatGPT to rewrite repository files through a formatter.

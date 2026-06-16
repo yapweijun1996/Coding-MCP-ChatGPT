@@ -38,6 +38,7 @@ import {
   readProjectFile,
   setProjectStatus
 } from "./projects/store.js";
+import { getResearchSummary } from "./research/store.js";
 import { countShares, readShareArtifact } from "./share/store.js";
 import { isToolEnabled, listToolStates, setToolEnabled } from "./tool-state.js";
 
@@ -333,6 +334,7 @@ app.get("/admin/projects/:projectId", async (req, res) => {
     }
 
     const manifest = await getProjectManifest(projectRoot, req.params.projectId);
+    const researchSummary = await getResearchSummary(projectRoot, req.params.projectId);
 
     res.type("html").send(renderProjectPage({
       publicBaseUrl,
@@ -340,6 +342,7 @@ app.get("/admin/projects/:projectId", async (req, res) => {
       project: project.metadata,
       files: project.files,
       manifest,
+      researchSummary,
       selectedPath,
       selectedContent,
       error

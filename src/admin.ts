@@ -1,6 +1,7 @@
 import type { ActivityEvent } from "./activity.js";
 import type { OAuthClientStatus } from "./oauth.js";
 import type { ProjectFileInfo, ProjectManifest, ProjectMetadata, ProjectStatus, ProjectSummary, ProjectValidationResult } from "./projects/store.js";
+import type { ResearchReportStatus } from "./research/store.js";
 
 export type PublicShareLocale = "en" | "zh";
 
@@ -32,6 +33,12 @@ export interface ProjectPageData {
   project: ProjectMetadata;
   files: ProjectFileInfo[];
   manifest: ProjectManifest;
+  researchSummary?: {
+    sourceCount: number;
+    usedSourceCount: number;
+    evidenceCount: number;
+    report: ResearchReportStatus;
+  };
   selectedPath?: string;
   selectedContent?: string;
   error?: string;
@@ -417,6 +424,23 @@ export function renderProjectPage(data: ProjectPageData): string {
   const manifestJson = JSON.stringify(data.manifest, null, 2);
   const validationJson = data.manifest.lastValidation ? JSON.stringify(data.manifest.lastValidation, null, 2) : "No validation has been run yet.";
   const inspectionReportUrl = data.manifest.lastValidation?.browserInspection?.reportUrl;
+  const researchSummary = data.researchSummary
+    ? `<section>
+      <h2>Research</h2>
+      <div class="stats">
+        <div class="metric"><strong>${escapeHtml(data.researchSummary.sourceCount)}</strong><span>Sources</span></div>
+        <div class="metric"><strong>${escapeHtml(data.researchSummary.usedSourceCount)}</strong><span>Used sources</span></div>
+        <div class="metric"><strong>${escapeHtml(data.researchSummary.evidenceCount)}</strong><span>Evidence items</span></div>
+        <div class="metric"><strong>${data.researchSummary.report.markdownExists ? "yes" : "no"}</strong><span>report.md</span></div>
+        <div class="metric"><strong>${data.researchSummary.report.htmlExists ? "yes" : "no"}</strong><span>report.html</span></div>
+      </div>
+      <div class="actions">
+        <a class="button secondary" href="${escapeHtml(withToken(`/admin/projects/${data.project.id}?path=report.md`))}">Open report.md</a>
+        <a class="button secondary" href="${escapeHtml(withToken(`/admin/projects/${data.project.id}?path=report.html`))}">Open report.html</a>
+        <a class="button secondary" href="${escapeHtml(withToken(`/admin/projects/${data.project.id}?path=research/research.json`))}">Open research.json</a>
+      </div>
+    </section>`
+    : "";
   const historyRows = data.manifest.taskHistory.map((event) => `
     <tr>
       <td>${escapeHtml(event.time)}</td>
@@ -454,6 +478,7 @@ export function renderProjectPage(data: ProjectPageData): string {
       <h2>Manifest</h2>
       <pre class="json-view">${escapeHtml(manifestJson)}</pre>
     </section>
+    ${researchSummary}
     <section>
       <h2>Last Validation</h2>
       ${inspectionReportUrl ? `<div class="empty"><a href="${escapeHtml(inspectionReportUrl)}" target="_blank" rel="noreferrer">Open browser inspection report</a></div>` : ""}

@@ -13,6 +13,7 @@ The MCP server uses a single source of truth registry for tool metadata, handler
 
 - `src/mcp/tools/preview.ts`: `ping`, `create_preview`.
 - `src/mcp/tools/project.ts`: persistent Project CRUD, manifest, validation, and publish tools.
+- `src/mcp/tools/research.ts`: research source, evidence, notes, report, and publish workflow tools.
 - `src/mcp/tools/share.ts`: legacy standalone HTML share tool, disabled by default.
 - `src/mcp/tools/web-rebuild.ts`: webpage capture, analysis, and static rebuild tools backed by Playwright and Project publish.
 - `src/mcp/tools/workspace.ts`: workspace file tools delegated to legacy implementation.
@@ -25,6 +26,7 @@ Enabled by default:
 
 - Connectivity and preview: `ping`, `create_preview`.
 - Project delivery: `deliver_static_project`, `create_project`, `list_projects`, `get_project`, `get_project_manifest`, `get_project_activity`, `write_project_file`, `read_project_file`, `delete_project_file`, `validate_project`, `publish_project`, `publish_and_report`.
+- Research delivery: `create_research_project`, `add_research_source`, `list_research_sources`, `add_research_note`, `record_research_evidence`, `get_research_manifest`, `write_research_report`, `publish_research_report`.
 - Browser validation: `inspect_webpage`.
 - Webpage rebuild workflow: `capture_webpage`, `analyze_webpage_capture`, `generate_improved_static_page`.
 - Stable command checks backed by current package scripts: `run_command`, `run_typecheck`, `run_tests`, `run_build`.
@@ -79,3 +81,18 @@ For authorized webpage improvement tasks, agents should use:
 This workflow does not copy original CSS/JS or bypass website permissions. It uses captured structure and text as source evidence for a rebuilt static page.
 
 See `docs/agent-delivery-reliability.md` for the full delivery runbook, validation gates, structured result contract, and smoke checklist.
+
+## Research delivery workflow
+
+For long research reports, ChatGPT should use its own web search and use this MCP to persist and publish the work:
+
+1. `create_research_project`
+2. `add_research_source` for each selected source.
+3. Optional `inspect_webpage`, then `record_research_evidence` for key evidence.
+4. `add_research_note` for findings, contradictions, open questions, and methodology.
+5. `write_research_report` with agent-authored `report.md` and `report.html`.
+6. `publish_research_report`
+
+`publish_research_report` blocks publishing unless the research manifest contains sources and report files, and `report.html` references at least one source id or source URL.
+
+See `docs/research-workflow.md` for the file layout and validation contract.

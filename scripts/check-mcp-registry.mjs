@@ -24,7 +24,25 @@ const criticalTools = [
   "inspect_webpage",
   "capture_webpage",
   "analyze_webpage_capture",
-  "generate_improved_static_page"
+  "generate_improved_static_page",
+  "create_research_project",
+  "add_research_source",
+  "list_research_sources",
+  "add_research_note",
+  "record_research_evidence",
+  "get_research_manifest",
+  "write_research_report",
+  "publish_research_report"
+];
+const defaultEnabledTools = [
+  "create_research_project",
+  "add_research_source",
+  "list_research_sources",
+  "add_research_note",
+  "record_research_evidence",
+  "get_research_manifest",
+  "write_research_report",
+  "publish_research_report"
 ];
 const defaultDisabledTools = [
   "delete_project",
@@ -72,6 +90,15 @@ for (const toolName of defaultDisabledTools) {
   }
 }
 
+for (const toolName of defaultEnabledTools) {
+  const tool = toolRegistry.find((candidate) => candidate.definition.name === toolName);
+  if (!tool) {
+    errors.push(`Missing expected default-enabled tool: ${toolName}`);
+  } else if (!tool.enabledByDefault) {
+    errors.push(`Tool must be enabled by default: ${toolName}`);
+  }
+}
+
 for (const [toolName, scriptName] of enabledToolRequiredScripts.entries()) {
   const tool = toolRegistry.find((candidate) => candidate.definition.name === toolName);
   if (tool?.enabledByDefault && typeof packageScripts[scriptName] !== "string") {
@@ -82,6 +109,7 @@ for (const [toolName, scriptName] of enabledToolRequiredScripts.entries()) {
 const summary = {
   toolCount: names.length,
   duplicateCount: duplicateNames.length,
+  defaultEnabledTools,
   defaultDisabledTools,
   criticalTools
 };

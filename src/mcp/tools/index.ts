@@ -3,6 +3,7 @@ import { gitTools } from "./git.js";
 import { presentationTools } from "./presentation.js";
 import { previewTools } from "./preview.js";
 import { projectTools } from "./project.js";
+import { researchTools } from "./research.js";
 import { shareTools } from "./share.js";
 import { webInspectTools } from "./web-inspect.js";
 import { webRebuildTools } from "./web-rebuild.js";
@@ -18,5 +19,6 @@ export const allToolModules: ToolModule[] = [
   ...presentationTools,
   ...gitTools,
   ...projectTools,
+  ...researchTools,
   ...shareTools
 ];
