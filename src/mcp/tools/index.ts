@@ -5,7 +5,11 @@ import { previewTools } from "./preview.js";
 import { projectTools } from "./project.js";
 import { researchTools } from "./research.js";
 import { skillTools } from "./skills.js";
+import { browserObservabilityTools } from "./browser-observability.js";
 import { browserTools } from "./browser.js";
+import { codeIntelligenceTools } from "./code-intelligence.js";
+import { docsKnowledgeTools } from "./docs-knowledge.js";
+import { integrationReadonlyTools } from "./integration-readonly.js";
 import { shareTools } from "./share.js";
 import { webInspectTools } from "./web-inspect.js";
 import { webRebuildTools } from "./web-rebuild.js";
@@ -18,6 +22,10 @@ export const allToolModules: ToolModule[] = [
   ...workspaceTools,
   ...commandTools,
   ...browserTools,
+  ...browserObservabilityTools,
+  ...codeIntelligenceTools,
+  ...docsKnowledgeTools,
+  ...integrationReadonlyTools,
   ...webInspectTools,
   ...webRebuildTools,
   ...presentationTools,

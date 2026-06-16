@@ -16,6 +16,7 @@ The MCP server uses a single source of truth registry for tool metadata, handler
 - `src/mcp/tools/preview.ts`: `ping`, `create_preview`.
 - `src/mcp/tools/skills.ts`: `list_agent_skills`, `get_agent_skill`.
 - `src/mcp/tools/project.ts`: persistent Project CRUD, manifest, validation, and publish tools.
+- `src/mcp/tools/code-intelligence.ts`: repo summaries, test failure digests, changed file context, and advisory refactor hints.
 - `src/mcp/tools/research.ts`: research source, evidence, notes, report, and publish workflow tools.
 - `src/mcp/tools/share.ts`: legacy standalone HTML share tool, disabled by default.
 - `src/mcp/tools/web-rebuild.ts`: webpage capture, analysis, and static rebuild tools backed by Playwright and Project publish.
@@ -37,6 +38,7 @@ Enabled by default:
 - Connectivity, preview, and skill protocol lookup: `ping`, `create_preview`, `list_agent_skills`, `get_agent_skill`.
 - Project delivery: `deliver_static_project`, `create_project`, `list_projects`, `get_project`, `get_project_manifest`, `get_project_activity`, `write_project_file`, `read_project_file`, `delete_project_file`, `validate_project`, `publish_project`, `publish_and_report`.
 - Research delivery: `create_research_project`, `add_research_source`, `list_research_sources`, `add_research_note`, `record_research_evidence`, `get_research_manifest`, `write_research_report`, `publish_research_report`.
+- Code intelligence: `refactor_hints` for advisory oversized-file and mixed-responsibility refactor signals.
 - Browser validation: `inspect_webpage`.
 - Webpage rebuild workflow: `capture_webpage`, `analyze_webpage_capture`, `generate_improved_static_page`.
 - Stable command checks backed by current package scripts: `run_command`, `run_typecheck`, `run_tests`, `run_build`.
@@ -80,6 +82,12 @@ ChatGPT and other coding agents should use the persistent Project workflow for d
 3. Use the lower-level `create_project` / `write_project_file` / `validate_project` / `publish_and_report` flow only for repair or incremental edits.
 
 `deliver_static_project` is the preferred delivery tool because it writes all files, validates local references, temporarily publishes, runs browser validation through Playwright, blocks on serious runtime/layout failures, and returns a structured report with the public `publishedUrl`.
+
+## Refactor hint workflow
+
+For code review or modernization tasks, agents can call `refactor_hints` before proposing broad cleanup. The tool scans workspace files and returns advisory candidates when a file exceeds the configured line or byte threshold, or when it shows mixed-responsibility signals.
+
+Default thresholds are 1000 lines or 40KB. The result is intentionally advisory: agents should report the candidate path, reasons, proposed split direction, and smallest validation check before editing. The tool must not be treated as permission to refactor automatically.
 
 ## Webpage capture and rebuild workflow
 

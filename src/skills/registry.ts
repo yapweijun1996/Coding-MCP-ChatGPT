@@ -52,13 +52,15 @@ export const skillRegistry: readonly SkillDefinition[] = [
       "git_show_ref",
       "git_for_each_ref",
       "git_cat_file",
-      "git_check_ref_format"
+      "git_check_ref_format",
+      "refactor_hints"
     ],
     protocolMarkdown: `# Core Agent Basics
 
 Use this skill to discover the available workspace/project context before taking larger actions.
 
 - Prefer read-only project and workspace inspection first.
+- Use \`refactor_hints\` when the agent needs advisory signals for oversized or mixed-responsibility files before proposing refactor work.
 - Use \`list_agent_skills\` and \`get_agent_skill\` when the agent needs to know which protocols are available.
 - Keep destructive file, process, and git actions out of this baseline path.`
   },
@@ -96,6 +98,7 @@ Use this skill to discover the available workspace/project context before taking
       "run_typecheck",
       "run_tests",
       "run_build",
+      "refactor_hints",
       "git_status",
       "git_diff",
       "git_diff_staged",
@@ -112,6 +115,14 @@ Use this skill to discover the available workspace/project context before taking
       "git_fetch",
       "git_remote",
       "git_revert",
+      "repo_summary",
+      "test_failure_digest",
+      "changed_files_context",
+      "search_project_docs",
+      "extract_project_conventions",
+      "write_agent_note",
+      "api_healthcheck",
+      "openapi_summary",
       "create_html_deck",
       "create_pptx_deck",
       "create_immersive_page",
@@ -123,6 +134,7 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
 
 - Prefer \`deliver_static_project\` for complete static HTML/CSS/JS deliverables.
 - For incremental work, create or inspect a project, write files, validate, then publish.
+- Use \`refactor_hints\` before broad cleanup to identify oversized modules, mixed responsibilities, and reviewable refactor candidates.
 - Run typecheck/tests/build when the user asks for verification or when the change has shared behavior risk.
 - Keep changes scoped to the requested project and preserve unrelated workspace state.`
   },
@@ -146,6 +158,16 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "run_build",
       "run_lint",
       "run_format_check",
+      "repo_summary",
+      "test_failure_digest",
+      "changed_files_context",
+      "browser_dom_snapshot",
+      "browser_network_trace",
+      "browser_console_log",
+      "browser_storage_snapshot",
+      "run_a11y_audit_detailed",
+      "run_visual_regression_snapshot",
+      "run_smoke_flow",
       "diagnostic_bundle",
       "diagnostic_bundle_full",
       "check_url",
@@ -220,6 +242,13 @@ Use this skill to inspect an existing webpage and rebuild it as a validated stat
     status: "stable",
     riskLevel: "medium",
     toolNames: [
+      "browser_dom_snapshot",
+      "browser_network_trace",
+      "browser_console_log",
+      "browser_storage_snapshot",
+      "run_a11y_audit_detailed",
+      "run_visual_regression_snapshot",
+      "run_smoke_flow",
       "inspect_webpage",
       "inspect_webpage_plus",
       "audit_accessibility",
@@ -235,6 +264,89 @@ Use this skill to validate runtime, layout, accessibility, and interaction behav
 - Check console errors, page errors, failed requests, and horizontal overflow.
 - Use accessibility and Lighthouse audits when the request needs quality evidence.
 - Report blocking errors separately from warnings.`
+  },
+  {
+    id: "agent-browser-observability",
+    label: "Agent Browser Observability",
+    category: "quality",
+    description: "Collect browser runtime snapshots, traces, console, and storage data for scripted diagnostics.",
+    enabledByDefault: false,
+    status: "stable",
+    riskLevel: "medium",
+    toolNames: [
+      "browser_dom_snapshot",
+      "browser_network_trace",
+      "browser_console_log",
+      "browser_storage_snapshot"
+    ],
+    protocolMarkdown: `# Agent Browser Observability
+
+Use this skill when the agent needs deterministic evidence of DOM, network, console, and storage behavior.
+
+- Prefer browser session-based observation before DOM mutation.
+- Use traces for flaky request/page failures and console errors.
+- Treat findings as evidence and keep fix proposals scoped.`
+  },
+  {
+    id: "agent-code-intelligence",
+    label: "Agent Code Intelligence",
+    category: "development",
+    description: "Summarize project structure and extract actionable signals from command outputs, diffs, and failure traces.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "repo_summary",
+      "test_failure_digest",
+      "changed_files_context"
+    ],
+    protocolMarkdown: `# Agent Code Intelligence
+
+Use this skill for repository-level diagnostics before editing.
+
+- Start with repo_summary and changed_files_context.
+- Run test_failure_digest to get high-signal failure evidence.
+- Use concrete command outputs for the next repair decision.`
+  },
+  {
+    id: "agent-docs-knowledge",
+    label: "Agent Docs and Knowledge",
+    category: "knowledge",
+    description: "Search and extract conventions from project docs, then write non-invasive agent notes.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "search_project_docs",
+      "extract_project_conventions",
+      "write_agent_note"
+    ],
+    protocolMarkdown: `# Agent Docs and Knowledge
+
+Use this skill when the agent needs project conventions before changing behavior.
+
+- Search docs for coding style, testing, and deployment instructions.
+- Keep agent notes in artifact by default.
+- Use research target only when explicitly requested.`
+  },
+  {
+    id: "agent-integration-readonly",
+    label: "Agent Integration Readonly",
+    category: "integration",
+    description: "Perform safe readonly external checks for APIs and API specifications.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "api_healthcheck",
+      "openapi_summary"
+    ],
+    protocolMarkdown: `# Agent Integration Readonly
+
+Use this skill for safe external API checks and API contract summarization.
+
+- Run checks only on allowlisted hosts.
+- Treat API summaries as input to endpoint coverage planning.`
   },
   {
     id: "high-risk",

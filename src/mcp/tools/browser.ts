@@ -5,13 +5,39 @@ import { makeShareUrl } from "../result.js";
 import type { Browser, Page } from "playwright";
 import type { ToolModule, ToolResult } from "../types.js";
 
-interface BrowserSession {
+export interface BrowserSession {
   id: string;
   browser: Browser;
   page: Page;
   step: number;
   startedAt: string;
   createdBy: string;
+  consoleEvents: Array<{
+    level: string;
+    text: string;
+    url?: string;
+    line?: number;
+    column?: number;
+  }>;
+  pageErrors: Array<{ message: string; stack?: string }>;
+}
+
+const MAX_SESSION_CONSOLE_LOGS = 400;
+
+function pushBounded<T>(array: T[], value: T, max: number): void {
+  array.push(value);
+  if (array.length > max) {
+    array.splice(0, array.length - max);
+  }
+}
+
+function normalizeConsoleSource(source?: { url?: string; lineNumber?: number; columnNumber?: number }): { url?: string; line?: number; column?: number } {
+  if (!source) return {};
+  return {
+    url: source.url,
+    line: source.lineNumber,
+    column: source.columnNumber
+  };
 }
 
 const browserSessions = new Map<string, BrowserSession>();
@@ -70,12 +96,26 @@ const closeBrowserSessionSchema = z.object({
   path: ["sessionId"]
 });
 
-function getSessionOrThrow(sessionId: string): BrowserSession {
+export function getSessionOrThrow(sessionId: string): BrowserSession {
   const session = browserSessions.get(sessionId);
   if (!session) {
     throw new Error(`Browser session not found: ${sessionId}`);
   }
   return session;
+}
+
+export async function createBrowserSessionSnapshot(session: BrowserSession): Promise<Record<string, unknown>> {
+  return {
+    sessionId: session.id,
+    step: session.step,
+    url: session.page.url(),
+    createdBy: session.createdBy,
+    startedAt: session.startedAt,
+    logs: {
+      console: [...session.consoleEvents],
+      pageErrors: [...session.pageErrors]
+    }
+  };
 }
 
 async function buildScreenshotArtifact(
@@ -166,7 +206,7 @@ export const browserTools: ToolModule[] = [
     },
     enabledByDefault: false,
     schema: openBrowserSessionSchema,
-    handler: async (input, ctx) => {
+  handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof openBrowserSessionSchema>;
       const id = randomUUID();
       const { chromium } = await import("playwright");
@@ -185,8 +225,24 @@ export const browserTools: ToolModule[] = [
         page,
         step: 0,
         startedAt: new Date().toISOString(),
-        createdBy: ctx.clientId
+        createdBy: ctx.clientId,
+        consoleEvents: [],
+        pageErrors: []
       };
+      page.on("console", (message) => {
+        const source = normalizeConsoleSource(message.location());
+        pushBounded(session.consoleEvents, {
+          level: message.type(),
+          text: message.text(),
+          ...source
+        }, MAX_SESSION_CONSOLE_LOGS);
+      });
+      page.on("pageerror", (error) => {
+        pushBounded(session.pageErrors, {
+          message: error.message,
+          stack: error.stack
+        }, MAX_SESSION_CONSOLE_LOGS);
+      });
       browserSessions.set(id, session);
 
       const logs = [
