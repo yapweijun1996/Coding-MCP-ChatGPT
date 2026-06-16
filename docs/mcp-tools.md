@@ -14,6 +14,7 @@ The MCP server uses a single source of truth registry for tool metadata, handler
 - `src/mcp/tools/preview.ts`: `ping`, `create_preview`.
 - `src/mcp/tools/project.ts`: persistent Project CRUD, manifest, validation, and publish tools.
 - `src/mcp/tools/share.ts`: legacy standalone HTML share tool, disabled by default.
+- `src/mcp/tools/web-rebuild.ts`: webpage capture, analysis, and static rebuild tools backed by Playwright and Project publish.
 - `src/mcp/tools/workspace.ts`: workspace file tools delegated to legacy implementation.
 - `src/mcp/tools/command.ts`: stable npm checks plus disabled high-risk diagnostics/server helpers.
 - `src/mcp/tools/git.ts`: git tools delegated to legacy implementation.
@@ -25,6 +26,7 @@ Enabled by default:
 - Connectivity and preview: `ping`, `create_preview`.
 - Project delivery: `deliver_static_project`, `create_project`, `list_projects`, `get_project`, `get_project_manifest`, `get_project_activity`, `write_project_file`, `read_project_file`, `delete_project_file`, `validate_project`, `publish_project`, `publish_and_report`.
 - Browser validation: `inspect_webpage`.
+- Webpage rebuild workflow: `capture_webpage`, `analyze_webpage_capture`, `generate_improved_static_page`.
 - Stable command checks backed by current package scripts: `run_command`, `run_typecheck`, `run_tests`, `run_build`.
 - Workspace and git tools delegated from the legacy implementation.
 
@@ -65,5 +67,15 @@ ChatGPT and other coding agents should use the persistent Project workflow for d
 3. Use the lower-level `create_project` / `write_project_file` / `validate_project` / `publish_and_report` flow only for repair or incremental edits.
 
 `deliver_static_project` is the preferred delivery tool because it writes all files, validates local references, temporarily publishes, runs browser validation through Playwright, blocks on serious runtime/layout failures, and returns a structured report with the public `publishedUrl`.
+
+## Webpage capture and rebuild workflow
+
+For authorized webpage improvement tasks, agents should use:
+
+1. `capture_webpage` to inspect one public HTTPS page or same-origin depth-1 links. The tool stores full capture JSON under `.captures/{captureId}.json` and returns a share report.
+2. `analyze_webpage_capture` to create `.captures/{analysisId}.analysis.json` with UX, accessibility, performance, SEO, and implementation findings.
+3. `generate_improved_static_page` to generate a static Project from the capture and analysis, validate it, publish it, and optionally run browser validation.
+
+This workflow does not copy original CSS/JS or bypass website permissions. It uses captured structure and text as source evidence for a rebuilt static page.
 
 See `docs/agent-delivery-reliability.md` for the full delivery runbook, validation gates, structured result contract, and smoke checklist.

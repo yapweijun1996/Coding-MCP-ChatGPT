@@ -21,7 +21,10 @@ const criticalTools = [
   "run_typecheck",
   "run_tests",
   "run_build",
-  "inspect_webpage"
+  "inspect_webpage",
+  "capture_webpage",
+  "analyze_webpage_capture",
+  "generate_improved_static_page"
 ];
 const defaultDisabledTools = [
   "delete_project",

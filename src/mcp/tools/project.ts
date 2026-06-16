@@ -1,8 +1,7 @@
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
 import path from "node:path";
 import { z } from "zod";
 import { createShareArtifact } from "../../share/store.js";
+import { assertSafePublicUrl } from "../../security/url.js";
 import {
   appendProjectTaskHistory,
   createProject,
@@ -128,61 +127,12 @@ function maxBytesForAssetPath(relativePath: string): number {
   return path.extname(relativePath).toLowerCase() === ".pptx" ? maxImportedPresentationBytes : maxImportedImageBytes;
 }
 
-function isBlockedIpv4(address: string): boolean {
-  const parts = address.split(".").map((part) => Number.parseInt(part, 10));
-  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part))) return true;
-  const [first, second] = parts;
-  return first === 0
-    || first === 10
-    || first === 127
-    || (first === 100 && second >= 64 && second <= 127)
-    || (first === 169 && second === 254)
-    || (first === 172 && second >= 16 && second <= 31)
-    || (first === 192 && second === 168)
-    || first >= 224;
-}
-
-function isBlockedIpv6(address: string): boolean {
-  const normalized = address.toLowerCase();
-  const mappedIpv4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(normalized);
-  if (mappedIpv4) return isBlockedIpv4(mappedIpv4[1]);
-  return normalized === "::"
-    || normalized === "::1"
-    || normalized.startsWith("fc")
-    || normalized.startsWith("fd")
-    || normalized.startsWith("fe80:")
-    || normalized.startsWith("::ffff:");
-}
-
-function isBlockedIpAddress(address: string): boolean {
-  const version = isIP(address);
-  if (version === 4) return isBlockedIpv4(address);
-  if (version === 6) return isBlockedIpv6(address);
-  return true;
-}
-
-async function assertSafeImportUrl(url: URL): Promise<void> {
-  if (url.protocol !== "https:") throw new Error("Only https:// asset imports are allowed.");
-  const hostname = url.hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
-  if (hostname === "localhost" || hostname.endsWith(".localhost")) throw new Error("Localhost asset imports are not allowed.");
-
-  if (isIP(hostname)) {
-    if (isBlockedIpAddress(hostname)) throw new Error("Private or reserved IP asset imports are not allowed.");
-    return;
-  }
-
-  const addresses = await lookup(hostname, { all: true, verbatim: true });
-  if (addresses.length === 0 || addresses.some((record) => isBlockedIpAddress(record.address))) {
-    throw new Error("Asset import URL resolves to a private or reserved IP address.");
-  }
-}
-
 async function fetchProjectAsset(url: string, relativePath: string): Promise<{ buffer: Buffer; contentType: string; finalUrl: string }> {
   let currentUrl = new URL(url);
   const maxBytes = maxBytesForAssetPath(relativePath);
 
   for (let redirectCount = 0; redirectCount <= maxUrlRedirects; redirectCount += 1) {
-    await assertSafeImportUrl(currentUrl);
+    await assertSafePublicUrl(currentUrl);
     const response = await fetch(currentUrl, {
       redirect: "manual",
       signal: AbortSignal.timeout(30000),

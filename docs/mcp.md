@@ -350,3 +350,23 @@ curl -sS -X POST http://127.0.0.1:6859/mcp \
 - 法务与合规：先确认 `robots.txt`、站点授权、版权许可。
 - 操作安全：MCP 工具仅开放必要最小集；禁止越权抓取、无审计写入、未授权下载。
 - WebMCP 现状：仍偏实验性，建议在明确支持的浏览器版本与使用场景下逐步试点。
+
+### 第一版工具链
+
+本项目实现以下 MCP 工具用于“授权网页 -> 审查 -> 改进版静态页面”流程：
+
+- `capture_webpage`：仅接受公开 `https://` URL，阻止 localhost、内网和 reserved IP，默认读取 `robots.txt`，采集页面标题、meta、heading、可见文本摘要、链接、图片、表单、交互元素、网络请求、console/page error 和截图。
+- `analyze_webpage_capture`：读取 `.captures/{captureId}.json`，生成 UX、可访问性、性能、SEO、实现风险的结构化分析与 HTML 报告。
+- `generate_improved_static_page`：读取 capture + analysis，生成新的静态 Project（`index.html`、`styles.css`、`script.js`），复用现有项目验证、发布和 Playwright 浏览器检查。
+
+运行时产物：
+
+- 抓取 JSON：`.captures/{captureId}.json`
+- 分析 JSON：`.captures/{analysisId}.analysis.json`
+- 报告页面：`/share/{id}/{filename}.html`
+- 改进版页面：`/share/{projectId}/index.html`
+
+WebMCP 路线图：
+
+- 第二阶段可新增 `generate_webmcp_adapter_notes`，根据表单、搜索、筛选、提交等交互推断可暴露的 WebMCP 工具。
+- 在浏览器 API 支持稳定前，不把 `navigator.modelContext` 或页面内 `registerTool` 注入作为第一版核心能力。
