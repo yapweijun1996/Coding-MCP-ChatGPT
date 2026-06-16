@@ -42,6 +42,7 @@ import {
 } from "./projects/store.js";
 import { getResearchSummary } from "./research/store.js";
 import { countShares, readShareArtifact } from "./share/store.js";
+import { initializeSkillState, listSkillStates, setSkillEnabled } from "./skills/state.js";
 import {
   consumeVisibleBrowserExpiredCleanup,
   disableVisibleBrowserControl,
@@ -51,7 +52,7 @@ import {
   isVisibleBrowserToolName,
   visibleBrowserToolNames
 } from "./special-tools.js";
-import { isToolEnabled, listToolStates, setToolEnabled } from "./tool-state.js";
+import { getToolAccess, isToolEffectivelyEnabled, listEffectiveToolStates, setToolEnabled } from "./tool-state.js";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
@@ -69,6 +70,7 @@ const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
 const shareRoot = process.env.SHARE_ROOT ?? `${workspaceRoot}/.shares`;
 const artifactRoot = process.env.ARTIFACT_ROOT ?? `${workspaceRoot}/.artifacts`;
 const projectRoot = process.env.PROJECT_ROOT ?? `${workspaceRoot}/.projects`;
+const skillStatePath = process.env.SKILL_STATE_PATH ?? `${workspaceRoot}/.state/skill-state.json`;
 const commandTimeoutMs = Number.parseInt(process.env.COMMAND_TIMEOUT_MS ?? "30000", 10);
 const devToken = process.env.MCP_DEV_TOKEN;
 const adminPasscode = process.env.ADMIN_PASSCODE ?? process.env.KB_MCP_OAUTH_PASSCODE ?? "";
@@ -80,6 +82,7 @@ const oauthConfig: OAuthConfig = {
   statePath: process.env.OAUTH_STATE_PATH ?? `${workspaceRoot}/.state/oauth-state.json`
 };
 initializeOAuthState(oauthConfig.statePath);
+initializeSkillState(skillStatePath);
 
 app.use(express.json({ limit: "40mb" }));
 app.use(express.urlencoded({ extended: false, limit: "64kb" }));
@@ -284,7 +287,7 @@ app.post("/mcp", async (req, res) => {
 
   if (request.method === "tools/list") {
     recordActivity({ clientId, method: request.method, ok: true, summary: "Listed tools." });
-    const enabledToolNames = new Set(listToolStates().filter((tool) => tool.enabled && !isVisibleBrowserToolName(tool.name)).map((tool) => tool.name));
+    const enabledToolNames = new Set(listEffectiveToolStates().filter((tool) => tool.enabled && !isVisibleBrowserToolName(tool.name)).map((tool) => tool.name));
     if (isVisibleBrowserControlEnabled()) {
       for (const name of visibleBrowserToolNames) enabledToolNames.add(name);
     }
@@ -305,9 +308,11 @@ app.post("/mcp", async (req, res) => {
       res.json(jsonRpcError(request.id, -32603, "Tool is disabled: visible browser control is off"));
       return;
     }
-    if (!isVisibleBrowserToolName(name) && !isToolEnabled(name)) {
-      recordActivity({ clientId, method: request.method, toolName: name, ok: false, summary: "Tool is disabled." });
-      res.json(jsonRpcError(request.id, -32603, `Tool is disabled: ${name}`));
+    if (!isVisibleBrowserToolName(name) && !isToolEffectivelyEnabled(name)) {
+      const access = getToolAccess(name);
+      const summary = access.access === "blocked_by_skill" ? "Tool is disabled by skill catalog." : "Tool is disabled.";
+      recordActivity({ clientId, method: request.method, toolName: name, ok: false, summary });
+      res.json(jsonRpcError(request.id, -32603, access.access === "blocked_by_skill" ? `Tool is disabled by skill catalog: ${name}` : `Tool is disabled: ${name}`));
       return;
     }
 
@@ -339,14 +344,15 @@ app.get("/admin", async (req, res) => {
     adminToken: adminPasscode,
     clients: listOAuthClientStatus(),
     specialTools: getSpecialToolStates(),
-    tools: listToolStates().filter((tool) => !isVisibleBrowserToolName(tool.name)),
+    skills: listSkillStates(),
+    tools: listEffectiveToolStates().filter((tool) => !isVisibleBrowserToolName(tool.name)),
     activity: listActivity(),
     projects,
     stats: {
       jobs: countJobs(),
       shares: countShares(),
       projects: activeProjects.length,
-      enabledTools: listToolStates().filter((tool) => tool.enabled && !isVisibleBrowserToolName(tool.name)).length + (isVisibleBrowserControlEnabled() ? visibleBrowserToolNames.length : 0),
+      enabledTools: listEffectiveToolStates().filter((tool) => tool.enabled && !isVisibleBrowserToolName(tool.name)).length + (isVisibleBrowserControlEnabled() ? visibleBrowserToolNames.length : 0),
       connectedClients: listOAuthClientStatus().length
     }
   }));
@@ -481,6 +487,27 @@ app.post("/admin/tools/toggle", (req, res) => {
     res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Tool toggle failed.";
+    res.status(400).send(message);
+  }
+});
+
+app.post("/admin/skills/toggle", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const body = req.body as Partial<Record<string, string>>;
+  try {
+    if (!body.id) throw new Error("Missing skill id.");
+    const enabled = body.enabled === "1";
+    setSkillEnabled(body.id, enabled);
+    recordActivity({
+      clientId: "admin",
+      method: "admin/skills",
+      toolName: body.id,
+      ok: true,
+      summary: `${enabled ? "Enabled" : "Disabled"} skill ${body.id}.`
+    });
+    res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Skill toggle failed.";
     res.status(400).send(message);
   }
 });

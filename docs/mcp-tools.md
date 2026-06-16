@@ -8,10 +8,13 @@ The MCP server uses a single source of truth registry for tool metadata, handler
 - `src/mcp/registry.ts`: exports `toolRegistry`, `toolDefinitions`, and lookup helpers.
 - `src/mcp/router.ts`: validates inputs and dispatches `tools/call` to handlers.
 - `src/mcp/result.ts`: shared result helpers.
+- `src/skills/registry.ts`: local built-in agent skill packs and their exposed tool names.
+- `src/skills/state.ts`: persistent Admin-managed skill enablement state.
 
 ## Tool groups
 
 - `src/mcp/tools/preview.ts`: `ping`, `create_preview`.
+- `src/mcp/tools/skills.ts`: `list_agent_skills`, `get_agent_skill`.
 - `src/mcp/tools/project.ts`: persistent Project CRUD, manifest, validation, and publish tools.
 - `src/mcp/tools/research.ts`: research source, evidence, notes, report, and publish workflow tools.
 - `src/mcp/tools/share.ts`: legacy standalone HTML share tool, disabled by default.
@@ -22,9 +25,16 @@ The MCP server uses a single source of truth registry for tool metadata, handler
 
 ## Default access
 
+Admin access is now two-layered:
+
+1. A tool must be enabled by its raw tool override.
+2. At least one enabled Skill pack must expose that tool.
+
+`tools/list` returns only effectively enabled tools, and direct `tools/call` is rejected if either layer blocks the tool. Special visible browser control tools remain separately time-gated under Admin Special Tools.
+
 Enabled by default:
 
-- Connectivity and preview: `ping`, `create_preview`.
+- Connectivity, preview, and skill protocol lookup: `ping`, `create_preview`, `list_agent_skills`, `get_agent_skill`.
 - Project delivery: `deliver_static_project`, `create_project`, `list_projects`, `get_project`, `get_project_manifest`, `get_project_activity`, `write_project_file`, `read_project_file`, `delete_project_file`, `validate_project`, `publish_project`, `publish_and_report`.
 - Research delivery: `create_research_project`, `add_research_source`, `list_research_sources`, `add_research_note`, `record_research_evidence`, `get_research_manifest`, `write_research_report`, `publish_research_report`.
 - Browser validation: `inspect_webpage`.
@@ -55,6 +65,7 @@ npm run check:mcp
 ```
 
 The check builds `dist/`, verifies registry uniqueness, confirms critical tools exist, confirms high-risk tools are disabled by default, and ensures default-enabled command tools have matching package scripts.
+It also validates Skill ids, confirms all Skill tool references exist, confirms the `high-risk` Skill is disabled by default, and confirms the `core` Skill exposes the Skill protocol lookup tools.
 
 ## Compatibility note
 

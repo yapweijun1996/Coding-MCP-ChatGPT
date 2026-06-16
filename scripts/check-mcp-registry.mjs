@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { toolRegistry, toolDefinitions } from "../dist/mcp/registry.js";
+import { skillRegistry } from "../dist/skills/registry.js";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const packageScripts = packageJson.scripts ?? {};
@@ -8,6 +9,8 @@ const duplicateNames = names.filter((name, index) => names.indexOf(name) !== ind
 const moduleNames = toolRegistry.map((tool) => tool.definition.name);
 const criticalTools = [
   "ping",
+  "list_agent_skills",
+  "get_agent_skill",
   "create_project",
   "write_project_file",
   "read_project_file",
@@ -111,8 +114,37 @@ for (const [toolName, scriptName] of enabledToolRequiredScripts.entries()) {
   }
 }
 
+const skillIds = skillRegistry.map((skill) => skill.id);
+const duplicateSkillIds = skillIds.filter((id, index) => skillIds.indexOf(id) !== index);
+if (duplicateSkillIds.length > 0) {
+  errors.push(`Duplicate skill ids: ${[...new Set(duplicateSkillIds)].join(", ")}`);
+}
+
+for (const skill of skillRegistry) {
+  for (const toolName of skill.toolNames) {
+    if (!names.includes(toolName)) {
+      errors.push(`Skill ${skill.id} references unknown tool: ${toolName}`);
+    }
+  }
+}
+
+const highRiskSkill = skillRegistry.find((skill) => skill.id === "high-risk");
+if (!highRiskSkill) {
+  errors.push("Missing high-risk skill.");
+} else if (highRiskSkill.enabledByDefault) {
+  errors.push("high-risk skill must be disabled by default.");
+}
+
+const coreSkill = skillRegistry.find((skill) => skill.id === "core");
+for (const protocolToolName of ["list_agent_skills", "get_agent_skill"]) {
+  if (!coreSkill?.toolNames.includes(protocolToolName)) {
+    errors.push(`core skill must expose protocol tool: ${protocolToolName}`);
+  }
+}
+
 const summary = {
   toolCount: names.length,
+  skillCount: skillRegistry.length,
   duplicateCount: duplicateNames.length,
   defaultEnabledTools,
   defaultDisabledTools,

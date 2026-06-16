@@ -2,7 +2,9 @@ import type { ActivityEvent } from "./activity.js";
 import type { OAuthClientStatus } from "./oauth.js";
 import type { ProjectFileInfo, ProjectManifest, ProjectMetadata, ProjectStatus, ProjectSummary, ProjectValidationResult } from "./projects/store.js";
 import type { ResearchReportStatus } from "./research/store.js";
+import type { SkillState } from "./skills/state.js";
 import type { VisibleBrowserControlState } from "./special-tools.js";
+import type { EffectiveToolState } from "./tool-state.js";
 
 export type PublicShareLocale = "en" | "zh";
 
@@ -11,7 +13,8 @@ export interface AdminPageData {
   adminToken: string;
   clients: OAuthClientStatus[];
   specialTools: VisibleBrowserControlState[];
-  tools: Array<{ name: string; description: string; enabled: boolean }>;
+  skills: SkillState[];
+  tools: EffectiveToolState[];
   activity: ActivityEvent[];
   projects: ProjectSummary[];
   stats: {
@@ -66,6 +69,16 @@ function styles(): string {
     h1 a { color: inherit; text-decoration: none; }
     header p { margin: 6px 0 0; color: var(--muted); }
     main { width: min(1440px, calc(100vw - 32px)); margin: 20px auto 48px; }
+    .admin-shell { min-height: 100vh; display: grid; grid-template-columns: 270px minmax(0, 1fr); }
+    .admin-sidebar { background: #eef2ee; border-right: 1px solid var(--line); padding: 16px; position: sticky; top: 0; height: 100vh; overflow: auto; z-index: 20; }
+    .admin-sidebar h3 { margin: 0 0 10px; font-size: 16px; }
+    .admin-sidebar p { margin: 0; color: var(--muted); font-size: 12px; }
+    .admin-sidebar p + p { margin-top: 4px; }
+    .admin-sidebar nav { margin-top: 14px; display: grid; gap: 6px; }
+    .admin-sidebar a { display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--ink); font-weight: 600; font-size: 13px; border-radius: 8px; padding: 9px 10px; }
+    .admin-sidebar a:hover { background: #e5ebe4; }
+    .admin-content { min-width: 0; }
+    .sidebar-toggle { min-width: 0; padding: 7px 10px; background: var(--soft); color: var(--ink); border-radius: 8px; border: 1px solid var(--line); font-weight: 700; }
     .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
     .metric { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
     .metric strong { display: block; font-size: 26px; line-height: 1; }
@@ -93,6 +106,9 @@ function styles(): string {
     .badge-private { background: #e7eef8; color: #244b76; }
     .badge-draft { background: #f0eee8; color: #645d51; }
     .badge-deleted { background: #f8d8d8; color: #8a1f1f; }
+    .badge-low { background: #e3f3e8; color: #176139; }
+    .badge-medium { background: #fff0c2; color: #6a4a00; }
+    .badge-high { background: #f8d8d8; color: #8a1f1f; }
     .layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 16px; }
     .file-list a { display: block; padding: 8px 10px; color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--line); }
     .file-list a.active { background: var(--soft); font-weight: 700; }
@@ -100,6 +116,15 @@ function styles(): string {
     .meta { color: var(--muted); margin: 6px 0 0; }
     .error { color: var(--danger); padding: 12px 16px; border-bottom: 1px solid var(--line); }
     .json-view { margin: 0; padding: 16px; overflow: auto; max-height: 360px; background: #fbfcf8; border-top: 1px solid var(--line); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+    .sidebar-collapsed .admin-sidebar { width: 68px; padding: 12px 8px; }
+    .sidebar-collapsed .admin-sidebar h3,
+    .sidebar-collapsed .admin-sidebar p,
+    .sidebar-collapsed .admin-sidebar .text,
+    .sidebar-collapsed .admin-sidebar .toggle-text { display: none; }
+    .sidebar-collapsed .admin-sidebar a { justify-content: center; padding: 10px 0; }
+    body.sidebar-collapsed .admin-shell { grid-template-columns: 68px minmax(0, 1fr); }
+    .section-anchor { scroll-margin-top: 90px; }
+    .admin-content main { width: min(1440px, calc(100vw - 32px)); margin: 20px auto 48px; }
     .badge-valid { background: #e3f3e8; color: #176139; }
     .badge-warnings { background: #fff0c2; color: #6a4a00; }
     .badge-failed { background: #f8d8d8; color: #8a1f1f; }
@@ -144,6 +169,7 @@ function styles(): string {
     .project-table th:nth-child(6) { width: 16%; }
     .project-table th:nth-child(7) { width: 17%; }
     @media (max-width: 1100px) { .stats { grid-template-columns: 1fr 1fr; } .layout { grid-template-columns: 1fr; } table { display: block; overflow-x: auto; table-layout: auto; } th, td { min-width: 140px; } .project-table th:nth-child(n) { width: auto; } }
+    @media (max-width: 900px) { .admin-content main { width: min(100% - 16px, 1440px); } }
     @media (max-width: 640px) { header { padding: 18px 16px; } .topbar, .public-hero .public-shell, .public-summary-bar { align-items: flex-start; flex-direction: column; } main { width: min(100% - 20px, 1440px); } .stats { grid-template-columns: 1fr; } .public-shell { width: min(100% - 24px, 1180px); } .public-hero { padding: 28px 0; } .public-hero h1 { font-size: 28px; } }
   `;
 }
@@ -295,15 +321,38 @@ export function renderAdminPage(data: AdminPageData): string {
     </tr>`;
   }).join("");
 
+  const skillRows = data.skills.map((skill) => `
+    <tr>
+      <td><strong>${escapeHtml(skill.label)}</strong><code class="project-id">${escapeHtml(skill.id)}</code></td>
+      <td>${escapeHtml(skill.category)}</td>
+      <td><span class="pill badge-${escapeHtml(skill.riskLevel)}">${escapeHtml(skill.riskLevel)}</span></td>
+      <td><span class="pill">${escapeHtml(skill.status)}</span></td>
+      <td>${escapeHtml(skill.toolCount)}</td>
+      <td>${escapeHtml(skill.description)}</td>
+      <td>
+        <form method="post" action="/admin/skills/toggle${adminTokenQuery}">
+          <input type="hidden" name="id" value="${escapeHtml(skill.id)}">
+          <input type="hidden" name="enabled" value="${skill.enabled ? "0" : "1"}">
+          <button class="${skill.enabled ? "enabled" : "disabled"}" type="submit">${skill.enabled ? "On" : "Off"}</button>
+        </form>
+      </td>
+    </tr>`).join("");
+
+  const toolAccessLabel = (tool: EffectiveToolState): string => {
+    if (tool.access === "blocked_by_tool") return "Blocked by tool";
+    if (tool.access === "blocked_by_skill") return "Blocked by skill";
+    return "Enabled";
+  };
   const toolRows = data.tools.map((tool) => `
     <tr>
       <td><code>${escapeHtml(tool.name)}</code></td>
       <td>${escapeHtml(tool.description)}</td>
+      <td><span class="pill ${tool.enabled ? "enabled" : "disabled"}">${escapeHtml(toolAccessLabel(tool))}</span><div class="meta">${escapeHtml(tool.enabledBySkills.join(", ") || "no enabled skill")}</div></td>
       <td>
         <form method="post" action="/admin/tools/toggle${adminTokenQuery}">
           <input type="hidden" name="name" value="${escapeHtml(tool.name)}">
-          <input type="hidden" name="enabled" value="${tool.enabled ? "0" : "1"}">
-          <button class="${tool.enabled ? "enabled" : "disabled"}" type="submit">${tool.enabled ? "On" : "Off"}</button>
+          <input type="hidden" name="enabled" value="${tool.toolEnabled ? "0" : "1"}">
+          <button class="${tool.toolEnabled ? "enabled" : "disabled"}" type="submit">${tool.toolEnabled ? "On" : "Off"}</button>
         </form>
       </td>
     </tr>`).join("");
@@ -361,59 +410,108 @@ export function renderAdminPage(data: AdminPageData): string {
   <style>${styles()}</style>
 </head>
 <body>
-  <header>
-    <div class="topbar">
-      <div>
-        <p class="eyebrow">Admin panel</p>
-        <h1>Coding MCP Admin</h1>
-        <p>${escapeHtml(data.publicBaseUrl)}/mcp</p>
-      </div>
-      <div class="actions">
-        <a class="button ghost" href="/share" target="_blank" rel="noreferrer">Public Index</a>
-      </div>
-    </div>
-  </header>
-  <main>
-    <div class="stats">
-      <div class="metric"><strong>${data.stats.connectedClients}</strong><span>Connected clients</span></div>
-      <div class="metric"><strong>${data.stats.enabledTools}</strong><span>Enabled tools</span></div>
-      <div class="metric"><strong>${data.stats.projects}</strong><span>Projects</span></div>
-      <div class="metric"><strong>${publishedCount}</strong><span>Published</span></div>
-      <div class="metric"><strong>${privateCount + draftCount}</strong><span>Private / Draft</span></div>
-    </div>
-    <section>
-      <div class="section-header">
-        <div>
-          <h2>Projects</h2>
-          <p class="section-note">Set visibility directly from the list. Published projects appear on the public share index.</p>
+  <div class="admin-shell">
+    <aside class="admin-sidebar">
+      <h3>Coding MCP</h3>
+      <p>Admin Console</p>
+      <p class="toggle-text">Use the toggle to collapse this panel.</p>
+      <nav aria-label="Admin sections">
+        <a href="#admin-projects"><span aria-hidden="true">📁</span><span class="text">Projects</span></a>
+        <a href="#admin-connectors"><span aria-hidden="true">🔗</span><span class="text">Connectors</span></a>
+        <a href="#admin-special-tools"><span aria-hidden="true">🛠️</span><span class="text">Special Tools</span></a>
+        <a href="#admin-skills"><span aria-hidden="true">🧭</span><span class="text">Skills</span></a>
+        <a href="#admin-tools"><span aria-hidden="true">⚙️</span><span class="text">Tool Overrides</span></a>
+        <a href="#admin-activity"><span aria-hidden="true">📡</span><span class="text">Activity</span></a>
+        <a href="/share"><span aria-hidden="true">🌐</span><span class="text">Public Index</span></a>
+      </nav>
+    </aside>
+    <div class="admin-content">
+      <header>
+        <div class="topbar">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Toggle sidebar">☰</button>
+            <div>
+              <p class="eyebrow">Admin panel</p>
+              <h1>Coding MCP Admin</h1>
+              <p>${escapeHtml(data.publicBaseUrl)}/mcp</p>
+            </div>
+          </div>
+          <div class="actions">
+            <a class="button ghost" href="/share" target="_blank" rel="noreferrer">Public Index</a>
+          </div>
         </div>
-      </div>
-      ${projectRows ? `<table class="project-table"><thead><tr><th>Project</th><th>Visibility</th><th>Validation</th><th>Files</th><th>Updated</th><th>Created by</th><th>Public URL</th><th>Actions</th></tr></thead><tbody>${projectRows}</tbody></table>` : `<div class="empty">No projects created yet.</div>`}
-    </section>
-    <section>
-      <div class="section-header"><h2>ChatGPT Connectors</h2></div>
-      ${clientRows ? `<table><thead><tr><th>Client ID</th><th>Name</th><th>Redirect host</th><th>Access tokens</th><th>Refresh tokens</th><th>Last used</th><th>Requests</th><th>Action</th></tr></thead><tbody>${clientRows}</tbody></table>` : `<div class="empty">No connectors registered yet.</div>`}
-    </section>
-    <section>
-      <div class="section-header">
-        <div>
-          <h2>Special Tools</h2>
-          <p class="section-note">High-risk tools are hidden from MCP until explicitly enabled for a limited time.</p>
+      </header>
+      <main>
+        <div class="stats">
+          <div class="metric"><strong>${data.stats.connectedClients}</strong><span>Connected clients</span></div>
+          <div class="metric"><strong>${data.stats.enabledTools}</strong><span>Enabled tools</span></div>
+          <div class="metric"><strong>${data.stats.projects}</strong><span>Projects</span></div>
+          <div class="metric"><strong>${publishedCount}</strong><span>Published</span></div>
+          <div class="metric"><strong>${privateCount + draftCount}</strong><span>Private / Draft</span></div>
         </div>
-      </div>
-      ${specialToolRows ? `<table class="special-tool-table"><thead><tr><th>Name</th><th>Status</th><th>Enabled until</th><th>Enabled by</th><th>Actions</th></tr></thead><tbody>${specialToolRows}</tbody></table>` : `<div class="empty">No special tools configured.</div>`}
-    </section>
-    <section>
-      <div class="section-header"><h2>Tools</h2></div>
-      <table><thead><tr><th>Name</th><th>Description</th><th>Access</th></tr></thead><tbody>${toolRows}</tbody></table>
-    </section>
-    <section>
-      <div class="section-header"><h2>Activity</h2></div>
-      ${activityRows ? `<table><thead><tr><th>Time</th><th>Client</th><th>Method</th><th>Tool</th><th>Status</th><th>Summary</th></tr></thead><tbody>${activityRows}</tbody></table>` : `<div class="empty">No MCP activity recorded yet.</div>`}
-    </section>
-	  </main>
-	</body>
-	</html>`;
+        <section id="admin-projects" class="section-anchor">
+          <div class="section-header">
+            <div>
+              <h2>Projects</h2>
+              <p class="section-note">Set visibility directly from the list. Published projects appear on the public share index.</p>
+            </div>
+          </div>
+          ${projectRows ? `<table class="project-table"><thead><tr><th>Project</th><th>Visibility</th><th>Validation</th><th>Files</th><th>Updated</th><th>Created by</th><th>Public URL</th><th>Actions</th></tr></thead><tbody>${projectRows}</tbody></table>` : `<div class="empty">No projects created yet.</div>`}
+        </section>
+        <section id="admin-connectors" class="section-anchor">
+          <div class="section-header"><h2>ChatGPT Connectors</h2></div>
+          ${clientRows ? `<table><thead><tr><th>Client ID</th><th>Name</th><th>Redirect host</th><th>Access tokens</th><th>Refresh tokens</th><th>Last used</th><th>Requests</th><th>Action</th></tr></thead><tbody>${clientRows}</tbody></table>` : `<div class="empty">No connectors registered yet.</div>`}
+        </section>
+        <section id="admin-special-tools" class="section-anchor">
+          <div class="section-header">
+            <div>
+              <h2>Special Tools</h2>
+              <p class="section-note">High-risk tools are hidden from MCP until explicitly enabled for a limited time.</p>
+            </div>
+          </div>
+          ${specialToolRows ? `<table class="special-tool-table"><thead><tr><th>Name</th><th>Status</th><th>Enabled until</th><th>Enabled by</th><th>Actions</th></tr></thead><tbody>${specialToolRows}</tbody></table>` : `<div class="empty">No special tools configured.</div>`}
+        </section>
+        <section id="admin-skills" class="section-anchor">
+          <div class="section-header">
+            <div>
+              <h2>Skills</h2>
+              <p class="section-note">Skill packs control which MCP tools and SOPs an agent can access.</p>
+            </div>
+          </div>
+          <table><thead><tr><th>Skill</th><th>Category</th><th>Risk</th><th>Status</th><th>Tools</th><th>Description</th><th>Access</th></tr></thead><tbody>${skillRows}</tbody></table>
+        </section>
+        <section id="admin-tools" class="section-anchor">
+          <div class="section-header">
+            <div>
+              <h2>Advanced Tool Overrides</h2>
+              <p class="section-note">A tool is callable only when both its override and at least one exposing skill are enabled.</p>
+            </div>
+          </div>
+          <table><thead><tr><th>Name</th><th>Description</th><th>Effective access</th><th>Tool override</th></tr></thead><tbody>${toolRows}</tbody></table>
+        </section>
+        <section id="admin-activity" class="section-anchor">
+          <div class="section-header"><h2>Activity</h2></div>
+          ${activityRows ? `<table><thead><tr><th>Time</th><th>Client</th><th>Method</th><th>Tool</th><th>Status</th><th>Summary</th></tr></thead><tbody>${activityRows}</tbody></table>` : `<div class="empty">No MCP activity recorded yet.</div>`}
+        </section>
+      </main>
+    </div>
+  </div>
+  <script>
+    (function () {
+      const body = document.body;
+      const toggle = document.getElementById("sidebar-toggle");
+      if (!toggle) return;
+      if (localStorage.getItem("coding-mcp-admin-sidebar-collapsed") === "1") {
+        body.classList.add("sidebar-collapsed");
+      }
+      toggle.addEventListener("click", () => {
+        body.classList.toggle("sidebar-collapsed");
+        localStorage.setItem("coding-mcp-admin-sidebar-collapsed", body.classList.contains("sidebar-collapsed") ? "1" : "0");
+      });
+    })();
+  </script>
+</body>
+</html>`;
 }
 
 export function renderPublicSharePage(data: PublicSharePageData): string {
