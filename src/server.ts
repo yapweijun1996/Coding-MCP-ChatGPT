@@ -28,9 +28,12 @@ import {
   countProjects,
   deleteProject,
   getProject,
+  getProjectFileContentType,
   getProjectFilesDirectory,
   getProjectManifest,
+  getProjectStoredFilePath,
   getProjectWithFiles,
+  isProjectTextFilePath,
   listProjects,
   readProjectFile
 } from "./projects/store.js";
@@ -64,7 +67,7 @@ const oauthConfig: OAuthConfig = {
 };
 initializeOAuthState(oauthConfig.statePath);
 
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "40mb" }));
 app.use(express.urlencoded({ extended: false, limit: "64kb" }));
 
 function jsonRpcResult(id: JsonRpcRequest["id"], result: unknown): Record<string, unknown> {
@@ -431,10 +434,19 @@ app.get("/share/:shareId/:filename(*)", async (req, res) => {
   try {
     const project = await getProject(projectRoot, req.params.shareId);
     if (project.status === "published") {
-      const content = await readProjectFile(projectRoot, project.id, req.params.filename, 1024 * 1024);
-      const extension = req.params.filename.toLowerCase().split(".").pop();
-      const contentType = extension === "css" ? "text/css" : extension === "js" ? "application/javascript" : extension === "json" ? "application/json" : extension === "svg" ? "image/svg+xml" : "text/html";
-      res.type(contentType).send(content);
+      const contentType = getProjectFileContentType(req.params.filename);
+      if (isProjectTextFilePath(req.params.filename)) {
+        const content = await readProjectFile(projectRoot, project.id, req.params.filename, 1024 * 1024);
+        res.type(contentType).send(content);
+        return;
+      }
+
+      const absolutePath = await getProjectStoredFilePath(projectRoot, project.id, req.params.filename);
+      res.type(contentType).sendFile(absolutePath, (error) => {
+        if (error && !res.headersSent) {
+          res.status(404).type("text/plain").send("Share not found.");
+        }
+      });
       return;
     }
   } catch {

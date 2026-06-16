@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { TextDecoder } from "node:util";
 
 export type ProjectStatus = "draft" | "published" | "deleted";
 export type ProjectValidationStatus = "valid" | "warnings" | "failed";
@@ -59,11 +60,29 @@ export interface ProjectManifest {
 }
 
 export const maxProjectFileBytes = 1024 * 1024;
+export const maxProjectImageAssetBytes = 10 * 1024 * 1024;
+export const maxProjectPresentationAssetBytes = 25 * 1024 * 1024;
 
 const metadataFilename = "project.json";
 const filesDirectoryName = "files";
 const maxTaskHistoryItems = 100;
 const allowedTextExtensions = new Set([".html", ".css", ".js", ".json", ".txt", ".md", ".svg"]);
+const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".pptx"]);
+const projectContentTypes = new Map([
+  [".html", "text/html"],
+  [".css", "text/css"],
+  [".js", "application/javascript"],
+  [".json", "application/json"],
+  [".txt", "text/plain"],
+  [".md", "text/markdown"],
+  [".svg", "image/svg+xml"],
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".webp", "image/webp"],
+  [".gif", "image/gif"],
+  [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"]
+]);
 
 type DirectoryEntryLike = {
   name: string;
@@ -90,7 +109,7 @@ function assertSafeProjectId(projectId: string): void {
   }
 }
 
-export function assertSafeProjectFilePath(relativePath: string): string {
+function assertSafeProjectPath(relativePath: string, allowedExtensions: Set<string>, label: string): string {
   if (!relativePath || path.isAbsolute(relativePath)) {
     throw new Error("Absolute or empty project file paths are not allowed.");
   }
@@ -105,22 +124,123 @@ export function assertSafeProjectFilePath(relativePath: string): string {
   }
 
   const extension = path.extname(parts.at(-1) ?? "").toLowerCase();
-  if (!allowedTextExtensions.has(extension)) {
-    throw new Error(`Unsupported project file extension: ${extension || "(none)"}.`);
+  if (!allowedExtensions.has(extension)) {
+    throw new Error(`Unsupported project ${label} extension: ${extension || "(none)"}.`);
   }
 
   return parts.join("/");
 }
 
+export function assertSafeProjectFilePath(relativePath: string): string {
+  return assertSafeProjectPath(relativePath, allowedTextExtensions, "file");
+}
+
+export function assertSafeProjectAssetPath(relativePath: string): string {
+  return assertSafeProjectPath(relativePath, allowedAssetExtensions, "asset");
+}
+
+export function assertSafeProjectStoredPath(relativePath: string): string {
+  return assertSafeProjectPath(relativePath, new Set([...allowedTextExtensions, ...allowedAssetExtensions]), "file");
+}
+
 function resolveProjectFilePath(projectRoot: string, projectId: string, relativePath: string): string {
   const safeRelativePath = assertSafeProjectFilePath(relativePath);
+  return resolveProjectStoredPath(projectRoot, projectId, safeRelativePath);
+}
+
+function resolveProjectAssetPath(projectRoot: string, projectId: string, relativePath: string): string {
+  const safeRelativePath = assertSafeProjectAssetPath(relativePath);
+  return resolveProjectStoredPath(projectRoot, projectId, safeRelativePath);
+}
+
+function resolveProjectStoredPath(projectRoot: string, projectId: string, relativePath: string): string {
   const filesRoot = getProjectFilesDirectory(projectRoot, projectId);
-  const resolved = path.resolve(filesRoot, safeRelativePath);
+  const resolved = path.resolve(filesRoot, relativePath);
   const normalizedRoot = path.resolve(filesRoot);
   if (!resolved.startsWith(`${normalizedRoot}${path.sep}`) && resolved !== normalizedRoot) {
     throw new Error("Resolved project file path is outside the project.");
   }
   return resolved;
+}
+
+export function getProjectFileContentType(relativePath: string): string {
+  const extension = path.extname(relativePath).toLowerCase();
+  return projectContentTypes.get(extension) ?? "application/octet-stream";
+}
+
+export function isProjectTextFilePath(relativePath: string): boolean {
+  return allowedTextExtensions.has(path.extname(relativePath).toLowerCase());
+}
+
+export async function getProjectStoredFilePath(projectRoot: string, projectId: string, relativePath: string): Promise<string> {
+  const metadata = await getProject(projectRoot, projectId);
+  if (metadata.status === "deleted") throw new Error("Cannot access a deleted project.");
+  const safeRelativePath = assertSafeProjectStoredPath(relativePath);
+  return resolveProjectStoredPath(projectRoot, projectId, safeRelativePath);
+}
+
+function normalizeContentType(contentType: string | undefined): string | undefined {
+  return contentType?.split(";")[0]?.trim().toLowerCase();
+}
+
+function expectedContentTypesForExtension(extension: string): string[] {
+  const contentType = projectContentTypes.get(extension);
+  if (!contentType) return [];
+  if (extension === ".svg") return [contentType, "text/xml", "application/xml"];
+  return [contentType];
+}
+
+function ensureContentTypeMatches(extension: string, contentType: string | undefined): void {
+  const normalized = normalizeContentType(contentType);
+  if (!normalized) return;
+  const expected = expectedContentTypesForExtension(extension);
+  if (!expected.includes(normalized)) {
+    throw new Error(`contentType ${contentType} does not match ${extension}.`);
+  }
+}
+
+function hasBytes(buffer: Buffer, bytes: number[], offset = 0): boolean {
+  return bytes.every((byte, index) => buffer[offset + index] === byte);
+}
+
+function includesAscii(buffer: Buffer, value: string): boolean {
+  return buffer.includes(Buffer.from(value, "ascii"));
+}
+
+function validateSvgAsset(buffer: Buffer): void {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let svg: string;
+  try {
+    svg = decoder.decode(buffer);
+  } catch {
+    throw new Error("SVG assets must be valid UTF-8.");
+  }
+  if (!/<\s*svg[\s>]/i.test(svg)) throw new Error("SVG asset must contain an <svg> root.");
+  if (/<\s*script\b/i.test(svg)) throw new Error("SVG assets must not contain script tags.");
+  if (/\b(?:href|src|xlink:href)\s*=\s*["']\s*(?:https?:|\/\/|data:)/i.test(svg)) {
+    throw new Error("SVG assets must not reference external or data URLs.");
+  }
+}
+
+function validateProjectAssetBytes(relativePath: string, buffer: Buffer, contentType?: string): void {
+  const extension = path.extname(relativePath).toLowerCase();
+  ensureContentTypeMatches(extension, contentType);
+
+  if (buffer.length === 0) throw new Error("Project asset content is empty.");
+  if (extension === ".pptx") {
+    if (buffer.length > maxProjectPresentationAssetBytes) throw new Error("PPTX asset exceeds 25 MiB.");
+  } else if (buffer.length > maxProjectImageAssetBytes) {
+    throw new Error("Image asset exceeds 10 MiB.");
+  }
+
+  if (extension === ".png" && !hasBytes(buffer, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) throw new Error("PNG asset has invalid magic bytes.");
+  if ((extension === ".jpg" || extension === ".jpeg") && !hasBytes(buffer, [0xff, 0xd8, 0xff])) throw new Error("JPEG asset has invalid magic bytes.");
+  if (extension === ".gif" && !includesAscii(buffer.subarray(0, 6), "GIF87a") && !includesAscii(buffer.subarray(0, 6), "GIF89a")) throw new Error("GIF asset has invalid magic bytes.");
+  if (extension === ".webp" && (!includesAscii(buffer.subarray(0, 4), "RIFF") || !includesAscii(buffer.subarray(8, 12), "WEBP"))) throw new Error("WebP asset has invalid magic bytes.");
+  if (extension === ".pptx" && (!hasBytes(buffer, [0x50, 0x4b]) || !includesAscii(buffer, "[Content_Types].xml") || !includesAscii(buffer, "ppt/"))) {
+    throw new Error("PPTX asset must be an OOXML presentation package.");
+  }
+  if (extension === ".svg") validateSvgAsset(buffer);
 }
 
 function normalizeProjectMetadata(metadata: ProjectMetadata): ProjectMetadata {
@@ -313,6 +433,34 @@ export async function writeProjectFile(projectRoot: string, projectId: string, r
   return file;
 }
 
+export async function writeProjectAsset(projectRoot: string, projectId: string, relativePath: string, content: Buffer, contentType?: string): Promise<ProjectFileInfo> {
+  const safeRelativePath = assertSafeProjectAssetPath(relativePath);
+  validateProjectAssetBytes(safeRelativePath, content, contentType);
+
+  const metadata = await getProject(projectRoot, projectId);
+  if (metadata.status === "deleted") throw new Error("Cannot write to a deleted project.");
+
+  const absolutePath = resolveProjectAssetPath(projectRoot, projectId, safeRelativePath);
+  await mkdir(path.dirname(absolutePath), { recursive: true });
+  await writeFile(absolutePath, content);
+
+  const fileStat = await stat(absolutePath);
+  const file = {
+    path: safeRelativePath,
+    size: fileStat.size,
+    modifiedAt: fileStat.mtime.toISOString()
+  };
+  const updated = addHistory(metadata, {
+    toolName: "write_project_asset",
+    ok: true,
+    summary: `Wrote asset ${file.path}.`,
+    details: { path: file.path, size: file.size, contentType: getProjectFileContentType(file.path) }
+  });
+  await writeProjectMetadata(projectRoot, updated);
+
+  return file;
+}
+
 export async function readProjectFile(projectRoot: string, projectId: string, relativePath: string, maxBytes = maxProjectFileBytes): Promise<string> {
   const metadata = await getProject(projectRoot, projectId);
   if (metadata.status === "deleted") throw new Error("Cannot read a deleted project.");
@@ -346,11 +494,13 @@ export async function validateProject(projectRoot: string, projectId: string, en
 
   for (const file of files) {
     try {
-      assertSafeProjectFilePath(file.path);
+      assertSafeProjectStoredPath(file.path);
     } catch (error) {
       errors.push(`Invalid file path ${file.path}: ${error instanceof Error ? error.message : "invalid path"}`);
     }
-    if (file.size > maxProjectFileBytes) {
+    const extension = path.extname(file.path).toLowerCase();
+    const maxBytes = extension === ".pptx" ? maxProjectPresentationAssetBytes : allowedAssetExtensions.has(extension) ? maxProjectImageAssetBytes : maxProjectFileBytes;
+    if (file.size > maxBytes) {
       errors.push(`File exceeds max size: ${file.path}`);
     }
   }
@@ -473,13 +623,14 @@ export async function deleteProjectFile(projectRoot: string, projectId: string, 
   const metadata = await getProject(projectRoot, projectId);
   if (metadata.status === "deleted") throw new Error("Cannot delete files from a deleted project.");
 
-  const absolutePath = resolveProjectFilePath(projectRoot, projectId, relativePath);
+  const safeRelativePath = assertSafeProjectStoredPath(relativePath);
+  const absolutePath = resolveProjectStoredPath(projectRoot, projectId, safeRelativePath);
   await rm(absolutePath, { force: true });
   const updated = addHistory(metadata, {
     toolName: "delete_project_file",
     ok: true,
-    summary: `Deleted ${relativePath}.`,
-    details: { path: relativePath }
+    summary: `Deleted ${safeRelativePath}.`,
+    details: { path: safeRelativePath }
   });
   await writeProjectMetadata(projectRoot, updated);
 }

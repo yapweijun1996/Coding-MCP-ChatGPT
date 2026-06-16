@@ -1,3 +1,6 @@
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+import path from "node:path";
 import { z } from "zod";
 import {
   createProject,
@@ -10,9 +13,15 @@ import {
   publishProject,
   readProjectFile,
   validateProject,
+  writeProjectAsset,
   writeProjectFile
 } from "../../projects/store.js";
 import type { ToolModule } from "../types.js";
+
+const maxBase64AssetChars = 40 * 1024 * 1024;
+const maxImportedImageBytes = 10 * 1024 * 1024;
+const maxImportedPresentationBytes = 25 * 1024 * 1024;
+const maxUrlRedirects = 5;
 
 const createProjectInputSchema = z.object({
   title: z.string().min(1).max(160),
@@ -32,6 +41,19 @@ const writeProjectFileInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   relativePath: z.string().min(1).max(240),
   content: z.string().max(1024 * 1024)
+});
+
+const writeProjectAssetInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  relativePath: z.string().min(1).max(240),
+  contentBase64: z.string().min(1).max(maxBase64AssetChars),
+  contentType: z.string().min(1).max(120).optional()
+});
+
+const importProjectAssetFromUrlInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  relativePath: z.string().min(1).max(240),
+  url: z.string().url()
 });
 
 const readProjectFileInputSchema = z.object({
@@ -60,6 +82,108 @@ const deleteProjectInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   confirm: z.boolean().refine((value) => value === true, { message: "Deletion requires confirm=true." })
 });
+
+function decodePureBase64(value: string): Buffer {
+  if (/^data:/i.test(value.trim())) {
+    throw new Error("contentBase64 must be raw base64 without a data: URL prefix.");
+  }
+  const normalized = value.replace(/\s+/g, "");
+  if (!normalized || normalized.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)) {
+    throw new Error("contentBase64 is not valid base64.");
+  }
+  const buffer = Buffer.from(normalized, "base64");
+  if (buffer.length === 0) throw new Error("contentBase64 decoded to an empty asset.");
+  const canonical = buffer.toString("base64").replace(/=+$/, "");
+  const supplied = normalized.replace(/=+$/, "");
+  if (canonical !== supplied) throw new Error("contentBase64 is not valid base64.");
+  return buffer;
+}
+
+function maxBytesForAssetPath(relativePath: string): number {
+  return path.extname(relativePath).toLowerCase() === ".pptx" ? maxImportedPresentationBytes : maxImportedImageBytes;
+}
+
+function isBlockedIpv4(address: string): boolean {
+  const parts = address.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part))) return true;
+  const [first, second] = parts;
+  return first === 0
+    || first === 10
+    || first === 127
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 169 && second === 254)
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 168)
+    || first >= 224;
+}
+
+function isBlockedIpv6(address: string): boolean {
+  const normalized = address.toLowerCase();
+  const mappedIpv4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(normalized);
+  if (mappedIpv4) return isBlockedIpv4(mappedIpv4[1]);
+  return normalized === "::"
+    || normalized === "::1"
+    || normalized.startsWith("fc")
+    || normalized.startsWith("fd")
+    || normalized.startsWith("fe80:")
+    || normalized.startsWith("::ffff:");
+}
+
+function isBlockedIpAddress(address: string): boolean {
+  const version = isIP(address);
+  if (version === 4) return isBlockedIpv4(address);
+  if (version === 6) return isBlockedIpv6(address);
+  return true;
+}
+
+async function assertSafeImportUrl(url: URL): Promise<void> {
+  if (url.protocol !== "https:") throw new Error("Only https:// asset imports are allowed.");
+  const hostname = url.hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+  if (hostname === "localhost" || hostname.endsWith(".localhost")) throw new Error("Localhost asset imports are not allowed.");
+
+  if (isIP(hostname)) {
+    if (isBlockedIpAddress(hostname)) throw new Error("Private or reserved IP asset imports are not allowed.");
+    return;
+  }
+
+  const addresses = await lookup(hostname, { all: true, verbatim: true });
+  if (addresses.length === 0 || addresses.some((record) => isBlockedIpAddress(record.address))) {
+    throw new Error("Asset import URL resolves to a private or reserved IP address.");
+  }
+}
+
+async function fetchProjectAsset(url: string, relativePath: string): Promise<{ buffer: Buffer; contentType: string; finalUrl: string }> {
+  let currentUrl = new URL(url);
+  const maxBytes = maxBytesForAssetPath(relativePath);
+
+  for (let redirectCount = 0; redirectCount <= maxUrlRedirects; redirectCount += 1) {
+    await assertSafeImportUrl(currentUrl);
+    const response = await fetch(currentUrl, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(30000),
+      headers: { "User-Agent": "Coding-MCP-AssetImport/0.1" }
+    });
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location) throw new Error("Asset import redirect is missing a Location header.");
+      currentUrl = new URL(location, currentUrl);
+      continue;
+    }
+
+    if (!response.ok) throw new Error(`Asset import failed with ${response.status} ${response.statusText}.`);
+    const contentType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+    if (!contentType) throw new Error("Asset import response is missing a content-type header.");
+    const contentLength = response.headers.get("content-length");
+    if (contentLength && Number.parseInt(contentLength, 10) > maxBytes) throw new Error("Asset import response exceeds the size limit.");
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > maxBytes) throw new Error("Asset import response exceeds the size limit.");
+    return { buffer, contentType, finalUrl: currentUrl.toString() };
+  }
+
+  throw new Error("Asset import exceeded the redirect limit.");
+}
 
 export const projectTools: ToolModule[] = [
   {
@@ -153,6 +277,62 @@ export const projectTools: ToolModule[] = [
       const parsed = input as z.infer<typeof writeProjectFileInputSchema>;
       const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.relativePath, parsed.content);
       return { ok: true, summary: `Wrote ${file.path} in project ${parsed.projectId}.`, jobId: parsed.projectId, artifacts: [file.path], logs: [JSON.stringify(file, null, 2)], errors: [] };
+    }
+  },
+  {
+    definition: {
+      name: "write_project_asset",
+      description: "Write a binary image or PPTX asset inside a persistent project from raw base64 content.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          relativePath: { type: "string", description: "Project-relative asset path, e.g. assets/hero.png. No absolute paths, dotfiles, or parent traversal." },
+          contentBase64: { type: "string", description: "Raw base64 asset bytes without a data: URL prefix." },
+          contentType: { type: "string", description: "Optional MIME type, e.g. image/png." }
+        },
+        required: ["projectId", "relativePath", "contentBase64"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: writeProjectAssetInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = input as z.infer<typeof writeProjectAssetInputSchema>;
+      const buffer = decodePureBase64(parsed.contentBase64);
+      const file = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.relativePath, buffer, parsed.contentType);
+      return { ok: true, summary: `Wrote asset ${file.path} in project ${parsed.projectId}.`, jobId: parsed.projectId, artifacts: [file.path], logs: [JSON.stringify(file, null, 2)], errors: [] };
+    }
+  },
+  {
+    definition: {
+      name: "import_project_asset_from_url",
+      description: "Import an HTTPS image or PPTX asset into a persistent project after private-network and MIME validation.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          relativePath: { type: "string", description: "Project-relative asset path, e.g. assets/hero.png." },
+          url: { type: "string", description: "HTTPS URL to import." }
+        },
+        required: ["projectId", "relativePath", "url"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: importProjectAssetFromUrlInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = input as z.infer<typeof importProjectAssetFromUrlInputSchema>;
+      const imported = await fetchProjectAsset(parsed.url, parsed.relativePath);
+      const file = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.relativePath, imported.buffer, imported.contentType);
+      return {
+        ok: true,
+        summary: `Imported asset ${file.path} in project ${parsed.projectId}.`,
+        jobId: parsed.projectId,
+        artifacts: [file.path],
+        logs: [JSON.stringify({ ...file, sourceUrl: parsed.url, finalUrl: imported.finalUrl, contentType: imported.contentType }, null, 2)],
+        errors: []
+      };
     }
   },
   {
