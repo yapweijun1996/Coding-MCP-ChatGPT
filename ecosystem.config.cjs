@@ -7,7 +7,9 @@ module.exports = {
       interpreter: "node",
       instances: 1,
       autorestart: true,
-      watch: false,
+      watch: ["dist"],
+      watch_delay: 1000,
+      ignore_watch: ["node_modules", ".git", ".projects", ".shares", ".state", ".artifacts"],
       max_memory_restart: "512M",
       env: {
         NODE_ENV: "production",
