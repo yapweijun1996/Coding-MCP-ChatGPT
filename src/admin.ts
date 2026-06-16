@@ -2,6 +2,7 @@ import type { ActivityEvent } from "./activity.js";
 import type { OAuthClientStatus } from "./oauth.js";
 import type { ProjectFileInfo, ProjectManifest, ProjectMetadata, ProjectStatus, ProjectSummary, ProjectValidationResult } from "./projects/store.js";
 import type { ResearchReportStatus } from "./research/store.js";
+import type { VisibleBrowserControlState } from "./special-tools.js";
 
 export type PublicShareLocale = "en" | "zh";
 
@@ -9,6 +10,7 @@ export interface AdminPageData {
   publicBaseUrl: string;
   adminToken: string;
   clients: OAuthClientStatus[];
+  specialTools: VisibleBrowserControlState[];
   tools: Array<{ name: string; description: string; enabled: boolean }>;
   activity: ActivityEvent[];
   projects: ProjectSummary[];
@@ -44,7 +46,7 @@ export interface ProjectPageData {
   error?: string;
 }
 
-function escapeHtml(value: string | number | boolean | undefined): string {
+function escapeHtml(value: string | number | boolean | null | undefined): string {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -129,6 +131,11 @@ function styles(): string {
     .status-control { display: inline-flex; gap: 6px; align-items: center; }
     select { min-width: 112px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 7px 8px; font: inherit; }
     .mini-button { min-width: 0; padding: 7px 10px; }
+    .special-tool-table th:nth-child(1) { width: 18%; }
+    .special-tool-table th:nth-child(2) { width: 14%; }
+    .special-tool-table th:nth-child(3) { width: 18%; }
+    .special-tool-table th:nth-child(4) { width: 16%; }
+    .special-tool-table th:nth-child(5) { width: 34%; }
     .project-table th:nth-child(1) { width: 22%; }
     .project-table th:nth-child(2) { width: 16%; }
     .project-table th:nth-child(3) { width: 10%; }
@@ -301,6 +308,40 @@ export function renderAdminPage(data: AdminPageData): string {
       </td>
     </tr>`).join("");
 
+  const specialToolRows = data.specialTools.map((tool) => {
+    const status = tool.enabled ? "On" : "Off";
+    const statusClass = tool.enabled ? "enabled" : "disabled";
+    return `
+    <tr>
+      <td><strong>${escapeHtml(tool.label)}</strong><code class="project-id">${escapeHtml(tool.name)}</code></td>
+      <td><span class="pill ${statusClass}">${escapeHtml(status)}</span></td>
+      <td>${escapeHtml(tool.enabledUntil ? formatDate(tool.enabledUntil) : "-")}</td>
+      <td><code>${escapeHtml(tool.enabledBy ?? "-")}</code></td>
+      <td>
+        <div class="actions">
+          <form method="post" action="/admin/special-tools/visible-browser/enable${adminTokenQuery}">
+            <input type="hidden" name="durationMinutes" value="15">
+            <button class="enabled" type="submit">Enable 15 min</button>
+          </form>
+          <form method="post" action="/admin/special-tools/visible-browser/enable${adminTokenQuery}">
+            <input type="hidden" name="durationMinutes" value="30">
+            <button class="enabled" type="submit">Enable 30 min</button>
+          </form>
+          <form method="post" action="/admin/special-tools/visible-browser/enable${adminTokenQuery}">
+            <input type="hidden" name="durationMinutes" value="60">
+            <button class="enabled" type="submit">Enable 60 min</button>
+          </form>
+          <form method="post" action="/admin/special-tools/visible-browser/disable${adminTokenQuery}">
+            <button class="secondary" type="submit">Disable now</button>
+          </form>
+          <form method="post" action="/admin/special-tools/visible-browser/kill${adminTokenQuery}" onsubmit="return confirm('Kill visible browser sessions?')">
+            <button class="danger" type="submit">Kill Browser Session</button>
+          </form>
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+
   const activityRows = data.activity.map((event) => `
     <tr>
       <td>${escapeHtml(event.time)}</td>
@@ -352,6 +393,15 @@ export function renderAdminPage(data: AdminPageData): string {
     <section>
       <div class="section-header"><h2>ChatGPT Connectors</h2></div>
       ${clientRows ? `<table><thead><tr><th>Client ID</th><th>Name</th><th>Redirect host</th><th>Access tokens</th><th>Refresh tokens</th><th>Last used</th><th>Requests</th><th>Action</th></tr></thead><tbody>${clientRows}</tbody></table>` : `<div class="empty">No connectors registered yet.</div>`}
+    </section>
+    <section>
+      <div class="section-header">
+        <div>
+          <h2>Special Tools</h2>
+          <p class="section-note">High-risk tools are hidden from MCP until explicitly enabled for a limited time.</p>
+        </div>
+      </div>
+      ${specialToolRows ? `<table class="special-tool-table"><thead><tr><th>Name</th><th>Status</th><th>Enabled until</th><th>Enabled by</th><th>Actions</th></tr></thead><tbody>${specialToolRows}</tbody></table>` : `<div class="empty">No special tools configured.</div>`}
     </section>
     <section>
       <div class="section-header"><h2>Tools</h2></div>

@@ -7,6 +7,7 @@ import { countJobs, getJob } from "./jobs/store.js";
 import { toolDefinitions } from "./mcp/registry.js";
 import { callTool } from "./mcp/router.js";
 import type { ToolResult } from "./mcp/types.js";
+import { closeAllBrowserSessions } from "./mcp/tools/browser.js";
 import {
   createAuthorizationRedirect,
   exchangeToken,
@@ -41,6 +42,15 @@ import {
 } from "./projects/store.js";
 import { getResearchSummary } from "./research/store.js";
 import { countShares, readShareArtifact } from "./share/store.js";
+import {
+  consumeVisibleBrowserExpiredCleanup,
+  disableVisibleBrowserControl,
+  enableVisibleBrowserControl,
+  getSpecialToolStates,
+  isVisibleBrowserControlEnabled,
+  isVisibleBrowserToolName,
+  visibleBrowserToolNames
+} from "./special-tools.js";
 import { isToolEnabled, listToolStates, setToolEnabled } from "./tool-state.js";
 
 type JsonRpcRequest = {
@@ -142,6 +152,18 @@ function resultToMcpContent(result: ToolResult): Record<string, unknown> {
   return response;
 }
 
+async function cleanupExpiredVisibleBrowserControl(): Promise<void> {
+  if (!consumeVisibleBrowserExpiredCleanup()) return;
+  const closed = await closeAllBrowserSessions();
+  recordActivity({
+    clientId: "system",
+    method: "special-tools/expired",
+    toolName: "visible_browser_control",
+    ok: true,
+    summary: `Visible browser control expired. Closed ${closed.length} browser session(s).`
+  });
+}
+
 function getPublicShareLocale(req: express.Request): PublicShareLocale {
   if (req.query.lang === "zh" || req.query.lang === "en") return req.query.lang;
   const preferredLanguage = req.acceptsLanguages("zh-CN", "zh", "en");
@@ -237,6 +259,7 @@ app.post("/revoke", (req, res) => {
 app.post("/mcp", async (req, res) => {
   const clientId = requireMcpAuth(req, res);
   if (!clientId) return;
+  await cleanupExpiredVisibleBrowserControl();
 
   const request = asJsonRpcRequest(req.body);
   if (!request) {
@@ -261,7 +284,10 @@ app.post("/mcp", async (req, res) => {
 
   if (request.method === "tools/list") {
     recordActivity({ clientId, method: request.method, ok: true, summary: "Listed tools." });
-    const enabledToolNames = new Set(listToolStates().filter((tool) => tool.enabled).map((tool) => tool.name));
+    const enabledToolNames = new Set(listToolStates().filter((tool) => tool.enabled && !isVisibleBrowserToolName(tool.name)).map((tool) => tool.name));
+    if (isVisibleBrowserControlEnabled()) {
+      for (const name of visibleBrowserToolNames) enabledToolNames.add(name);
+    }
     res.json(jsonRpcResult(request.id, { tools: toolDefinitions.filter((tool) => enabledToolNames.has(tool.name)) }));
     return;
   }
@@ -274,7 +300,12 @@ app.post("/mcp", async (req, res) => {
       res.json(jsonRpcError(request.id, -32602, "tools/call requires params.name."));
       return;
     }
-    if (!isToolEnabled(name)) {
+    if (isVisibleBrowserToolName(name) && !isVisibleBrowserControlEnabled()) {
+      recordActivity({ clientId, method: request.method, toolName: name, ok: false, summary: "Visible browser control is off." });
+      res.json(jsonRpcError(request.id, -32603, "Tool is disabled: visible browser control is off"));
+      return;
+    }
+    if (!isVisibleBrowserToolName(name) && !isToolEnabled(name)) {
       recordActivity({ clientId, method: request.method, toolName: name, ok: false, summary: "Tool is disabled." });
       res.json(jsonRpcError(request.id, -32603, `Tool is disabled: ${name}`));
       return;
@@ -307,14 +338,15 @@ app.get("/admin", async (req, res) => {
     publicBaseUrl,
     adminToken: adminPasscode,
     clients: listOAuthClientStatus(),
-    tools: listToolStates(),
+    specialTools: getSpecialToolStates(),
+    tools: listToolStates().filter((tool) => !isVisibleBrowserToolName(tool.name)),
     activity: listActivity(),
     projects,
     stats: {
       jobs: countJobs(),
       shares: countShares(),
       projects: activeProjects.length,
-      enabledTools: listToolStates().filter((tool) => tool.enabled).length,
+      enabledTools: listToolStates().filter((tool) => tool.enabled && !isVisibleBrowserToolName(tool.name)).length + (isVisibleBrowserControlEnabled() ? visibleBrowserToolNames.length : 0),
       connectedClients: listOAuthClientStatus().length
     }
   }));
@@ -444,10 +476,69 @@ app.post("/admin/tools/toggle", (req, res) => {
   const body = req.body as Partial<Record<string, string>>;
   try {
     if (!body.name) throw new Error("Missing tool name.");
+    if (isVisibleBrowserToolName(body.name)) throw new Error("Browser control tools are managed from Special Tools.");
     setToolEnabled(body.name, body.enabled === "1");
     res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Tool toggle failed.";
+    res.status(400).send(message);
+  }
+});
+
+app.post("/admin/special-tools/visible-browser/enable", (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const body = req.body as Partial<Record<string, string>>;
+  try {
+    const durationMinutes = Number.parseInt(body.durationMinutes ?? "15", 10);
+    const state = enableVisibleBrowserControl(durationMinutes, "admin");
+    recordActivity({
+      clientId: "admin",
+      method: "admin/special-tools",
+      toolName: "visible_browser_control",
+      ok: true,
+      summary: `Enabled visible browser control until ${state.enabledUntil}.`
+    });
+    res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Special tool enable failed.";
+    res.status(400).send(message);
+  }
+});
+
+app.post("/admin/special-tools/visible-browser/disable", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    disableVisibleBrowserControl("admin-disabled");
+    const closed = await closeAllBrowserSessions();
+    recordActivity({
+      clientId: "admin",
+      method: "admin/special-tools",
+      toolName: "visible_browser_control",
+      ok: true,
+      summary: `Disabled visible browser control. Closed ${closed.length} browser session(s).`
+    });
+    res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Special tool disable failed.";
+    res.status(400).send(message);
+  }
+});
+
+app.post("/admin/special-tools/visible-browser/kill", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    disableVisibleBrowserControl("admin-kill");
+    const closed = await closeAllBrowserSessions();
+    recordActivity({
+      clientId: "admin",
+      method: "admin/special-tools",
+      toolName: "visible_browser_control",
+      ok: true,
+      summary: `Killed visible browser control. Closed ${closed.length} browser session(s).`
+    });
+    res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Special tool kill failed.";
     res.status(400).send(message);
   }
 });

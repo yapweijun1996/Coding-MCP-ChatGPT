@@ -3,7 +3,7 @@ import { z } from "zod";
 import { createShareArtifact } from "../../share/store.js";
 import { makeShareUrl } from "../result.js";
 import type { Browser, Page } from "playwright";
-import type { ToolModule } from "../types.js";
+import type { ToolModule, ToolResult } from "../types.js";
 
 interface BrowserSession {
   id: string;
@@ -88,9 +88,8 @@ async function buildScreenshotArtifact(
 ): Promise<{ shareUrl: string; html: string }> {
   const screenshotBuffer = await page.screenshot({ type: "jpeg", quality: 70, fullPage });
   const dataUrl = `data:image/jpeg;base64,${screenshotBuffer.toString("base64")}`;
-  const html = `<!doctype html>\n<html><head><meta charset="utf-8"><title>Browser Step ${step}</title></head><body style="margin:0;font-family:system-ui">\n<h3 style=\"padding:12px;margin:0;background:#f4f4f4;border-bottom:1px solid #ddd\">Session ${sessionId} · Step ${step} · ${new Date().toISOString()}</h3>\n<p style=\"padding:0 12px;color:#444;font-size:13px\">${label}</p>\n<div style=\"padding:12px\"><img src=\"${dataUrl}\" style=\"width:100%;max-width:100%;height:auto;border:1px solid #ddd;\"></div>\n</body></html>`;
-  const safeLabel = label.toLowerCase().replace(/[^a-z0-9._-]/g, "-").slice(0, 80);
-  const filename = `browser-${sessionId}-${step}-${safeLabel || "step"}.html`;
+  const html = `<!doctype html>\n<html><head><meta charset="utf-8"><title>Browser Step ${step}</title></head><body style="margin:0;font-family:system-ui">\n<h3 style="padding:12px;margin:0;background:#f4f4f4;border-bottom:1px solid #ddd">Session ${sessionId} - Step ${step} - ${new Date().toISOString()}</h3>\n<p style="padding:0 12px;color:#444;font-size:13px">${label}</p>\n<div style="padding:12px"><img src="${dataUrl}" style="width:100%;max-width:100%;height:auto;border:1px solid #ddd;"></div>\n</body></html>`;
+  const filename = `browser-${sessionId.slice(0, 8)}-${step}.html`;
   const share = await createShareArtifact({
     shareRoot: ctx.shareRoot,
     title: `Browser Step ${step}`,
@@ -102,13 +101,25 @@ async function buildScreenshotArtifact(
   return { shareUrl, html };
 }
 
+async function getPageSnapshot(session: BrowserSession, screenshotUrl?: string): Promise<Record<string, unknown>> {
+  return {
+    sessionId: session.id,
+    step: session.step,
+    url: session.page.url(),
+    title: await session.page.title().catch(() => ""),
+    startedAt: session.startedAt,
+    createdBy: session.createdBy,
+    screenshotUrl
+  };
+}
+
 async function screenshotAndRespond(
   session: BrowserSession,
   label: string,
   ctx: { publicBaseUrl: string; shareRoot: string },
   summary: string,
   extraLogs: string[] = []
-): Promise<import("../types.js").ToolResult> {
+): Promise<ToolResult> {
   const step = ++session.step;
   const { shareUrl } = await buildScreenshotArtifact(ctx, session.id, step, label, session.page);
   return {
@@ -118,9 +129,21 @@ async function screenshotAndRespond(
     previewUrl: shareUrl,
     shareUrl,
     artifacts: [shareUrl],
+    structuredContent: await getPageSnapshot(session, shareUrl),
     logs: [`Session ${session.id} step ${step}: ${label}`, ...extraLogs],
     errors: []
   };
+}
+
+export async function closeAllBrowserSessions(): Promise<string[]> {
+  const closed: string[] = [];
+  for (const [id, session] of Array.from(browserSessions.entries())) {
+    await session.page.close().catch(() => undefined);
+    await session.browser.close().catch(() => undefined);
+    browserSessions.delete(id);
+    closed.push(id);
+  }
+  return closed;
 }
 
 export const browserTools: ToolModule[] = [
@@ -141,7 +164,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: openBrowserSessionSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof openBrowserSessionSchema>;
@@ -189,6 +212,7 @@ export const browserTools: ToolModule[] = [
         summary: `Started browser session ${id}.`,
         jobId: id,
         artifacts: [],
+        structuredContent: await getPageSnapshot(session),
         logs,
         errors: []
       };
@@ -210,7 +234,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: browserNavigateSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserNavigateSchema>;
@@ -234,7 +258,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: browserActionSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserActionSchema>;
@@ -262,7 +286,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: browserTypeSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserTypeSchema>;
@@ -292,12 +316,11 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: browserPressSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserPressSchema>;
       const session = getSessionOrThrow(parsed.sessionId);
-      await session.page.waitForTimeout(parsed.timeoutMs);
       await session.page.keyboard.press(parsed.key);
       return screenshotAndRespond(session, `Press ${parsed.key}`, ctx, `Pressed key ${parsed.key}.`, [
         `key=${parsed.key}`
@@ -319,9 +342,9 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: browserScreenshotSchema,
-      handler: async (input, ctx) => {
+    handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserScreenshotSchema>;
       const session = getSessionOrThrow(parsed.sessionId);
       const step = ++session.step;
@@ -333,6 +356,7 @@ export const browserTools: ToolModule[] = [
         previewUrl: shareUrl,
         shareUrl,
         artifacts: [shareUrl],
+        structuredContent: await getPageSnapshot(session, shareUrl),
         logs: [`Session ${session.id} screenshot step ${step}`, `label=${parsed.label}`],
         errors: []
       };
@@ -352,7 +376,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: browserWaitSchema,
     handler: async (input) => {
       const parsed = input as z.infer<typeof browserWaitSchema>;
@@ -363,6 +387,7 @@ export const browserTools: ToolModule[] = [
         summary: `Waited ${parsed.ms}ms in session ${session.id}.`,
         jobId: session.id,
         artifacts: [],
+        structuredContent: await getPageSnapshot(session),
         logs: [`session=${session.id}`, `waitMs=${parsed.ms}`],
         errors: []
       };
@@ -381,7 +406,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: true,
+    enabledByDefault: false,
     schema: closeBrowserSessionSchema,
     handler: async (input) => {
       const parsed = input as z.infer<typeof closeBrowserSessionSchema>;
