@@ -177,13 +177,12 @@
 
 ChatGPT 或其他 AI agent 交付编码项目时，应优先使用持久化 Project 工具链：
 
-1. `create_project`：创建项目并取得 `projectId`
-2. `write_project_file`：写入 `index.html`、CSS、JS、Markdown 等文件
-3. `get_project_manifest`：读取 agent-readable 项目上下文
-4. `validate_project`：检查入口文件、路径安全、文件大小和 HTML 基本结构
-5. `publish_and_report`：验证通过后发布，并返回稳定的 `publishedUrl`
+1. `deliver_static_project`：一次提交多个静态文本文件，自动创建项目、验证、发布和浏览器检查
+2. `get_project_activity`：需要诊断失败或查看历史时读取 task history 和 latest validation
+3. `get_project_manifest`：需要完整项目上下文时读取 manifest
+4. `validate_project` / `publish_and_report`：仅在修复或增量编辑时使用分步流程
 
-不要用 legacy `create_share` 交付项目。它默认关闭，仅保留给兼容测试；正式项目链接应来自 `publish_and_report`，格式为 `https://gmb01.xyz/share/{projectId}/index.html`。
+不要用 legacy `create_share` 交付项目。它默认关闭，仅保留给兼容测试；正式项目链接应来自 `deliver_static_project` 或 `publish_and_report`，格式为 `https://gmb01.xyz/share/{projectId}/index.html`。
 
 ## 运维与安全
 

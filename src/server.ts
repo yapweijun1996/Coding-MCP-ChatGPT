@@ -125,7 +125,7 @@ function asJsonRpcRequest(value: unknown): JsonRpcRequest | undefined {
 }
 
 function resultToMcpContent(result: ToolResult): Record<string, unknown> {
-  return {
+  const response: Record<string, unknown> = {
     content: [
       {
         type: "text",
@@ -134,6 +134,8 @@ function resultToMcpContent(result: ToolResult): Record<string, unknown> {
     ],
     isError: !result.ok
   };
+  if (result.structuredContent) response.structuredContent = result.structuredContent;
+  return response;
 }
 
 app.get("/health", (_req, res) => {

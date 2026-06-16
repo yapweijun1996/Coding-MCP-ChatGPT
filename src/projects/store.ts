@@ -5,16 +5,27 @@ import { TextDecoder } from "node:util";
 
 export type ProjectStatus = "draft" | "published" | "deleted";
 export type ProjectValidationStatus = "valid" | "warnings" | "failed";
+export type ProjectValidationProfile = "static_html";
+
+export interface ProjectBrowserInspectionSummary {
+  ok: boolean;
+  blockingErrors: string[];
+  warnings: string[];
+  reportUrl?: string;
+  inspectedAt: string;
+}
 
 export interface ProjectValidationResult {
   ok: boolean;
   status: ProjectValidationStatus;
+  profile: ProjectValidationProfile;
   projectId: string;
   entryFile: string;
   filesChecked: number;
   warnings: string[];
   errors: string[];
   checkedAt: string;
+  browserInspection?: ProjectBrowserInspectionSummary;
 }
 
 export interface ProjectTaskHistoryItem {
@@ -55,6 +66,15 @@ export interface ProjectManifest {
   files: ProjectFileInfo[];
   entryFile: string;
   publishedUrl?: string;
+  lastValidation?: ProjectValidationResult;
+  taskHistory: ProjectTaskHistoryItem[];
+}
+
+export interface ProjectActivity {
+  projectId: string;
+  status: ProjectStatus;
+  publishedUrl?: string;
+  createdByClientId: string;
   lastValidation?: ProjectValidationResult;
   taskHistory: ProjectTaskHistoryItem[];
 }
@@ -404,6 +424,18 @@ export async function getProjectManifest(projectRoot: string, projectId: string)
   };
 }
 
+export async function getProjectActivity(projectRoot: string, projectId: string, limit = 50): Promise<ProjectActivity> {
+  const metadata = await getProject(projectRoot, projectId);
+  return {
+    projectId,
+    status: metadata.status,
+    publishedUrl: metadata.publishedUrl,
+    createdByClientId: metadata.createdByClientId,
+    lastValidation: metadata.lastValidation,
+    taskHistory: (metadata.taskHistory ?? []).slice(-limit)
+  };
+}
+
 export async function writeProjectFile(projectRoot: string, projectId: string, relativePath: string, content: string): Promise<ProjectFileInfo> {
   if (Buffer.byteLength(content, "utf8") > maxProjectFileBytes) {
     throw new Error("Project file content exceeds 1 MiB.");
@@ -473,12 +505,52 @@ export async function readProjectFile(projectRoot: string, projectId: string, re
   return readFile(absolutePath, "utf8");
 }
 
-export async function validateProject(projectRoot: string, projectId: string, entryFile?: string): Promise<ProjectValidationResult> {
+function isExternalOrNonFileReference(value: string): boolean {
+  const trimmed = value.trim();
+  return !trimmed
+    || trimmed.startsWith("#")
+    || /^(?:https?:|\/\/|data:|mailto:|tel:|javascript:|blob:)/i.test(trimmed);
+}
+
+function normalizeHtmlReference(entryFile: string, reference: string): string | undefined {
+  if (isExternalOrNonFileReference(reference)) return undefined;
+  const withoutQuery = reference.split("#")[0]?.split("?")[0] ?? "";
+  if (!withoutQuery || withoutQuery.startsWith("/")) return undefined;
+  const entryDirectory = path.posix.dirname(entryFile.replaceAll("\\", "/"));
+  const joined = entryDirectory === "." ? withoutQuery : path.posix.join(entryDirectory, withoutQuery);
+  return path.posix.normalize(joined);
+}
+
+function extractLocalHtmlReferences(entryFile: string, html: string): string[] {
+  const references = new Set<string>();
+  const patterns = [
+    /\b(?:src|href)\s*=\s*["']([^"']+)["']/gi,
+    /\bsrcset\s*=\s*["']([^"']+)["']/gi
+  ];
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(html)) !== null) {
+      const raw = match[1];
+      if (!raw) continue;
+      const candidates = pattern.source.includes("srcset")
+        ? raw.split(",").map((item) => item.trim().split(/\s+/)[0]).filter(Boolean)
+        : [raw];
+      for (const candidate of candidates) {
+        const normalized = normalizeHtmlReference(entryFile, candidate);
+        if (normalized) references.add(normalized);
+      }
+    }
+  }
+  return [...references].sort();
+}
+
+export async function validateProject(projectRoot: string, projectId: string, entryFile?: string, profile: ProjectValidationProfile = "static_html"): Promise<ProjectValidationResult> {
   const metadata = await getProject(projectRoot, projectId);
   const warnings: string[] = [];
   const errors: string[] = [];
   const checkedAt = new Date().toISOString();
   const files = await listProjectFiles(projectRoot, projectId);
+  const filePaths = new Set(files.map((file) => file.path));
   const safeEntryFile = (() => {
     try {
       return assertSafeProjectFilePath(entryFile ?? metadata.entryFile);
@@ -518,6 +590,17 @@ export async function validateProject(projectRoot: string, projectId: string, en
       if (!lowerHtml.includes("<body") || !lowerHtml.includes("</body>")) {
         warnings.push(`Entry HTML should include <body> and </body>: ${safeEntryFile}`);
       }
+      const references = extractLocalHtmlReferences(safeEntryFile, html);
+      for (const reference of references) {
+        try {
+          const safeReference = assertSafeProjectStoredPath(reference);
+          if (!filePaths.has(safeReference)) {
+            errors.push(`Referenced local resource not found: ${reference}`);
+          }
+        } catch (error) {
+          errors.push(`Invalid local resource reference ${reference}: ${error instanceof Error ? error.message : "invalid reference"}`);
+        }
+      }
     } catch (error) {
       errors.push(error instanceof Error ? error.message : `Unable to read entry file: ${safeEntryFile}`);
     }
@@ -528,6 +611,7 @@ export async function validateProject(projectRoot: string, projectId: string, en
   const result: ProjectValidationResult = {
     ok: errors.length === 0,
     status: errors.length > 0 ? "failed" : warnings.length > 0 ? "warnings" : "valid",
+    profile,
     projectId,
     entryFile: safeEntryFile,
     filesChecked: files.length,
@@ -564,6 +648,56 @@ export async function publishProject(projectRoot: string, projectId: string, pub
     ok: true,
     summary: `Published ${projectId}.`,
     details: { entryFile: safeEntryFile, publishedUrl }
+  });
+  await writeProjectMetadata(projectRoot, updated);
+  return updated;
+}
+
+export async function unpublishProject(projectRoot: string, projectId: string, reason: string): Promise<ProjectMetadata> {
+  const metadata = await getProject(projectRoot, projectId);
+  if (metadata.status === "deleted") throw new Error("Cannot unpublish a deleted project.");
+  const updated = addHistory({
+    ...metadata,
+    status: "draft" as ProjectStatus,
+    publishedUrl: undefined
+  }, {
+    toolName: "unpublish_project",
+    ok: true,
+    summary: reason
+  });
+  await writeProjectMetadata(projectRoot, updated);
+  return updated;
+}
+
+export async function recordProjectBrowserInspection(
+  projectRoot: string,
+  projectId: string,
+  browserInspection: ProjectBrowserInspectionSummary,
+  toolName = "browser_validate_project"
+): Promise<ProjectMetadata> {
+  const metadata = await getProject(projectRoot, projectId);
+  const previousValidation = metadata.lastValidation;
+  const errors = [...(previousValidation?.errors ?? []), ...browserInspection.blockingErrors];
+  const warnings = [...(previousValidation?.warnings ?? []), ...browserInspection.warnings];
+  const lastValidation: ProjectValidationResult = {
+    ok: (previousValidation?.ok ?? true) && browserInspection.ok,
+    status: errors.length > 0 ? "failed" : warnings.length > 0 ? "warnings" : "valid",
+    profile: previousValidation?.profile ?? "static_html",
+    projectId,
+    entryFile: previousValidation?.entryFile ?? metadata.entryFile,
+    filesChecked: previousValidation?.filesChecked ?? 0,
+    warnings,
+    errors,
+    checkedAt: browserInspection.inspectedAt,
+    browserInspection
+  };
+  const updated = addHistory({ ...metadata, lastValidation }, {
+    toolName,
+    ok: browserInspection.ok,
+    summary: browserInspection.ok
+      ? `Browser validation passed for ${projectId}.`
+      : `Browser validation failed for ${projectId}.`,
+    details: browserInspection
   });
   await writeProjectMetadata(projectRoot, updated);
   return updated;

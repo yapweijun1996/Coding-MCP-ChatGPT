@@ -9,6 +9,7 @@ export interface ToolResult {
   artifacts: string[];
   logs: string[];
   errors: string[];
+  structuredContent?: Record<string, unknown>;
 }
 
 export interface ToolDefinition {

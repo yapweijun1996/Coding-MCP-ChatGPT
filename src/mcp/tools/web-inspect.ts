@@ -4,7 +4,7 @@ import { createShareArtifact } from "../../share/store.js";
 import { makeShareUrl } from "../result.js";
 import type { ToolModule } from "../types.js";
 
-type ViewportName = "desktop" | "tablet" | "mobile";
+export type ViewportName = "desktop" | "tablet" | "mobile";
 
 const viewportPresets: Record<ViewportName, { width: number; height: number; isMobile: boolean }> = {
   desktop: { width: 1440, height: 900, isMobile: false },
@@ -22,7 +22,7 @@ const inspectWebpageSchema = z.object({
   maxIssues: z.number().int().min(1).max(50).optional().default(12)
 });
 
-type LayoutIssue = {
+export type LayoutIssue = {
   type: string;
   severity: "info" | "warning" | "error";
   message: string;
@@ -31,7 +31,7 @@ type LayoutIssue = {
   box?: { x: number; y: number; width: number; height: number };
 };
 
-type ViewportResult = {
+export type ViewportResult = {
   viewport: ViewportName;
   width: number;
   height: number;
@@ -46,11 +46,53 @@ type ViewportResult = {
   screenshotDataUrl?: string;
 };
 
+export type BrowserInspectionSummary = {
+  ok: boolean;
+  blockingErrors: string[];
+  warnings: string[];
+  results: Array<Omit<ViewportResult, "screenshotDataUrl">>;
+  reportUrl?: string;
+  inspectedAt: string;
+};
+
+export type BrowserInspectionOptions = {
+  viewports?: ViewportName[];
+  timeoutMs?: number;
+  waitUntil?: "domcontentloaded" | "load" | "networkidle";
+  screenshot?: boolean;
+  fullPage?: boolean;
+  maxIssues?: number;
+};
+
 function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
-function renderReport(inputUrl: string, results: ViewportResult[]): string {
+export function summarizeBrowserInspection(results: Array<Omit<ViewportResult, "screenshotDataUrl">>): Omit<BrowserInspectionSummary, "reportUrl" | "inspectedAt"> {
+  const blockingErrors: string[] = [];
+  const warnings: string[] = [];
+
+  for (const result of results) {
+    for (const error of result.consoleErrors) blockingErrors.push(`${result.viewport} console error: ${error}`);
+    for (const error of result.pageErrors) blockingErrors.push(`${result.viewport} page error: ${error}`);
+    if (result.hasHorizontalOverflow) blockingErrors.push(`${result.viewport} has horizontal overflow.`);
+    if (!result.title.trim()) warnings.push(`${result.viewport} page title is empty.`);
+    for (const issue of result.issues) {
+      const message = `${result.viewport} ${issue.type}: ${issue.message}${issue.selector ? ` (${issue.selector})` : ""}`;
+      if (issue.severity === "error") blockingErrors.push(message);
+      else warnings.push(message);
+    }
+  }
+
+  return {
+    ok: blockingErrors.length === 0,
+    blockingErrors,
+    warnings,
+    results
+  };
+}
+
+export function renderWebpageInspectionReport(inputUrl: string, results: ViewportResult[]): string {
   const issueCount = results.reduce((total, result) => total + result.issues.length + result.consoleErrors.length + result.pageErrors.length, 0);
   const sections = results.map((result) => {
     const runtimeIssues = [
@@ -109,6 +151,110 @@ function renderReport(inputUrl: string, results: ViewportResult[]): string {
 </html>`;
 }
 
+export async function inspectWebpageUrl(url: string, options: BrowserInspectionOptions = {}): Promise<ViewportResult[]> {
+  const parsed = inspectWebpageSchema.parse({ url, ...options });
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch({ headless: true });
+  const results: ViewportResult[] = [];
+
+  try {
+    for (const viewportName of parsed.viewports) {
+      const preset = viewportPresets[viewportName];
+      const context = await browser.newContext({
+        viewport: { width: preset.width, height: preset.height },
+        isMobile: preset.isMobile,
+        deviceScaleFactor: viewportName === "desktop" ? 1 : 2
+      });
+      const page = await context.newPage();
+      const consoleErrors: string[] = [];
+      const pageErrors: string[] = [];
+      page.on("console", (message) => {
+        if (message.type() === "error") consoleErrors.push(message.text());
+      });
+      page.on("pageerror", (error) => pageErrors.push(error.message));
+
+      await page.goto(parsed.url, { waitUntil: parsed.waitUntil, timeout: parsed.timeoutMs });
+      const metrics = await page.evaluate((maxIssues) => {
+        const selectorFor = (element: Element): string => {
+          const id = element.id ? `#${CSS.escape(element.id)}` : "";
+          if (id) return `${element.tagName.toLowerCase()}${id}`;
+          const className = typeof element.className === "string" && element.className.trim()
+            ? `.${element.className.trim().split(/\s+/).slice(0, 3).map((item) => CSS.escape(item)).join(".")}`
+            : "";
+          return `${element.tagName.toLowerCase()}${className}`;
+        };
+        const visibleElements = Array.from(document.body.querySelectorAll("*")).filter((element) => {
+          const box = element.getBoundingClientRect();
+          const style = window.getComputedStyle(element);
+          return box.width > 0 && box.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+        });
+        const viewportWidth = window.innerWidth;
+        const overflowElements = visibleElements
+          .map((element) => {
+            const box = element.getBoundingClientRect();
+            return { element, box };
+          })
+          .filter(({ box }) => box.right > viewportWidth + 1 || box.left < -1)
+          .slice(0, maxIssues)
+          .map(({ element, box }) => ({
+            type: "horizontal-overflow",
+            severity: "error" as const,
+            message: "Element extends outside the viewport horizontally.",
+            selector: selectorFor(element),
+            text: (element.textContent ?? "").trim().slice(0, 120),
+            box: { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height) }
+          }));
+        const tapTargets = visibleElements
+          .filter((element) => /^(A|BUTTON|INPUT|SELECT|TEXTAREA)$/.test(element.tagName) || element.getAttribute("role") === "button")
+          .map((element) => ({ element, box: element.getBoundingClientRect() }))
+          .filter(({ box }) => box.width > 0 && box.height > 0 && (box.width < 44 || box.height < 44))
+          .slice(0, maxIssues)
+          .map(({ element, box }) => ({
+            type: "small-tap-target",
+            severity: "warning" as const,
+            message: "Interactive element is smaller than 44x44 CSS pixels.",
+            selector: selectorFor(element),
+            text: (element.textContent ?? "").trim().slice(0, 120),
+            box: { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height) }
+          }));
+        return {
+          title: document.title,
+          documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+          documentHeight: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
+          hasHorizontalOverflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > viewportWidth + 1,
+          issues: [...overflowElements, ...tapTargets].slice(0, maxIssues)
+        };
+      }, parsed.maxIssues);
+
+      let screenshotDataUrl: string | undefined;
+      if (parsed.screenshot) {
+        const screenshot = await page.screenshot({ type: "jpeg", quality: 55, fullPage: parsed.fullPage });
+        screenshotDataUrl = `data:image/jpeg;base64,${screenshot.toString("base64")}`;
+      }
+
+      results.push({
+        viewport: viewportName,
+        width: preset.width,
+        height: preset.height,
+        finalUrl: page.url(),
+        title: metrics.title,
+        documentWidth: metrics.documentWidth,
+        documentHeight: metrics.documentHeight,
+        hasHorizontalOverflow: metrics.hasHorizontalOverflow,
+        consoleErrors: consoleErrors.slice(0, parsed.maxIssues),
+        pageErrors: pageErrors.slice(0, parsed.maxIssues),
+        issues: metrics.issues,
+        screenshotDataUrl
+      });
+      await context.close();
+    }
+  } finally {
+    await browser.close();
+  }
+
+  return results;
+}
+
 export const webInspectTools: ToolModule[] = [
   {
     definition: {
@@ -137,106 +283,8 @@ export const webInspectTools: ToolModule[] = [
     schema: inspectWebpageSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof inspectWebpageSchema>;
-      const { chromium } = await import("playwright");
-      const browser = await chromium.launch({ headless: true });
-      const results: ViewportResult[] = [];
-
-      try {
-        for (const viewportName of parsed.viewports) {
-          const preset = viewportPresets[viewportName];
-          const context = await browser.newContext({
-            viewport: { width: preset.width, height: preset.height },
-            isMobile: preset.isMobile,
-            deviceScaleFactor: viewportName === "desktop" ? 1 : 2
-          });
-          const page = await context.newPage();
-          const consoleErrors: string[] = [];
-          const pageErrors: string[] = [];
-          page.on("console", (message) => {
-            if (message.type() === "error") consoleErrors.push(message.text());
-          });
-          page.on("pageerror", (error) => pageErrors.push(error.message));
-
-          await page.goto(parsed.url, { waitUntil: parsed.waitUntil, timeout: parsed.timeoutMs });
-          const metrics = await page.evaluate((maxIssues) => {
-            const selectorFor = (element: Element): string => {
-              const id = element.id ? `#${CSS.escape(element.id)}` : "";
-              if (id) return `${element.tagName.toLowerCase()}${id}`;
-              const className = typeof element.className === "string" && element.className.trim()
-                ? `.${element.className.trim().split(/\s+/).slice(0, 3).map((item) => CSS.escape(item)).join(".")}`
-                : "";
-              return `${element.tagName.toLowerCase()}${className}`;
-            };
-            const visibleElements = Array.from(document.body.querySelectorAll("*")).filter((element) => {
-              const box = element.getBoundingClientRect();
-              const style = window.getComputedStyle(element);
-              return box.width > 0 && box.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-            });
-            const viewportWidth = window.innerWidth;
-            const overflowElements = visibleElements
-              .map((element) => {
-                const box = element.getBoundingClientRect();
-                return { element, box };
-              })
-              .filter(({ box }) => box.right > viewportWidth + 1 || box.left < -1)
-              .slice(0, maxIssues)
-              .map(({ element, box }) => ({
-                type: "horizontal-overflow",
-                severity: "error" as const,
-                message: "Element extends outside the viewport horizontally.",
-                selector: selectorFor(element),
-                text: (element.textContent ?? "").trim().slice(0, 120),
-                box: { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height) }
-              }));
-            const tapTargets = visibleElements
-              .filter((element) => /^(A|BUTTON|INPUT|SELECT|TEXTAREA)$/.test(element.tagName) || element.getAttribute("role") === "button")
-              .map((element) => ({ element, box: element.getBoundingClientRect() }))
-              .filter(({ box }) => box.width > 0 && box.height > 0 && (box.width < 44 || box.height < 44))
-              .slice(0, maxIssues)
-              .map(({ element, box }) => ({
-                type: "small-tap-target",
-                severity: "warning" as const,
-                message: "Interactive element is smaller than 44x44 CSS pixels.",
-                selector: selectorFor(element),
-                text: (element.textContent ?? "").trim().slice(0, 120),
-                box: { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height) }
-              }));
-            return {
-              title: document.title,
-              documentWidth: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
-              documentHeight: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
-              hasHorizontalOverflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > viewportWidth + 1,
-              issues: [...overflowElements, ...tapTargets].slice(0, maxIssues)
-            };
-          }, parsed.maxIssues);
-
-          let screenshotDataUrl: string | undefined;
-          if (parsed.screenshot) {
-            const screenshot = await page.screenshot({ type: "jpeg", quality: 55, fullPage: parsed.fullPage });
-            screenshotDataUrl = `data:image/jpeg;base64,${screenshot.toString("base64")}`;
-          }
-
-          results.push({
-            viewport: viewportName,
-            width: preset.width,
-            height: preset.height,
-            finalUrl: page.url(),
-            title: metrics.title,
-            documentWidth: metrics.documentWidth,
-            documentHeight: metrics.documentHeight,
-            hasHorizontalOverflow: metrics.hasHorizontalOverflow,
-            consoleErrors: consoleErrors.slice(0, parsed.maxIssues),
-            pageErrors: pageErrors.slice(0, parsed.maxIssues),
-            issues: metrics.issues,
-            screenshotDataUrl
-          });
-          await context.close();
-        }
-      } finally {
-        await browser.close();
-      }
-
-      const report = renderReport(parsed.url, results);
+      const results = await inspectWebpageUrl(parsed.url, parsed);
+      const report = renderWebpageInspectionReport(parsed.url, results);
       const share = await createShareArtifact({
         shareRoot: ctx.shareRoot,
         title: "Webpage Inspection Report",
@@ -245,10 +293,15 @@ export const webInspectTools: ToolModule[] = [
         html: report
       });
       const shareUrl = makeShareUrl(ctx.publicBaseUrl, share.id, share.filename);
-      const summary = results.some((result) => result.hasHorizontalOverflow || result.consoleErrors.length || result.pageErrors.length || result.issues.length)
-        ? `Inspected ${parsed.url}; issues or runtime signals were found.`
-        : `Inspected ${parsed.url}; no obvious responsive layout issues found.`;
       const resultForLogs = results.map(({ screenshotDataUrl, ...result }) => result);
+      const inspection = {
+        ...summarizeBrowserInspection(resultForLogs),
+        reportUrl: shareUrl,
+        inspectedAt: new Date().toISOString()
+      };
+      const summary = inspection.ok
+        ? `Inspected ${parsed.url}; no blocking responsive/runtime issues found.`
+        : `Inspected ${parsed.url}; blocking responsive/runtime issues were found.`;
 
       return {
         ok: true,
@@ -256,7 +309,8 @@ export const webInspectTools: ToolModule[] = [
         shareUrl,
         previewUrl: shareUrl,
         artifacts: [shareUrl],
-        logs: [JSON.stringify({ reportUrl: shareUrl, results: resultForLogs }, null, 2)],
+        structuredContent: inspection,
+        logs: [JSON.stringify(inspection, null, 2)],
         errors: []
       };
     }

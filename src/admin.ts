@@ -199,6 +199,7 @@ export function renderProjectPage(data: ProjectPageData): string {
   const validation = validationStatus(data.manifest.lastValidation);
   const manifestJson = JSON.stringify(data.manifest, null, 2);
   const validationJson = data.manifest.lastValidation ? JSON.stringify(data.manifest.lastValidation, null, 2) : "No validation has been run yet.";
+  const inspectionReportUrl = data.manifest.lastValidation?.browserInspection?.reportUrl;
   const historyRows = data.manifest.taskHistory.map((event) => `
     <tr>
       <td>${escapeHtml(event.time)}</td>
@@ -238,6 +239,7 @@ export function renderProjectPage(data: ProjectPageData): string {
     </section>
     <section>
       <h2>Last Validation</h2>
+      ${inspectionReportUrl ? `<div class="empty"><a href="${escapeHtml(inspectionReportUrl)}" target="_blank" rel="noreferrer">Open browser inspection report</a></div>` : ""}
       <pre class="json-view">${escapeHtml(validationJson)}</pre>
     </section>
     <section>

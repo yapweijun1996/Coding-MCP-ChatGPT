@@ -2,21 +2,28 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import path from "node:path";
 import { z } from "zod";
+import { createShareArtifact } from "../../share/store.js";
 import {
+  appendProjectTaskHistory,
   createProject,
   deleteProject,
   deleteProjectFile,
+  getProjectActivity,
   getProjectManifest,
   getProjectWithFiles,
   listProjects,
   publishProjectAndReport,
   publishProject,
   readProjectFile,
+  recordProjectBrowserInspection,
+  unpublishProject,
   validateProject,
   writeProjectAsset,
   writeProjectFile
 } from "../../projects/store.js";
+import { makeShareUrl } from "../result.js";
 import type { ToolModule } from "../types.js";
+import { inspectWebpageUrl, renderWebpageInspectionReport, summarizeBrowserInspection } from "./web-inspect.js";
 
 const maxBase64AssetChars = 40 * 1024 * 1024;
 const maxImportedImageBytes = 10 * 1024 * 1024;
@@ -75,7 +82,25 @@ const publishProjectInputSchema = z.object({
 
 const validateProjectInputSchema = z.object({
   projectId: z.string().min(8).max(80),
-  entryFile: z.string().min(1).max(240).optional()
+  entryFile: z.string().min(1).max(240).optional(),
+  profile: z.literal("static_html").optional().default("static_html")
+});
+
+const getProjectActivityInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  limit: z.number().int().min(1).max(100).optional().default(50)
+});
+
+const deliverStaticProjectInputSchema = z.object({
+  title: z.string().min(1).max(160),
+  summary: z.string().max(2000).optional().default(""),
+  entryFile: z.string().min(1).max(240).optional().default("index.html"),
+  profile: z.literal("static_html").optional().default("static_html"),
+  browserValidation: z.boolean().optional().default(true),
+  files: z.array(z.object({
+    path: z.string().min(1).max(240),
+    content: z.string().max(1024 * 1024)
+  })).min(1).max(40)
 });
 
 const deleteProjectInputSchema = z.object({
@@ -185,6 +210,10 @@ async function fetchProjectAsset(url: string, relativePath: string): Promise<{ b
   throw new Error("Asset import exceeded the redirect limit.");
 }
 
+function withoutScreenshots(results: Awaited<ReturnType<typeof inspectWebpageUrl>>) {
+  return results.map(({ screenshotDataUrl, ...result }) => result);
+}
+
 export const projectTools: ToolModule[] = [
   {
     definition: {
@@ -260,7 +289,40 @@ export const projectTools: ToolModule[] = [
         previewUrl: manifest.publishedUrl,
         shareUrl: manifest.publishedUrl,
         artifacts: manifest.files.map((file) => file.path),
+        structuredContent: manifest as unknown as Record<string, unknown>,
         logs: [JSON.stringify(manifest, null, 2)],
+        errors: []
+      };
+    }
+  },
+  {
+    definition: {
+      name: "get_project_activity",
+      description: "Get project task history, latest validation, publish status, and creator connector.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          limit: { type: "number", minimum: 1, maximum: 100 }
+        },
+        required: ["projectId"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: getProjectActivityInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = input as z.infer<typeof getProjectActivityInputSchema>;
+      const activity = await getProjectActivity(ctx.projectRoot, parsed.projectId, parsed.limit);
+      return {
+        ok: true,
+        summary: `Loaded activity for project ${parsed.projectId}.`,
+        jobId: parsed.projectId,
+        previewUrl: activity.publishedUrl,
+        shareUrl: activity.publishedUrl,
+        artifacts: [],
+        structuredContent: activity as unknown as Record<string, unknown>,
+        logs: [JSON.stringify(activity, null, 2)],
         errors: []
       };
     }
@@ -337,6 +399,166 @@ export const projectTools: ToolModule[] = [
   },
   {
     definition: {
+      name: "deliver_static_project",
+      description: "Create a static project from multiple text files, validate it, publish it, browser-inspect it, and return a final delivery report.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Project title." },
+          summary: { type: "string", description: "Short project summary." },
+          entryFile: { type: "string", description: "Entry file, default index.html." },
+          profile: { type: "string", enum: ["static_html"], description: "Validation profile. Only static_html is supported in v1." },
+          browserValidation: { type: "boolean", description: "Run browser validation after publish. Defaults to true." },
+          files: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                content: { type: "string" }
+              },
+              required: ["path", "content"],
+              additionalProperties: false
+            },
+            description: "Text project files to write."
+          }
+        },
+        required: ["title", "files"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: deliverStaticProjectInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = input as z.infer<typeof deliverStaticProjectInputSchema>;
+      const project = await createProject(ctx.projectRoot, {
+        title: parsed.title,
+        summary: parsed.summary,
+        entryFile: parsed.entryFile,
+        createdByClientId: ctx.clientId
+      });
+      const files = [];
+      for (const fileInput of parsed.files) {
+        files.push(await writeProjectFile(ctx.projectRoot, project.id, fileInput.path, fileInput.content));
+      }
+
+      const validation = await validateProject(ctx.projectRoot, project.id, parsed.entryFile, parsed.profile);
+      if (!validation.ok) {
+        const report = {
+          ok: false,
+          projectId: project.id,
+          entryFile: validation.entryFile,
+          files,
+          validation,
+          nextActions: ["Fix static validation errors, then call publish_and_report or deliver_static_project again."]
+        };
+        await appendProjectTaskHistory(ctx.projectRoot, project.id, {
+          toolName: "deliver_static_project",
+          ok: false,
+          summary: `Static validation blocked delivery for ${project.id}.`,
+          details: report
+        });
+        return {
+          ok: false,
+          summary: `Static validation blocked delivery for ${project.id}.`,
+          jobId: project.id,
+          artifacts: files.map((file) => file.path),
+          structuredContent: report,
+          logs: [JSON.stringify(report, null, 2)],
+          errors: validation.errors
+        };
+      }
+
+      const published = await publishProject(ctx.projectRoot, project.id, ctx.publicBaseUrl, validation.entryFile);
+      let browserInspection: Record<string, unknown> | undefined;
+      let inspectionReportUrl: string | undefined;
+      if (parsed.browserValidation) {
+        const browserResults = await inspectWebpageUrl(published.publishedUrl!, {
+          viewports: ["desktop", "tablet", "mobile"],
+          waitUntil: "networkidle",
+          screenshot: true,
+          fullPage: false,
+          maxIssues: 12
+        });
+        const inspectionReport = renderWebpageInspectionReport(published.publishedUrl!, browserResults);
+        const inspectionShare = await createShareArtifact({
+          shareRoot: ctx.shareRoot,
+          title: "Delivery Browser Inspection Report",
+          summary: `Browser validation for ${project.id}.`,
+          filename: `delivery-inspection-${project.id}.html`,
+          html: inspectionReport
+        });
+        inspectionReportUrl = makeShareUrl(ctx.publicBaseUrl, inspectionShare.id, inspectionShare.filename);
+        const inspectionWithoutScreenshots = withoutScreenshots(browserResults);
+        const inspectionSummary = {
+          ...summarizeBrowserInspection(inspectionWithoutScreenshots),
+          reportUrl: inspectionReportUrl,
+          inspectedAt: new Date().toISOString()
+        };
+        browserInspection = inspectionSummary as unknown as Record<string, unknown>;
+        await recordProjectBrowserInspection(ctx.projectRoot, project.id, inspectionSummary, "deliver_static_project_browser_validation");
+        if (!inspectionSummary.ok) {
+          await unpublishProject(ctx.projectRoot, project.id, `Browser validation blocked delivery for ${project.id}.`);
+          const report = {
+            ok: false,
+            projectId: project.id,
+            entryFile: validation.entryFile,
+            files,
+            validation: { ...validation, browserInspection: inspectionSummary },
+            browserInspection: inspectionSummary,
+            inspectionReportUrl,
+            nextActions: ["Fix browser validation errors, then run deliver_static_project again."]
+          };
+          await appendProjectTaskHistory(ctx.projectRoot, project.id, {
+            toolName: "deliver_static_project",
+            ok: false,
+            summary: `Browser validation blocked delivery for ${project.id}.`,
+            details: report
+          });
+          return {
+            ok: false,
+            summary: `Browser validation blocked delivery for ${project.id}.`,
+            jobId: project.id,
+            artifacts: [inspectionReportUrl, ...files.map((file) => file.path)],
+            structuredContent: report,
+            logs: [JSON.stringify(report, null, 2)],
+            errors: inspectionSummary.blockingErrors
+          };
+        }
+      }
+
+      const report = {
+        ok: true,
+        projectId: project.id,
+        publishedUrl: published.publishedUrl,
+        entryFile: published.entryFile,
+        files,
+        validation,
+        browserInspection,
+        inspectionReportUrl,
+        nextActions: [`Return this public URL to the user: ${published.publishedUrl}`]
+      };
+      await appendProjectTaskHistory(ctx.projectRoot, project.id, {
+        toolName: "deliver_static_project",
+        ok: true,
+        summary: `Delivered static project ${project.id}.`,
+        details: report
+      });
+      return {
+        ok: true,
+        summary: `Delivered static project ${project.id}.`,
+        jobId: project.id,
+        previewUrl: published.publishedUrl,
+        shareUrl: published.publishedUrl,
+        artifacts: [published.publishedUrl!, ...(inspectionReportUrl ? [inspectionReportUrl] : []), ...files.map((file) => file.path)],
+        structuredContent: report,
+        logs: [JSON.stringify(report, null, 2)],
+        errors: []
+      };
+    }
+  },
+  {
+    definition: {
       name: "read_project_file",
       description: "Read a UTF-8 file from a persistent project.",
       inputSchema: { type: "object", properties: { projectId: { type: "string" }, relativePath: { type: "string" }, maxBytes: { type: "number", minimum: 1, maximum: 1048576 } }, required: ["projectId", "relativePath"], additionalProperties: false }
@@ -371,7 +593,8 @@ export const projectTools: ToolModule[] = [
         type: "object",
         properties: {
           projectId: { type: "string" },
-          entryFile: { type: "string", description: "Entry file to validate. Defaults to project entryFile." }
+          entryFile: { type: "string", description: "Entry file to validate. Defaults to project entryFile." },
+          profile: { type: "string", enum: ["static_html"], description: "Validation profile. Only static_html is supported in v1." }
         },
         required: ["projectId"],
         additionalProperties: false
@@ -381,7 +604,7 @@ export const projectTools: ToolModule[] = [
     schema: validateProjectInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof validateProjectInputSchema>;
-      const validation = await validateProject(ctx.projectRoot, parsed.projectId, parsed.entryFile);
+      const validation = await validateProject(ctx.projectRoot, parsed.projectId, parsed.entryFile, parsed.profile);
       return {
         ok: validation.ok,
         summary: validation.ok
@@ -389,6 +612,7 @@ export const projectTools: ToolModule[] = [
           : `Project ${parsed.projectId} validation failed.`,
         jobId: parsed.projectId,
         artifacts: [validation.entryFile],
+        structuredContent: validation as unknown as Record<string, unknown>,
         logs: [JSON.stringify(validation, null, 2)],
         errors: validation.errors
       };
@@ -434,6 +658,7 @@ export const projectTools: ToolModule[] = [
         previewUrl: report.publishedUrl,
         shareUrl: report.publishedUrl,
         artifacts: report.files.map((file) => file.path),
+        structuredContent: report as unknown as Record<string, unknown>,
         logs: [JSON.stringify(report, null, 2)],
         errors: report.validation.errors
       };

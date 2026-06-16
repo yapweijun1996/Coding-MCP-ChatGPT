@@ -23,7 +23,8 @@ The MCP server uses a single source of truth registry for tool metadata, handler
 Enabled by default:
 
 - Connectivity and preview: `ping`, `create_preview`.
-- Project delivery: `create_project`, `list_projects`, `get_project`, `get_project_manifest`, `write_project_file`, `read_project_file`, `delete_project_file`, `validate_project`, `publish_project`, `publish_and_report`.
+- Project delivery: `deliver_static_project`, `create_project`, `list_projects`, `get_project`, `get_project_manifest`, `get_project_activity`, `write_project_file`, `read_project_file`, `delete_project_file`, `validate_project`, `publish_project`, `publish_and_report`.
+- Browser validation: `inspect_webpage`.
 - Stable command checks backed by current package scripts: `run_command`, `run_typecheck`, `run_tests`, `run_build`.
 - Workspace and git tools delegated from the legacy implementation.
 
@@ -59,10 +60,10 @@ The check builds `dist/`, verifies registry uniqueness, confirms critical tools 
 
 ChatGPT and other coding agents should use the persistent Project workflow for deliverables:
 
-1. `create_project`
-2. `write_project_file`
-3. `get_project_manifest`
-4. `validate_project`
-5. `publish_and_report`
+1. Use `deliver_static_project` for normal static HTML/CSS/JS deliverables.
+2. Use `get_project_activity` if the agent needs task history or latest validation context.
+3. Use the lower-level `create_project` / `write_project_file` / `validate_project` / `publish_and_report` flow only for repair or incremental edits.
 
-`publish_and_report` is the preferred final delivery tool because it validates first, publishes only when valid, and returns a stable structured report with the public `publishedUrl`.
+`deliver_static_project` is the preferred delivery tool because it writes all files, validates local references, temporarily publishes, runs browser validation through Playwright, blocks on serious runtime/layout failures, and returns a structured report with the public `publishedUrl`.
+
+See `docs/agent-delivery-reliability.md` for the full delivery runbook, validation gates, structured result contract, and smoke checklist.

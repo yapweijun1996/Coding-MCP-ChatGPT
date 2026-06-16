@@ -6,10 +6,11 @@
 1. [架构](./architecture.md)
 2. [快速设置](./setup.md)
 3. [MCP 协议与工具](./mcp.md)
-4. [ChatGPT MCP 对接](./chatgpt.md)
-5. [Cloudflare Tunnel 部署](./cloudflare.md)
-6. [运维与治理](./operations.md)
-7. [故障排查](./troubleshooting.md)
+4. [Agent 可靠交付流程](./agent-delivery-reliability.md)
+5. [ChatGPT MCP 对接](./chatgpt.md)
+6. [Cloudflare Tunnel 部署](./cloudflare.md)
+7. [运维与治理](./operations.md)
+8. [故障排查](./troubleshooting.md)
 
 文档更新原则：
 

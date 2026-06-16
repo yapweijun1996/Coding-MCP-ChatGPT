@@ -34,6 +34,8 @@ This MCP stores ChatGPT-created coding projects on disk under `.projects/`.
 - `list_projects`: list projects.
 - `get_project`: get metadata and file list.
 - `get_project_manifest`: get agent-readable metadata, files, entry file, published URL, last validation, and task history.
+- `get_project_activity`: get task history, latest validation, publish status, and creator connector.
+- `deliver_static_project`: create a project from multiple text files, validate, publish, browser-check, and return a delivery report.
 - `write_project_file`: write a text file inside the project.
 - `read_project_file`: read a text file inside the project.
 - `delete_project_file`: delete a project file with `confirm=true`.
@@ -44,12 +46,10 @@ This MCP stores ChatGPT-created coding projects on disk under `.projects/`.
 
 Recommended ChatGPT workflow:
 
-1. Call `create_project`.
-2. Call `write_project_file` for `index.html`, CSS, JS, and docs.
-3. Call `get_project_manifest` to collect the current project context.
-4. Call `validate_project` before delivery.
-5. Call `publish_and_report`.
-6. Return the `publishedUrl`, for example `https://gmb01.xyz/share/project_xxx/index.html`.
+1. Call `deliver_static_project` with `title`, `summary`, `entryFile`, and all text files.
+2. If it returns `ok:true`, return the `publishedUrl`, for example `https://gmb01.xyz/share/project_xxx/index.html`.
+3. If it returns `ok:false`, use `get_project_activity` and the inspection report to explain what must be fixed.
+4. Use the lower-level `create_project` / `write_project_file` / `validate_project` / `publish_and_report` workflow only for incremental repairs.
 
 ## Admin pages
 
@@ -78,7 +78,7 @@ The first version provides code viewing with a read-only textarea. Monaco Editor
 
 Project tools live in `src/mcp/tools/project.ts`. Their definitions, zod schemas, handlers, and default access are colocated there. `delete_project` is intentionally `enabledByDefault: false`; enable it from Admin only when needed.
 
-The project detail page shows the agent-readable manifest, last validation result, task history, file tree, and read-only code viewer.
+The project detail page shows the agent-readable manifest, last validation result, browser inspection report link when present, task history, file tree, and read-only code viewer.
 
 ## Required ChatGPT delivery workflow
 
@@ -91,4 +91,4 @@ For project deliverables, ChatGPT must use the persistent Project workflow:
 5. `publish_and_report`
 6. Return the `publishedUrl`
 
-Do not use `create_share` for project deliverables. It is a legacy standalone HTML tool, disabled by default, and should only be enabled temporarily from Admin for compatibility testing.
+For normal new static deliverables, prefer `deliver_static_project` over the manual sequence above. Do not use `create_share` for project deliverables. It is a legacy standalone HTML tool, disabled by default, and should only be enabled temporarily from Admin for compatibility testing.
