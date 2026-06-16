@@ -1,5 +1,6 @@
 import { commandTools } from "./command.js";
 import { gitTools } from "./git.js";
+import { presentationTools } from "./presentation.js";
 import { previewTools } from "./preview.js";
 import { projectTools } from "./project.js";
 import { shareTools } from "./share.js";
@@ -12,6 +13,7 @@ export const allToolModules: ToolModule[] = [
   ...workspaceTools,
   ...commandTools,
   ...webInspectTools,
+  ...presentationTools,
   ...gitTools,
   ...projectTools,
   ...shareTools

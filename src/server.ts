@@ -1,7 +1,7 @@
 import { ZipArchive } from "archiver";
 import express from "express";
 import { listActivity, recordActivity } from "./activity.js";
-import { renderAdminPage, renderProjectPage } from "./admin.js";
+import { renderAdminPage, renderPublicSharePage, renderProjectPage, type PublicShareLocale } from "./admin.js";
 import { countJobs, getJob } from "./jobs/store.js";
 import { toolDefinitions } from "./mcp/registry.js";
 import { callTool } from "./mcp/router.js";
@@ -35,7 +35,8 @@ import {
   getProjectWithFiles,
   isProjectTextFilePath,
   listProjects,
-  readProjectFile
+  readProjectFile,
+  setProjectStatus
 } from "./projects/store.js";
 import { countShares, readShareArtifact } from "./share/store.js";
 import { isToolEnabled, listToolStates, setToolEnabled } from "./tool-state.js";
@@ -136,6 +137,12 @@ function resultToMcpContent(result: ToolResult): Record<string, unknown> {
   };
   if (result.structuredContent) response.structuredContent = result.structuredContent;
   return response;
+}
+
+function getPublicShareLocale(req: express.Request): PublicShareLocale {
+  if (req.query.lang === "zh" || req.query.lang === "en") return req.query.lang;
+  const preferredLanguage = req.acceptsLanguages("zh-CN", "zh", "en");
+  return typeof preferredLanguage === "string" && preferredLanguage.startsWith("zh") ? "zh" : "en";
 }
 
 app.get("/health", (_req, res) => {
@@ -385,6 +392,19 @@ app.get("/admin/projects/:projectId/download.zip", async (req, res) => {
   }
 });
 
+app.get(["/share", "/share/"], async (req, res) => {
+  try {
+    const projects = (await listProjects(projectRoot, false)).filter((project) => project.status === "published");
+    res.type("html").send(renderPublicSharePage({
+      publicBaseUrl,
+      projects,
+      locale: getPublicShareLocale(req)
+    }));
+  } catch {
+    res.status(500).type("text/plain").send("Unable to load public share index.");
+  }
+});
+
 app.post("/admin/projects/:projectId/delete", async (req, res) => {
   if (!requireAdmin(req, res)) return;
 
@@ -394,6 +414,23 @@ app.post("/admin/projects/:projectId/delete", async (req, res) => {
     // Keep admin delete idempotent from the browser.
   }
   res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
+});
+
+app.post("/admin/projects/:projectId/status", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const body = req.body as Partial<Record<string, string>>;
+  const status = body.status;
+
+  try {
+    if (status !== "published" && status !== "private" && status !== "draft") {
+      throw new Error("Invalid project status.");
+    }
+    await setProjectStatus(projectRoot, req.params.projectId, status, publicBaseUrl);
+    res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Project status update failed.";
+    res.status(400).type("text/plain").send(message);
+  }
 });
 
 app.post("/admin/tools/toggle", (req, res) => {

@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
 import path from "node:path";
 import { TextDecoder } from "node:util";
 
-export type ProjectStatus = "draft" | "published" | "deleted";
+export type ProjectStatus = "draft" | "private" | "published" | "deleted";
 export type ProjectValidationStatus = "valid" | "warnings" | "failed";
 export type ProjectValidationProfile = "static_html";
 
@@ -648,6 +648,27 @@ export async function publishProject(projectRoot: string, projectId: string, pub
     ok: true,
     summary: `Published ${projectId}.`,
     details: { entryFile: safeEntryFile, publishedUrl }
+  });
+  await writeProjectMetadata(projectRoot, updated);
+  return updated;
+}
+
+export async function setProjectStatus(projectRoot: string, projectId: string, status: Exclude<ProjectStatus, "deleted">, publicBaseUrl: string): Promise<ProjectMetadata> {
+  if (status === "published") {
+    return publishProject(projectRoot, projectId, publicBaseUrl);
+  }
+
+  const metadata = await getProject(projectRoot, projectId);
+  if (metadata.status === "deleted") throw new Error("Cannot update a deleted project.");
+  const updated = addHistory({
+    ...metadata,
+    status,
+    publishedUrl: undefined
+  }, {
+    toolName: "set_project_status",
+    ok: true,
+    summary: `Set ${projectId} status to ${status}.`,
+    details: { status }
   });
   await writeProjectMetadata(projectRoot, updated);
   return updated;
