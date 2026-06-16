@@ -59,47 +59,59 @@ function escapeHtml(value: string | number | boolean | null | undefined): string
 
 function styles(): string {
   return `
-    :root { --bg: #f6f7f4; --ink: #17211b; --muted: #66736b; --line: #d9dfd6; --surface: #fff; --surface-2: #fbfcf8; --accent: #176b62; --accent-ink: #fff; --danger: #aa332e; --warning: #8a6200; --soft: #eef2eb; --focus: #2b7bd8; }
+    :root { --bg: #f4f6f8; --ink: #18231f; --muted: #68746f; --line: #dce3df; --surface: #fff; --surface-2: #f8faf9; --accent: #16685f; --accent-ink: #fff; --danger: #aa332e; --warning: #8a6200; --soft: #e8efec; --focus: #2b7bd8; --sidebar: #15231f; --sidebar-muted: #aebbb6; --sidebar-hover: #22352f; --safe-top: env(safe-area-inset-top, 0px); --safe-right: env(safe-area-inset-right, 0px); --safe-bottom: env(safe-area-inset-bottom, 0px); --safe-left: env(safe-area-inset-left, 0px); }
     * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--ink); font-family: ui-sans-serif, system-ui, sans-serif; }
-    header { padding: 22px 32px; border-bottom: 1px solid var(--line); background: var(--surface); }
+    html { min-width: 320px; min-height: 100%; text-size-adjust: 100%; -webkit-text-size-adjust: 100%; touch-action: manipulation; }
+    body { margin: 0; min-height: 100vh; min-height: 100dvh; background: var(--bg); color: var(--ink); font-family: ui-sans-serif, system-ui, sans-serif; overscroll-behavior-x: none; }
+    header { padding: calc(18px + var(--safe-top)) calc(28px + var(--safe-right)) 18px 28px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.94); position: sticky; top: 0; z-index: 10; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
     .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
     .eyebrow { margin: 0 0 4px; color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
-    h1 { margin: 0; font-size: 28px; line-height: 1.1; }
+    h1 { margin: 0; font-size: 24px; line-height: 1.15; }
     h1 a { color: inherit; text-decoration: none; }
     header p { margin: 6px 0 0; color: var(--muted); }
-    main { width: min(1440px, calc(100vw - 32px)); margin: 20px auto 48px; }
-    .admin-shell { min-height: 100vh; display: grid; grid-template-columns: 270px minmax(0, 1fr); }
-    .admin-sidebar { background: #eef2ee; border-right: 1px solid var(--line); padding: 16px; position: sticky; top: 0; height: 100vh; overflow: auto; z-index: 20; }
-    .admin-sidebar h3 { margin: 0 0 10px; font-size: 16px; }
-    .admin-sidebar p { margin: 0; color: var(--muted); font-size: 12px; }
-    .admin-sidebar p + p { margin-top: 4px; }
-    .admin-sidebar nav { margin-top: 14px; display: grid; gap: 6px; }
-    .admin-sidebar a { display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--ink); font-weight: 600; font-size: 13px; border-radius: 8px; padding: 9px 10px; }
-    .admin-sidebar a:hover { background: #e5ebe4; }
+    main { width: min(1520px, calc(100% - 48px)); margin: 22px auto 48px; }
+    .admin-shell { min-height: 100vh; min-height: 100dvh; display: grid; grid-template-columns: 248px minmax(0, 1fr); }
+    .admin-sidebar { background: var(--sidebar); color: #f7faf8; border-right: 1px solid #0d1815; padding: calc(18px + var(--safe-top)) 14px calc(18px + var(--safe-bottom)) calc(14px + var(--safe-left)); position: sticky; top: 0; height: 100vh; height: 100dvh; overflow: auto; z-index: 20; -webkit-overflow-scrolling: touch; }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 6px 8px 18px; border-bottom: 1px solid rgba(255,255,255,.09); }
+    .brand-mark { width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; background: #d8f2ea; color: #0f4d45; font-weight: 900; }
+    .brand-title { display: block; font-size: 15px; font-weight: 800; }
+    .brand-subtitle { display: block; color: var(--sidebar-muted); font-size: 12px; margin-top: 2px; }
+    .admin-sidebar nav { margin-top: 16px; display: grid; gap: 4px; }
+    .admin-sidebar a { display: flex; align-items: center; gap: 10px; min-height: 44px; text-decoration: none; color: #e9f0ed; font-weight: 700; font-size: 13px; border-radius: 8px; padding: 9px 10px; }
+    .admin-sidebar a:hover { background: var(--sidebar-hover); }
+    .nav-icon { width: 24px; height: 24px; flex: 0 0 24px; display: grid; place-items: center; border-radius: 7px; background: rgba(255,255,255,.08); color: #d8f2ea; font-size: 11px; font-weight: 900; }
+    .sidebar-foot { margin-top: 22px; padding: 12px 10px; border-top: 1px solid rgba(255,255,255,.09); color: var(--sidebar-muted); font-size: 12px; line-height: 1.4; }
+    .sidebar-backdrop { display: none; }
     .admin-content { min-width: 0; }
-    .sidebar-toggle { min-width: 0; padding: 7px 10px; background: var(--soft); color: var(--ink); border-radius: 8px; border: 1px solid var(--line); font-weight: 700; }
-    .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
-    .metric { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
-    .metric strong { display: block; font-size: 26px; line-height: 1; }
+    .title-row { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .sidebar-toggle { width: 44px; height: 44px; min-width: 0; padding: 0; background: var(--surface-2); color: var(--ink); border-radius: 8px; border: 1px solid var(--line); font-weight: 900; }
+    .stats { display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .metric { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; box-shadow: 0 1px 2px rgba(15, 23, 42, .04); }
+    .metric strong { display: block; font-size: 24px; line-height: 1; }
     .metric span { color: var(--muted); font-size: 13px; }
-    section { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; margin: 16px 0; overflow: hidden; }
+    section { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; margin: 16px 0; overflow: hidden; box-shadow: 0 1px 2px rgba(15, 23, 42, .04); }
     .section-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
-    h2 { margin: 0; font-size: 18px; }
+    h2 { margin: 0; font-size: 17px; }
     section > h2 { padding: 16px; border-bottom: 1px solid var(--line); }
     .section-note { color: var(--muted); font-size: 13px; margin: 0; }
-    table { width: 100%; border-collapse: collapse; font-size: 14px; table-layout: fixed; }
-    th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
-    th { color: var(--muted); font-weight: 700; background: var(--surface-2); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; font-weight: 800; background: var(--surface-2); text-transform: uppercase; letter-spacing: .04em; }
+    tbody tr:hover { background: #fbfcfb; }
+    .truncate, td code, .project-title, .project-id, .url-cell a, .compact-date { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-    button, .button { display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px; padding: 8px 12px; color: white; cursor: pointer; min-width: 58px; text-decoration: none; font-size: 13px; line-height: 1.15; font-weight: 700; }
-    button:focus-visible, .button:focus-visible, select:focus-visible { outline: 3px solid color-mix(in srgb, var(--focus), transparent 70%); outline-offset: 2px; }
+    button, .button { display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px; padding: 8px 11px; color: white; cursor: pointer; min-width: 58px; min-height: 40px; text-decoration: none; font-size: 16px; line-height: 1.15; font-weight: 800; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, .button:focus-visible, select:focus-visible, input:focus-visible { outline: 3px solid color-mix(in srgb, var(--focus), transparent 70%); outline-offset: 2px; }
     .enabled, .primary { background: var(--accent); color: var(--accent-ink); }
     .disabled, .danger { background: var(--danger); color: #fff; }
     .secondary { background: #47544d; color: #fff; }
     .ghost { color: var(--accent); background: #e6f2ef; }
     .empty { color: var(--muted); padding: 16px; }
-    .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .actions { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
+    .project-actions { display: flex; gap: 7px; flex-wrap: nowrap; align-items: center; }
+    .project-actions .button,
+    .project-actions button { width: 38px; height: 38px; min-width: 0; min-height: 38px; padding: 0; }
+    .icon-button svg { width: 18px; height: 18px; stroke: currentColor; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
     .actions form { margin: 0; }
     .pill { display: inline-block; border-radius: 999px; background: var(--soft); color: var(--muted); padding: 4px 9px; font-size: 12px; font-weight: 700; }
     .badge-published { background: #ddf3eb; color: #106042; }
@@ -116,15 +128,15 @@ function styles(): string {
     .meta { color: var(--muted); margin: 6px 0 0; }
     .error { color: var(--danger); padding: 12px 16px; border-bottom: 1px solid var(--line); }
     .json-view { margin: 0; padding: 16px; overflow: auto; max-height: 360px; background: #fbfcf8; border-top: 1px solid var(--line); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
-    .sidebar-collapsed .admin-sidebar { width: 68px; padding: 12px 8px; }
-    .sidebar-collapsed .admin-sidebar h3,
-    .sidebar-collapsed .admin-sidebar p,
+    .sidebar-collapsed .admin-sidebar { width: 68px; padding: 14px 8px; }
+    .sidebar-collapsed .brand { justify-content: center; padding: 4px 0 14px; }
+    .sidebar-collapsed .brand-text,
     .sidebar-collapsed .admin-sidebar .text,
-    .sidebar-collapsed .admin-sidebar .toggle-text { display: none; }
+    .sidebar-collapsed .sidebar-foot { display: none; }
     .sidebar-collapsed .admin-sidebar a { justify-content: center; padding: 10px 0; }
     body.sidebar-collapsed .admin-shell { grid-template-columns: 68px minmax(0, 1fr); }
     .section-anchor { scroll-margin-top: 90px; }
-    .admin-content main { width: min(1440px, calc(100vw - 32px)); margin: 20px auto 48px; }
+    .admin-content main { width: min(1440px, calc(100% - 32px)); margin: 20px auto 48px; }
     .badge-valid { background: #e3f3e8; color: #176139; }
     .badge-warnings { background: #fff0c2; color: #6a4a00; }
     .badge-failed { background: #f8d8d8; color: #8a1f1f; }
@@ -149,28 +161,71 @@ function styles(): string {
     .public-summary { margin: 14px 0 0; color: var(--ink); font-size: 14px; line-height: 1.55; }
     .public-link { margin-top: auto; align-self: flex-start; }
     .project-title { font-weight: 800; line-height: 1.25; }
-    .project-id { display: block; margin-top: 5px; color: var(--muted); overflow-wrap: anywhere; }
-    .compact-date { white-space: nowrap; }
-    .url-cell a { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .project-id { margin-top: 5px; color: var(--muted); }
+    .url-cell a { display: block; }
     .status-form { display: flex; flex-direction: column; gap: 7px; align-items: flex-start; }
     .status-control { display: inline-flex; gap: 6px; align-items: center; }
-    select { min-width: 112px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 7px 8px; font: inherit; }
+    input, select, textarea { font-size: 16px; }
+    select { min-width: 112px; min-height: 44px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 7px 8px; font: inherit; }
     .mini-button { min-width: 0; padding: 7px 10px; }
     .special-tool-table th:nth-child(1) { width: 18%; }
     .special-tool-table th:nth-child(2) { width: 14%; }
     .special-tool-table th:nth-child(3) { width: 18%; }
     .special-tool-table th:nth-child(4) { width: 16%; }
     .special-tool-table th:nth-child(5) { width: 34%; }
-    .project-table th:nth-child(1) { width: 22%; }
-    .project-table th:nth-child(2) { width: 16%; }
-    .project-table th:nth-child(3) { width: 10%; }
-    .project-table th:nth-child(4) { width: 7%; }
-    .project-table th:nth-child(5) { width: 12%; }
-    .project-table th:nth-child(6) { width: 16%; }
-    .project-table th:nth-child(7) { width: 17%; }
+    .project-table th:nth-child(1) { width: 18%; }
+    .project-table th:nth-child(2) { width: 13%; }
+    .project-table th:nth-child(3) { width: 8%; }
+    .project-table th:nth-child(4) { width: 5%; }
+    .project-table th:nth-child(5) { width: 11%; }
+    .project-table th:nth-child(6) { width: 14%; }
+    .project-table th:nth-child(7) { width: 14%; }
+    .project-table th:nth-child(8) { width: 17%; }
     @media (max-width: 1100px) { .stats { grid-template-columns: 1fr 1fr; } .layout { grid-template-columns: 1fr; } table { display: block; overflow-x: auto; table-layout: auto; } th, td { min-width: 140px; } .project-table th:nth-child(n) { width: auto; } }
-    @media (max-width: 900px) { .admin-content main { width: min(100% - 16px, 1440px); } }
-    @media (max-width: 640px) { header { padding: 18px 16px; } .topbar, .public-hero .public-shell, .public-summary-bar { align-items: flex-start; flex-direction: column; } main { width: min(100% - 20px, 1440px); } .stats { grid-template-columns: 1fr; } .public-shell { width: min(100% - 24px, 1180px); } .public-hero { padding: 28px 0; } .public-hero h1 { font-size: 28px; } }
+    @media (max-width: 900px) {
+      body { overflow-x: hidden; }
+      .admin-shell, body.sidebar-collapsed .admin-shell { display: block; }
+      .admin-sidebar,
+      .sidebar-collapsed .admin-sidebar { position: fixed; inset: 0 auto 0 0; width: min(82vw, 300px); height: 100vh; height: 100dvh; padding: calc(18px + var(--safe-top)) 14px calc(18px + var(--safe-bottom)) calc(14px + var(--safe-left)); transform: translateX(-105%); transition: transform .18s ease; box-shadow: 18px 0 40px rgba(12, 22, 19, .24); }
+      body.sidebar-open .admin-sidebar { transform: translateX(0); }
+      .sidebar-collapsed .brand { justify-content: flex-start; padding: 6px 8px 18px; }
+      .sidebar-collapsed .brand-text,
+      .sidebar-collapsed .admin-sidebar .text,
+      .sidebar-collapsed .sidebar-foot { display: block; }
+      .sidebar-collapsed .admin-sidebar a { justify-content: flex-start; padding: 9px 10px; }
+      body.sidebar-open .sidebar-backdrop { display: block; position: fixed; inset: 0; z-index: 15; min-width: 0; min-height: 100vh; min-height: 100dvh; padding: 0; border: 0; border-radius: 0; background: rgba(8, 15, 13, .44); cursor: default; }
+      .admin-content main { width: min(100% - 20px, 1440px); margin-top: 16px; }
+      header { padding: calc(16px + var(--safe-top)) calc(18px + var(--safe-right)) 16px calc(18px + var(--safe-left)); }
+    }
+    @media (max-width: 760px) {
+      .admin-content table,
+      .admin-content thead,
+      .admin-content tbody,
+      .admin-content tr,
+      .admin-content td { display: block; width: 100%; }
+      .admin-content thead { display: none; }
+      .admin-content table { overflow: visible; table-layout: auto; }
+      .admin-content tbody { display: grid; gap: 12px; padding: 12px; }
+      .admin-content tr { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--surface); }
+      .admin-content td { min-width: 0; display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px; align-items: start; padding: 10px 12px; }
+      .admin-content td::before { content: attr(data-label); color: var(--muted); font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+      .admin-content td[data-label="Actions"],
+      .admin-content td[data-label="Access"],
+      .admin-content td[data-label="Tool override"] { display: block; }
+      .admin-content td[data-label="Actions"]::before,
+      .admin-content td[data-label="Access"]::before,
+      .admin-content td[data-label="Tool override"]::before { display: block; margin-bottom: 8px; }
+      .admin-content .actions { align-items: stretch; }
+      .admin-content .actions .button,
+      .admin-content .actions button { flex: 1 1 130px; }
+      .project-actions { flex-wrap: wrap; }
+      .project-actions .button,
+      .project-actions button { flex: 0 0 44px; width: 44px; height: 44px; min-height: 44px; }
+      .truncate, td code, .project-title, .project-id, .url-cell a, .compact-date { white-space: normal; overflow-wrap: anywhere; }
+    }
+    @media (max-width: 640px) { header { padding: calc(14px + var(--safe-top)) calc(14px + var(--safe-right)) 14px calc(14px + var(--safe-left)); } .topbar, .public-hero .public-shell, .public-summary-bar { align-items: flex-start; flex-direction: column; } .topbar .actions { width: 100%; } .topbar .button { width: 100%; } h1 { font-size: 21px; } header p { overflow-wrap: anywhere; } main { width: min(100% - 20px, 1440px); margin-bottom: calc(48px + var(--safe-bottom)); } .stats { grid-template-columns: 1fr 1fr; } .metric { padding: 12px; } .metric strong { font-size: 22px; } .section-header { padding: 12px; } .public-shell { width: min(100% - 24px, 1180px); } .public-hero { padding: calc(28px + var(--safe-top)) 0 28px; } .public-hero h1 { font-size: 28px; } }
+    @media (max-width: 460px) { .stats { grid-template-columns: 1fr; } .admin-content td { grid-template-columns: 1fr; gap: 6px; } .status-control { width: 100%; align-items: stretch; } select { width: 100%; } .mini-button { min-width: 84px; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .001ms !important; animation-duration: .001ms !important; } }
   `;
 }
 
@@ -266,16 +321,22 @@ export function renderAdminPage(data: AdminPageData): string {
   const publishedCount = data.projects.filter((project) => project.status === "published").length;
   const privateCount = data.projects.filter((project) => project.status === "private").length;
   const draftCount = data.projects.filter((project) => project.status === "draft").length;
+  const icon = {
+    open: `<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 17 17 7"></path><path d="M9 7h8v8"></path><path d="M19 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"></path></svg>`,
+    code: `<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m10 16-4-4 4-4"></path><path d="m14 8 4 4-4 4"></path></svg>`,
+    download: `<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path></svg>`,
+    delete: `<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v5"></path><path d="M14 11v5"></path></svg>`
+  };
   const clientRows = data.clients.map((client) => `
     <tr>
-      <td><code>${escapeHtml(client.clientId)}</code></td>
-      <td>${escapeHtml(client.clientName)}</td>
-      <td>${escapeHtml(client.redirectHost)}</td>
-      <td>${escapeHtml(client.activeAccessTokens)}</td>
-      <td>${escapeHtml(client.refreshTokens)}</td>
-      <td>${escapeHtml(client.lastUsedAt ?? "-")}</td>
-      <td>${escapeHtml(client.requestCount)}</td>
-      <td>
+	      <td data-label="Client ID"><code title="${escapeHtml(client.clientId)}">${escapeHtml(client.clientId)}</code></td>
+	      <td data-label="Name"><span class="truncate" title="${escapeHtml(client.clientName)}">${escapeHtml(client.clientName)}</span></td>
+	      <td data-label="Redirect host"><span class="truncate" title="${escapeHtml(client.redirectHost)}">${escapeHtml(client.redirectHost)}</span></td>
+	      <td data-label="Access tokens">${escapeHtml(client.activeAccessTokens)}</td>
+	      <td data-label="Refresh tokens">${escapeHtml(client.refreshTokens)}</td>
+	      <td data-label="Last used">${escapeHtml(client.lastUsedAt ?? "-")}</td>
+	      <td data-label="Requests">${escapeHtml(client.requestCount)}</td>
+	      <td data-label="Action">
         <form method="post" action="/admin/connectors/revoke${adminTokenQuery}">
           <input type="hidden" name="clientId" value="${escapeHtml(client.clientId)}">
           <button class="disabled" type="submit">Revoke</button>
@@ -301,21 +362,21 @@ export function renderAdminPage(data: AdminPageData): string {
         </form>`;
     return `
     <tr>
-      <td><span class="project-title">${escapeHtml(project.title)}</span><code class="project-id">${escapeHtml(project.id)}</code></td>
-      <td>${statusControls}</td>
-      <td><span class="pill ${validation.className}">${escapeHtml(validation.label)}</span></td>
-      <td>${escapeHtml(project.filesCount)}</td>
-      <td class="compact-date">${escapeHtml(formatDate(project.updatedAt))}</td>
-      <td><code>${escapeHtml(project.createdByClientId)}</code></td>
-      <td class="url-cell">${project.publishedUrl ? `<a href="${escapeHtml(project.publishedUrl)}" target="_blank" rel="noreferrer">${escapeHtml(project.publishedUrl)}</a>` : `<span class="pill badge-empty">not public</span>`}</td>
-      <td>
-        <div class="actions">
-          ${project.publishedUrl ? `<a class="button primary" href="${escapeHtml(project.publishedUrl)}" target="_blank" rel="noreferrer">Open Preview</a>` : ""}
-          <a class="button secondary" href="${escapeHtml(withToken(`/admin/projects/${project.id}`))}">View Code</a>
-          <a class="button secondary" href="${escapeHtml(withToken(`/admin/projects/${project.id}/download.zip`))}">Download ZIP</a>
-          <form method="post" action="/admin/projects/${escapeHtml(project.id)}/delete${adminTokenQuery}" onsubmit="return confirm('Soft-delete this project?')">
-            <button class="danger" type="submit">Delete</button>
-          </form>
+	      <td data-label="Project"><span class="project-title" title="${escapeHtml(project.title)}">${escapeHtml(project.title)}</span><code class="project-id" title="${escapeHtml(project.id)}">${escapeHtml(project.id)}</code></td>
+	      <td data-label="Visibility">${statusControls}</td>
+	      <td data-label="Validation"><span class="pill ${validation.className}">${escapeHtml(validation.label)}</span></td>
+	      <td data-label="Files">${escapeHtml(project.filesCount)}</td>
+	      <td data-label="Updated" class="compact-date" title="${escapeHtml(formatDate(project.updatedAt))}">${escapeHtml(formatDate(project.updatedAt))}</td>
+	      <td data-label="Created by"><code title="${escapeHtml(project.createdByClientId)}">${escapeHtml(project.createdByClientId)}</code></td>
+	      <td data-label="Public URL" class="url-cell">${project.publishedUrl ? `<a href="${escapeHtml(project.publishedUrl)}" target="_blank" rel="noreferrer" title="${escapeHtml(project.publishedUrl)}">${escapeHtml(project.publishedUrl)}</a>` : `<span class="pill badge-empty">not public</span>`}</td>
+	      <td data-label="Actions">
+	        <div class="actions project-actions">
+	          ${project.publishedUrl ? `<a class="button primary icon-button" href="${escapeHtml(project.publishedUrl)}" target="_blank" rel="noreferrer" aria-label="Open preview" title="Open preview">${icon.open}</a>` : ""}
+	          <a class="button secondary icon-button" href="${escapeHtml(withToken(`/admin/projects/${project.id}`))}" aria-label="View code" title="View code">${icon.code}</a>
+	          <a class="button secondary icon-button" href="${escapeHtml(withToken(`/admin/projects/${project.id}/download.zip`))}" aria-label="Download ZIP" title="Download ZIP">${icon.download}</a>
+	          <form method="post" action="/admin/projects/${escapeHtml(project.id)}/delete${adminTokenQuery}" onsubmit="return confirm('Soft-delete this project?')">
+	            <button class="danger icon-button" type="submit" aria-label="Delete project" title="Delete project">${icon.delete}</button>
+	          </form>
         </div>
       </td>
     </tr>`;
@@ -323,13 +384,13 @@ export function renderAdminPage(data: AdminPageData): string {
 
   const skillRows = data.skills.map((skill) => `
     <tr>
-      <td><strong>${escapeHtml(skill.label)}</strong><code class="project-id">${escapeHtml(skill.id)}</code></td>
-      <td>${escapeHtml(skill.category)}</td>
-      <td><span class="pill badge-${escapeHtml(skill.riskLevel)}">${escapeHtml(skill.riskLevel)}</span></td>
-      <td><span class="pill">${escapeHtml(skill.status)}</span></td>
-      <td>${escapeHtml(skill.toolCount)}</td>
-      <td>${escapeHtml(skill.description)}</td>
-      <td>
+	      <td data-label="Skill"><strong class="truncate" title="${escapeHtml(skill.label)}">${escapeHtml(skill.label)}</strong><code class="project-id" title="${escapeHtml(skill.id)}">${escapeHtml(skill.id)}</code></td>
+	      <td data-label="Category"><span class="truncate" title="${escapeHtml(skill.category)}">${escapeHtml(skill.category)}</span></td>
+	      <td data-label="Risk"><span class="pill badge-${escapeHtml(skill.riskLevel)}">${escapeHtml(skill.riskLevel)}</span></td>
+	      <td data-label="Status"><span class="pill">${escapeHtml(skill.status)}</span></td>
+	      <td data-label="Tools">${escapeHtml(skill.toolCount)}</td>
+	      <td data-label="Description"><span class="truncate" title="${escapeHtml(skill.description)}">${escapeHtml(skill.description)}</span></td>
+	      <td data-label="Access">
         <form method="post" action="/admin/skills/toggle${adminTokenQuery}">
           <input type="hidden" name="id" value="${escapeHtml(skill.id)}">
           <input type="hidden" name="enabled" value="${skill.enabled ? "0" : "1"}">
@@ -345,10 +406,10 @@ export function renderAdminPage(data: AdminPageData): string {
   };
   const toolRows = data.tools.map((tool) => `
     <tr>
-      <td><code>${escapeHtml(tool.name)}</code></td>
-      <td>${escapeHtml(tool.description)}</td>
-      <td><span class="pill ${tool.enabled ? "enabled" : "disabled"}">${escapeHtml(toolAccessLabel(tool))}</span><div class="meta">${escapeHtml(tool.enabledBySkills.join(", ") || "no enabled skill")}</div></td>
-      <td>
+	      <td data-label="Name"><code title="${escapeHtml(tool.name)}">${escapeHtml(tool.name)}</code></td>
+	      <td data-label="Description"><span class="truncate" title="${escapeHtml(tool.description)}">${escapeHtml(tool.description)}</span></td>
+	      <td data-label="Effective access"><span class="pill ${tool.enabled ? "enabled" : "disabled"}">${escapeHtml(toolAccessLabel(tool))}</span><div class="meta truncate" title="${escapeHtml(tool.enabledBySkills.join(", ") || "no enabled skill")}">${escapeHtml(tool.enabledBySkills.join(", ") || "no enabled skill")}</div></td>
+	      <td data-label="Tool override">
         <form method="post" action="/admin/tools/toggle${adminTokenQuery}">
           <input type="hidden" name="name" value="${escapeHtml(tool.name)}">
           <input type="hidden" name="enabled" value="${tool.toolEnabled ? "0" : "1"}">
@@ -362,11 +423,11 @@ export function renderAdminPage(data: AdminPageData): string {
     const statusClass = tool.enabled ? "enabled" : "disabled";
     return `
     <tr>
-      <td><strong>${escapeHtml(tool.label)}</strong><code class="project-id">${escapeHtml(tool.name)}</code></td>
-      <td><span class="pill ${statusClass}">${escapeHtml(status)}</span></td>
-      <td>${escapeHtml(tool.enabledUntil ? formatDate(tool.enabledUntil) : "-")}</td>
-      <td><code>${escapeHtml(tool.enabledBy ?? "-")}</code></td>
-      <td>
+		      <td data-label="Name"><strong class="truncate" title="${escapeHtml(tool.label)}">${escapeHtml(tool.label)}</strong><code class="project-id" title="${escapeHtml(tool.name)}">${escapeHtml(tool.name)}</code></td>
+	      <td data-label="Status"><span class="pill ${statusClass}">${escapeHtml(status)}</span></td>
+	      <td data-label="Enabled until">${escapeHtml(tool.enabledUntil ? formatDate(tool.enabledUntil) : "-")}</td>
+		      <td data-label="Enabled by"><code title="${escapeHtml(tool.enabledBy ?? "-")}">${escapeHtml(tool.enabledBy ?? "-")}</code></td>
+	      <td data-label="Actions">
         <div class="actions">
           <form method="post" action="/admin/special-tools/visible-browser/enable${adminTokenQuery}">
             <input type="hidden" name="durationMinutes" value="15">
@@ -393,42 +454,52 @@ export function renderAdminPage(data: AdminPageData): string {
 
   const activityRows = data.activity.map((event) => `
     <tr>
-      <td>${escapeHtml(event.time)}</td>
-      <td><code>${escapeHtml(event.clientId)}</code></td>
-      <td>${escapeHtml(event.method)}</td>
-      <td>${escapeHtml(event.toolName ?? "-")}</td>
-      <td>${event.ok ? "OK" : "Fail"}</td>
-      <td>${escapeHtml(event.summary)}</td>
+	      <td data-label="Time">${escapeHtml(event.time)}</td>
+		      <td data-label="Client"><code title="${escapeHtml(event.clientId)}">${escapeHtml(event.clientId)}</code></td>
+		      <td data-label="Method"><span class="truncate" title="${escapeHtml(event.method)}">${escapeHtml(event.method)}</span></td>
+		      <td data-label="Tool"><span class="truncate" title="${escapeHtml(event.toolName ?? "-")}">${escapeHtml(event.toolName ?? "-")}</span></td>
+		      <td data-label="Status">${event.ok ? "OK" : "Fail"}</td>
+		      <td data-label="Summary"><span class="truncate" title="${escapeHtml(event.summary)}">${escapeHtml(event.summary)}</span></td>
     </tr>`).join("");
 
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#15231f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
   <title>Coding MCP Admin</title>
   <style>${styles()}</style>
 </head>
 <body>
+  <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" aria-label="Close sidebar"></button>
   <div class="admin-shell">
     <aside class="admin-sidebar">
-      <h3>Coding MCP</h3>
-      <p>Admin Console</p>
-      <p class="toggle-text">Use the toggle to collapse this panel.</p>
+      <div class="brand">
+        <span class="brand-mark">CM</span>
+        <span class="brand-text">
+          <span class="brand-title">Coding MCP</span>
+          <span class="brand-subtitle">Admin Console</span>
+        </span>
+      </div>
       <nav aria-label="Admin sections">
-        <a href="#admin-projects"><span aria-hidden="true">📁</span><span class="text">Projects</span></a>
-        <a href="#admin-connectors"><span aria-hidden="true">🔗</span><span class="text">Connectors</span></a>
-        <a href="#admin-special-tools"><span aria-hidden="true">🛠️</span><span class="text">Special Tools</span></a>
-        <a href="#admin-skills"><span aria-hidden="true">🧭</span><span class="text">Skills</span></a>
-        <a href="#admin-tools"><span aria-hidden="true">⚙️</span><span class="text">Tool Overrides</span></a>
-        <a href="#admin-activity"><span aria-hidden="true">📡</span><span class="text">Activity</span></a>
-        <a href="/share"><span aria-hidden="true">🌐</span><span class="text">Public Index</span></a>
+        <a href="#admin-projects"><span class="nav-icon" aria-hidden="true">P</span><span class="text">Projects</span></a>
+        <a href="#admin-connectors"><span class="nav-icon" aria-hidden="true">C</span><span class="text">Connectors</span></a>
+        <a href="#admin-special-tools"><span class="nav-icon" aria-hidden="true">S</span><span class="text">Special Tools</span></a>
+        <a href="#admin-skills"><span class="nav-icon" aria-hidden="true">K</span><span class="text">Skills</span></a>
+        <a href="#admin-tools"><span class="nav-icon" aria-hidden="true">T</span><span class="text">Tool Overrides</span></a>
+        <a href="#admin-activity"><span class="nav-icon" aria-hidden="true">A</span><span class="text">Activity</span></a>
+        <a href="/share"><span class="nav-icon" aria-hidden="true">I</span><span class="text">Public Index</span></a>
       </nav>
+      <div class="sidebar-foot">MCP administration, project publishing, and tool access controls.</div>
     </aside>
     <div class="admin-content">
       <header>
         <div class="topbar">
-          <div style="display:flex; align-items:center; gap:10px;">
+          <div class="title-row">
             <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Toggle sidebar">☰</button>
             <div>
               <p class="eyebrow">Admin panel</p>
@@ -500,13 +571,44 @@ export function renderAdminPage(data: AdminPageData): string {
     (function () {
       const body = document.body;
       const toggle = document.getElementById("sidebar-toggle");
+      const backdrop = document.getElementById("sidebar-backdrop");
+      const mobileQuery = window.matchMedia("(max-width: 900px)");
       if (!toggle) return;
-      if (localStorage.getItem("coding-mcp-admin-sidebar-collapsed") === "1") {
-        body.classList.add("sidebar-collapsed");
+
+      function syncMode() {
+        if (mobileQuery.matches) {
+          body.classList.remove("sidebar-collapsed");
+          body.classList.remove("sidebar-open");
+          return;
+        }
+        body.classList.remove("sidebar-open");
+        if (localStorage.getItem("coding-mcp-admin-sidebar-collapsed") === "1") {
+          body.classList.add("sidebar-collapsed");
+        } else {
+          body.classList.remove("sidebar-collapsed");
+        }
       }
+
+      syncMode();
+      mobileQuery.addEventListener("change", syncMode);
+
       toggle.addEventListener("click", () => {
+        if (mobileQuery.matches) {
+          body.classList.toggle("sidebar-open");
+          return;
+        }
         body.classList.toggle("sidebar-collapsed");
         localStorage.setItem("coding-mcp-admin-sidebar-collapsed", body.classList.contains("sidebar-collapsed") ? "1" : "0");
+      });
+
+      backdrop?.addEventListener("click", () => {
+        body.classList.remove("sidebar-open");
+      });
+
+      document.querySelectorAll(".admin-sidebar a").forEach((link) => {
+        link.addEventListener("click", () => {
+          if (mobileQuery.matches) body.classList.remove("sidebar-open");
+        });
       });
     })();
   </script>
