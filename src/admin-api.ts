@@ -97,15 +97,18 @@ function adminCookieSecureMode(): AdminCookieSecureMode {
   return "auto";
 }
 
-function forwardedProto(req: express.Request): string {
-  return (req.header("x-forwarded-proto") ?? "").split(",")[0]?.trim().toLowerCase() ?? "";
-}
-
 function secureCookie(req: express.Request): boolean {
   const mode = adminCookieSecureMode();
   if (mode === "true") return true;
   if (mode === "false") return false;
-  return req.secure || forwardedProto(req) === "https";
+  if (req.secure) return true;
+  // Only read X-Forwarded-Proto when the operator has explicitly trusted the proxy
+  const trustProxy = (process.env.ADMIN_TRUST_PROXY ?? "").toLowerCase();
+  if (trustProxy === "true" || trustProxy === "1") {
+    const proto = (req.header("x-forwarded-proto") ?? "").split(",")[0]?.trim().toLowerCase() ?? "";
+    return proto === "https";
+  }
+  return false;
 }
 
 function setSessionCookie(req: express.Request, res: express.Response, session: UserSession): void {
@@ -567,7 +570,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     }
   }));
 
-  api.post("/projects/:projectId/status", async (req, res) => {
+  api.post("/projects/:projectId/status", asyncRoute(async (req, res) => {
     try {
       const user = res.locals.currentUser as PublicUser;
       if (!requireProjectMutation(user, res)) return;
@@ -581,9 +584,9 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Project status update failed.");
     }
-  });
+  }));
 
-  api.post("/projects/:projectId/delete", async (req, res) => {
+  api.post("/projects/:projectId/delete", asyncRoute(async (req, res) => {
     try {
       const user = res.locals.currentUser as PublicUser;
       if (!requireProjectMutation(user, res)) return;
@@ -594,7 +597,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Project delete failed.");
     }
-  });
+  }));
 
   api.get("/connectors", (_req, res) => {
     const user = res.locals.currentUser as PublicUser;

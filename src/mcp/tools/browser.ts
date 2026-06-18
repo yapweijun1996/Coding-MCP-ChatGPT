@@ -484,8 +484,12 @@ export const browserTools: ToolModule[] = [
 
       const summary = [] as string[];
       for (const { id, session } of targets) {
-        await session.page.close();
-        await session.browser.close();
+        try {
+          await session.page.close();
+        } catch { /* already closed */ }
+        try {
+          await session.browser.close();
+        } catch { /* already closed */ }
         browserSessions.delete(id);
         summary.push(`Closed browser session ${id}.`);
       }

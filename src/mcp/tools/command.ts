@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { spawn, type ChildProcess } from "node:child_process";
+import { realpath } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
 import { z } from "zod";
@@ -36,21 +37,15 @@ function trimOutput(value: string): string {
   return `${normalized.slice(0, MAX_LOG_BYTES)}... [truncated]`;
 }
 
-function safeResolveCwd(workspaceRoot: string, cwd?: string): string {
-  const normalizedRoot = path.resolve(workspaceRoot);
+async function safeResolveCwd(workspaceRoot: string, cwd?: string): Promise<string> {
+  const normalizedRoot = await realpath(workspaceRoot).catch(() => path.resolve(workspaceRoot));
   if (!cwd) return normalizedRoot;
-  if (path.isAbsolute(cwd)) {
-    const absoluteCandidate = path.resolve(cwd);
-    if (absoluteCandidate === normalizedRoot || absoluteCandidate.startsWith(`${normalizedRoot}${path.sep}`)) {
-      return absoluteCandidate;
-    }
+  const candidate = path.isAbsolute(cwd) ? path.resolve(cwd) : path.resolve(workspaceRoot, cwd);
+  const resolved = await realpath(candidate).catch(() => candidate);
+  if (resolved !== normalizedRoot && !resolved.startsWith(`${normalizedRoot}${path.sep}`)) {
     throw new Error(`Invalid cwd outside workspace: ${cwd}`);
   }
-  const candidate = path.resolve(workspaceRoot, cwd);
-  if (candidate !== normalizedRoot && !candidate.startsWith(`${normalizedRoot}${path.sep}`)) {
-    throw new Error(`Invalid cwd: ${cwd}`);
-  }
-  return candidate;
+  return resolved;
 }
 
 function appendServerLog(session: ServerSession, line: string, source: "stdout" | "stderr"): void {
@@ -300,7 +295,7 @@ const openLocalServerTool: ToolModule = {
         runningServers.delete(key);
       }
     }
-    const workingDir = safeResolveCwd(ctx.workspaceRoot, parsed.cwd);
+    const workingDir = await safeResolveCwd(ctx.workspaceRoot, parsed.cwd);
     const args = ["run", parsed.script];
     if (parsed.script === "dev") {
       args.push("--", "--host", parsed.host, "--port", String(parsed.port));

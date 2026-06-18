@@ -248,6 +248,8 @@ function validateSvgAsset(buffer: Buffer): void {
   }
   if (!/<\s*svg[\s>]/i.test(svg)) throw new Error("SVG asset must contain an <svg> root.");
   if (/<\s*script\b/i.test(svg)) throw new Error("SVG assets must not contain script tags.");
+  if (/<\s*foreignObject\b/i.test(svg)) throw new Error("SVG assets must not contain foreignObject elements.");
+  if (/\bon\w+\s*=/i.test(svg)) throw new Error("SVG assets must not contain event handler attributes.");
   if (/\b(?:href|src|xlink:href)\s*=\s*["']\s*(?:https?:|\/\/|data:)/i.test(svg)) {
     throw new Error("SVG assets must not reference external or data URLs.");
   }

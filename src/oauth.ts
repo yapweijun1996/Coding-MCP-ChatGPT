@@ -317,7 +317,11 @@ export function createAuthorizationRedirect(params: AuthorizeParams, passcode: s
 
 export function createAuthorizationRedirectForUser(params: AuthorizeParams, ownerUserId: string | undefined, config: OAuthConfig): string {
   if (!clients.has(params.clientId)) {
-    adoptClientFromAuthorize(params, ownerUserId);
+    if (ownerUserId) {
+      adoptClientFromAuthorize(params, ownerUserId);
+    } else {
+      throw new Error("Unknown OAuth client. Register the client via /oauth/register before authorizing.");
+    }
   } else if (ownerUserId) {
     const client = clients.get(params.clientId);
     if (client && !client.ownerUserId) {
