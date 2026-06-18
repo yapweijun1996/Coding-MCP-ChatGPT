@@ -11,6 +11,16 @@ import {
   type PublishProjectOptions,
   type ProjectValidationResult
 } from "../projects/store.js";
+import { withKeyedLock } from "../shared/keyed-lock.js";
+
+// Research-level serialization key. Distinct from the project-level lock used inside
+// writeProjectFile/appendProjectTaskHistory so these compound operations (which call
+// those locked helpers) don't deadlock on a non-reentrant lock. Serializes the
+// read-compute-id-then-write sequences so concurrent calls can't collide on
+// source_NNN / evidence_NNN ids or clobber an appended note.
+function researchLockKey(projectRoot: string, projectId: string): string {
+  return `research:${projectRoot}::${projectId}`;
+}
 
 export type ResearchConfidence = "low" | "medium" | "high";
 export type ResearchNoteType = "findings" | "contradictions" | "open-questions" | "methodology";
@@ -331,18 +341,20 @@ export async function addResearchSource(
   projectId: string,
   input: Omit<ResearchSource, "id" | "addedAt">
 ): Promise<ResearchSource> {
-  await readResearchMetadata(projectRoot, projectId);
-  const id = await nextResearchSourceId(projectRoot, projectId);
-  const source = normalizeResearchSource({ ...input, id });
-  await writeProjectFile(projectRoot, projectId, sourcePath(id), `${JSON.stringify(source, null, 2)}\n`);
-  await touchResearchMetadata(projectRoot, projectId);
-  await appendProjectTaskHistory(projectRoot, projectId, {
-    toolName: "add_research_source",
-    ok: true,
-    summary: `Added research source ${id}.`,
-    details: { sourceId: id, url: source.url, usedInReport: source.usedInReport }
+  return withKeyedLock(researchLockKey(projectRoot, projectId), async () => {
+    await readResearchMetadata(projectRoot, projectId);
+    const id = await nextResearchSourceId(projectRoot, projectId);
+    const source = normalizeResearchSource({ ...input, id });
+    await writeProjectFile(projectRoot, projectId, sourcePath(id), `${JSON.stringify(source, null, 2)}\n`);
+    await touchResearchMetadata(projectRoot, projectId);
+    await appendProjectTaskHistory(projectRoot, projectId, {
+      toolName: "add_research_source",
+      ok: true,
+      summary: `Added research source ${id}.`,
+      details: { sourceId: id, url: source.url, usedInReport: source.usedInReport }
+    });
+    return source;
   });
-  return source;
 }
 
 export async function listResearchSources(projectRoot: string, projectId: string): Promise<ResearchSource[]> {
@@ -355,20 +367,22 @@ export async function addResearchNote(
   projectId: string,
   input: { noteType: ResearchNoteType; content: string; append?: boolean }
 ): Promise<{ path: string; content: string }> {
-  await readResearchMetadata(projectRoot, projectId);
-  const path = notePath(input.noteType);
-  const current = input.append ? await safeReadProjectFile(projectRoot, projectId, path) : undefined;
-  const separator = current && !current.endsWith("\n") ? "\n" : "";
-  const content = input.append ? `${current ?? ""}${separator}${input.content}` : input.content;
-  await writeProjectFile(projectRoot, projectId, path, content.endsWith("\n") ? content : `${content}\n`);
-  await touchResearchMetadata(projectRoot, projectId);
-  await appendProjectTaskHistory(projectRoot, projectId, {
-    toolName: "add_research_note",
-    ok: true,
-    summary: `Updated research note ${input.noteType}.`,
-    details: { noteType: input.noteType, path, append: input.append ?? false }
+  return withKeyedLock(researchLockKey(projectRoot, projectId), async () => {
+    await readResearchMetadata(projectRoot, projectId);
+    const path = notePath(input.noteType);
+    const current = input.append ? await safeReadProjectFile(projectRoot, projectId, path) : undefined;
+    const separator = current && !current.endsWith("\n") ? "\n" : "";
+    const content = input.append ? `${current ?? ""}${separator}${input.content}` : input.content;
+    await writeProjectFile(projectRoot, projectId, path, content.endsWith("\n") ? content : `${content}\n`);
+    await touchResearchMetadata(projectRoot, projectId);
+    await appendProjectTaskHistory(projectRoot, projectId, {
+      toolName: "add_research_note",
+      ok: true,
+      summary: `Updated research note ${input.noteType}.`,
+      details: { noteType: input.noteType, path, append: input.append ?? false }
+    });
+    return { path, content };
   });
-  return { path, content };
 }
 
 export async function recordResearchEvidence(
@@ -376,32 +390,34 @@ export async function recordResearchEvidence(
   projectId: string,
   input: Omit<ResearchEvidence, "id" | "recordedAt">
 ): Promise<ResearchEvidence> {
-  await readResearchMetadata(projectRoot, projectId);
-  if (input.url) assertHttpUrl(input.url);
-  if (input.reportUrl) assertHttpUrl(input.reportUrl, "reportUrl");
-  if (!input.kind.trim()) throw new Error("Evidence kind is required.");
-  if (!input.summary.trim()) throw new Error("Evidence summary is required.");
-  const evidence = await readResearchEvidence(projectRoot, projectId);
-  const item: ResearchEvidence = {
-    id: `evidence_${String(evidence.length + 1).padStart(3, "0")}`,
-    sourceId: input.sourceId,
-    kind: input.kind.trim(),
-    url: input.url,
-    reportUrl: input.reportUrl,
-    summary: input.summary.trim(),
-    structuredContent: input.structuredContent,
-    recordedAt: new Date().toISOString()
-  };
-  const next = [...evidence, item];
-  await writeProjectFile(projectRoot, projectId, researchEvidencePath, `${JSON.stringify(next, null, 2)}\n`);
-  await touchResearchMetadata(projectRoot, projectId);
-  await appendProjectTaskHistory(projectRoot, projectId, {
-    toolName: "record_research_evidence",
-    ok: true,
-    summary: `Recorded research evidence ${item.id}.`,
-    details: { evidenceId: item.id, sourceId: item.sourceId, kind: item.kind }
+  return withKeyedLock(researchLockKey(projectRoot, projectId), async () => {
+    await readResearchMetadata(projectRoot, projectId);
+    if (input.url) assertHttpUrl(input.url);
+    if (input.reportUrl) assertHttpUrl(input.reportUrl, "reportUrl");
+    if (!input.kind.trim()) throw new Error("Evidence kind is required.");
+    if (!input.summary.trim()) throw new Error("Evidence summary is required.");
+    const evidence = await readResearchEvidence(projectRoot, projectId);
+    const item: ResearchEvidence = {
+      id: `evidence_${String(evidence.length + 1).padStart(3, "0")}`,
+      sourceId: input.sourceId,
+      kind: input.kind.trim(),
+      url: input.url,
+      reportUrl: input.reportUrl,
+      summary: input.summary.trim(),
+      structuredContent: input.structuredContent,
+      recordedAt: new Date().toISOString()
+    };
+    const next = [...evidence, item];
+    await writeProjectFile(projectRoot, projectId, researchEvidencePath, `${JSON.stringify(next, null, 2)}\n`);
+    await touchResearchMetadata(projectRoot, projectId);
+    await appendProjectTaskHistory(projectRoot, projectId, {
+      toolName: "record_research_evidence",
+      ok: true,
+      summary: `Recorded research evidence ${item.id}.`,
+      details: { evidenceId: item.id, sourceId: item.sourceId, kind: item.kind }
+    });
+    return item;
   });
-  return item;
 }
 
 export async function getResearchManifest(projectRoot: string, projectId: string): Promise<ResearchManifest> {
@@ -429,20 +445,22 @@ export async function writeResearchReport(
   projectId: string,
   input: { markdown: string; html: string }
 ): Promise<ResearchReportStatus> {
-  await readResearchMetadata(projectRoot, projectId);
-  if (!/^\s*<!doctype html>/i.test(input.html) || !/<html[\s>]/i.test(input.html) || !/<\/html>/i.test(input.html)) {
-    throw new Error("html must be a complete HTML document with <!doctype html> and <html>.");
-  }
-  await writeProjectFile(projectRoot, projectId, reportMarkdownPath, input.markdown.endsWith("\n") ? input.markdown : `${input.markdown}\n`);
-  await writeProjectFile(projectRoot, projectId, reportHtmlPath, input.html.endsWith("\n") ? input.html : `${input.html}\n`);
-  await touchResearchMetadata(projectRoot, projectId);
-  await appendProjectTaskHistory(projectRoot, projectId, {
-    toolName: "write_research_report",
-    ok: true,
-    summary: `Wrote research report for ${projectId}.`,
-    details: { markdownPath: reportMarkdownPath, htmlPath: reportHtmlPath }
+  return withKeyedLock(researchLockKey(projectRoot, projectId), async () => {
+    await readResearchMetadata(projectRoot, projectId);
+    if (!/^\s*<!doctype html>/i.test(input.html) || !/<html[\s>]/i.test(input.html) || !/<\/html>/i.test(input.html)) {
+      throw new Error("html must be a complete HTML document with <!doctype html> and <html>.");
+    }
+    await writeProjectFile(projectRoot, projectId, reportMarkdownPath, input.markdown.endsWith("\n") ? input.markdown : `${input.markdown}\n`);
+    await writeProjectFile(projectRoot, projectId, reportHtmlPath, input.html.endsWith("\n") ? input.html : `${input.html}\n`);
+    await touchResearchMetadata(projectRoot, projectId);
+    await appendProjectTaskHistory(projectRoot, projectId, {
+      toolName: "write_research_report",
+      ok: true,
+      summary: `Wrote research report for ${projectId}.`,
+      details: { markdownPath: reportMarkdownPath, htmlPath: reportHtmlPath }
+    });
+    return getReportStatus(projectRoot, projectId);
   });
-  return getReportStatus(projectRoot, projectId);
 }
 
 export async function validateResearchManifest(projectRoot: string, projectId: string): Promise<ResearchValidationResult> {

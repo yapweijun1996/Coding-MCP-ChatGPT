@@ -33,14 +33,14 @@ type QueryMode = "and" | "or";
 
 function parseQuery(input: string): { mode: QueryMode; groups: string[][] } {
   const normalized = input.trim().toLowerCase();
-  const tokensOr = normalized.split(/\\s+or\\s+/i).map((item) => item.trim()).filter(Boolean);
+  const tokensOr = normalized.split(/\s+or\s+/i).map((item) => item.trim()).filter(Boolean);
   if (normalized.includes(" or ") && tokensOr.length > 1) {
     return {
       mode: "or",
-      groups: tokensOr.map((entry) => entry.split(/\\s+/).filter(Boolean))
+      groups: tokensOr.map((entry) => entry.split(/\s+/).filter(Boolean))
     };
   }
-  return { mode: "and", groups: [normalized.split(/\\s+/).filter(Boolean)] };
+  return { mode: "and", groups: [normalized.split(/\s+/).filter(Boolean)] };
 }
 
 function scoreCandidate(content: string, parsed: ReturnType<typeof parseQuery>): number {
@@ -54,8 +54,8 @@ function scoreCandidate(content: string, parsed: ReturnType<typeof parseQuery>):
 }
 
 function snippetFrom(content: string, parsedQuery: string, maxBytes: number): string {
-  const tokens = parsedQuery.toLowerCase().trim().split(/\\s+/).filter(Boolean);
-  const lines = content.split(/\\r?\\n/);
+  const tokens = parsedQuery.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const lines = content.split(/\r?\n/);
   let hitLine = 0;
   if (tokens.length > 0) {
     const allTokens = lines.map((line, index) => ({ line: index, score: tokens.reduce((sum, token) => (line.toLowerCase().includes(token) ? sum + 1 : sum), 0) }));
@@ -70,7 +70,7 @@ function snippetFrom(content: string, parsedQuery: string, maxBytes: number): st
 }
 
 function normalizeExtensions(entries: string[]): Set<string> {
-  return new Set(entries.map((entry) => entry.toLowerCase().replace(/^\\./, "").trim()));
+  return new Set(entries.map((entry) => entry.toLowerCase().replace(/^\./, "").trim()));
 }
 
 async function walkProjectFiles(root: string, out: string[], depth: number, extensions: Set<string>, hints: Set<string>): Promise<void> {
@@ -229,7 +229,7 @@ export const docsKnowledgeTools: ToolModule[] = [
         const content = await fs.readFile(absolute, "utf8").catch(() => undefined);
         if (!content) continue;
         const relative = path.relative(ctx.workspaceRoot, absolute);
-        const lines = content.split(/\\r?\\n/);
+        const lines = content.split(/\r?\n/);
         for (const line of lines.slice(0, 220)) {
           if (line.trim()) inspectLine(line, relative);
         }

@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { TextDecoder } from "node:util";
+import { withKeyedLock } from "../shared/keyed-lock.js";
+
+// Serialization key for a single project's metadata + files. All read-modify-write
+// sequences for one project run under this key so concurrent tool calls can't clobber
+// each other's task history / status / file content (lost-update races).
+function projectLockKey(projectRoot: string, projectId: string): string {
+  return `project:${path.resolve(projectRoot)}::${projectId}`;
+}
 
 export type ProjectStatus = "draft" | "private" | "published" | "deleted";
 export type ProjectValidationStatus = "valid" | "warnings" | "failed";
@@ -300,7 +308,12 @@ async function readProjectMetadata(projectRoot: string, projectId: string): Prom
 
 async function writeProjectMetadata(projectRoot: string, metadata: ProjectMetadata): Promise<void> {
   await mkdir(getProjectDirectory(projectRoot, metadata.id), { recursive: true });
-  await writeFile(getProjectMetadataPath(projectRoot, metadata.id), `${JSON.stringify(normalizeProjectMetadata(metadata), null, 2)}\n`, "utf8");
+  // Atomic write: a crash/full-disk mid-write must not leave a truncated metadata
+  // file that fails validation and makes the project vanish from listings.
+  const finalPath = getProjectMetadataPath(projectRoot, metadata.id);
+  const tempPath = `${finalPath}.tmp-${randomUUID()}`;
+  await writeFile(tempPath, `${JSON.stringify(normalizeProjectMetadata(metadata), null, 2)}\n`, "utf8");
+  await rename(tempPath, finalPath);
 }
 
 function addHistory(metadata: ProjectMetadata, event: Omit<ProjectTaskHistoryItem, "id" | "time">): ProjectMetadata {
@@ -327,10 +340,12 @@ export async function appendProjectTaskHistory(
   projectId: string,
   event: Omit<ProjectTaskHistoryItem, "id" | "time">
 ): Promise<ProjectMetadata> {
-  const metadata = await getProject(projectRoot, projectId);
-  const updated = addHistory(metadata, event);
-  await writeProjectMetadata(projectRoot, updated);
-  return updated;
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    const updated = addHistory(metadata, event);
+    await writeProjectMetadata(projectRoot, updated);
+    return updated;
+  });
 }
 
 export async function createProject(
@@ -367,11 +382,13 @@ export async function createProject(
 }
 
 export async function clearProjectFiles(projectRoot: string, projectId: string): Promise<void> {
-  const metadata = await getProject(projectRoot, projectId);
-  if (metadata.status === "deleted") throw new Error("Cannot clear files from a deleted project.");
-  const filesRoot = getProjectFilesDirectory(projectRoot, projectId);
-  await rm(filesRoot, { recursive: true, force: true });
-  await mkdir(filesRoot, { recursive: true });
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot clear files from a deleted project.");
+    const filesRoot = getProjectFilesDirectory(projectRoot, projectId);
+    await rm(filesRoot, { recursive: true, force: true });
+    await mkdir(filesRoot, { recursive: true });
+  });
 }
 
 export async function listProjectFiles(projectRoot: string, projectId: string): Promise<ProjectFileInfo[]> {
@@ -474,6 +491,7 @@ export async function getProjectActivity(projectRoot: string, projectId: string,
 }
 
 export async function writeProjectFile(projectRoot: string, projectId: string, relativePath: string, content: string): Promise<ProjectFileInfo> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
   if (Buffer.byteLength(content, "utf8") > maxProjectFileBytes) {
     throw new Error("Project file content exceeds 1 MiB.");
   }
@@ -500,6 +518,7 @@ export async function writeProjectFile(projectRoot: string, projectId: string, r
   await writeProjectMetadata(projectRoot, updated);
 
   return file;
+  });
 }
 
 export async function patchProjectFile(
@@ -508,6 +527,7 @@ export async function patchProjectFile(
   relativePath: string,
   operations: Array<{ find: string; replace: string; all?: boolean }>
 ): Promise<ProjectFileInfo> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
   const metadata = await getProject(projectRoot, projectId);
   if (metadata.status === "deleted") throw new Error("Cannot patch a deleted project.");
 
@@ -552,9 +572,11 @@ export async function patchProjectFile(
   await writeProjectMetadata(projectRoot, updated);
 
   return file;
+  });
 }
 
 export async function writeProjectAsset(projectRoot: string, projectId: string, relativePath: string, content: Buffer, contentType?: string): Promise<ProjectFileInfo> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
   const safeRelativePath = assertSafeProjectAssetPath(relativePath);
   validateProjectAssetBytes(safeRelativePath, content, contentType);
 
@@ -580,6 +602,7 @@ export async function writeProjectAsset(projectRoot: string, projectId: string, 
   await writeProjectMetadata(projectRoot, updated);
 
   return file;
+  });
 }
 
 export async function importProjectAssetFromLocalFile(
@@ -649,6 +672,7 @@ function extractLocalHtmlReferences(entryFile: string, html: string): string[] {
 }
 
 export async function validateProject(projectRoot: string, projectId: string, entryFile?: string, profile: ProjectValidationProfile = "static_html"): Promise<ProjectValidationResult> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
   const metadata = await getProject(projectRoot, projectId);
   const warnings: string[] = [];
   const errors: string[] = [];
@@ -733,28 +757,31 @@ export async function validateProject(projectRoot: string, projectId: string, en
   await writeProjectMetadata(projectRoot, updated);
 
   return result;
+  });
 }
 
 export async function publishProject(projectRoot: string, projectId: string, publicBaseUrl: string, entryFile?: string, options: PublishProjectOptions = {}): Promise<ProjectMetadata> {
-  const metadata = await getProject(projectRoot, projectId);
-  if (metadata.status === "deleted") throw new Error("Cannot publish a deleted project.");
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot publish a deleted project.");
 
-  const safeEntryFile = assertSafeProjectFilePath(entryFile ?? metadata.entryFile);
-  await stat(resolveProjectFilePath(projectRoot, projectId, safeEntryFile));
-  const publishedUrl = makeProjectPublicUrl(publicBaseUrl, options.shareBasePath, projectId, safeEntryFile);
-  const updated = addHistory({
-    ...metadata,
-    status: "published" as ProjectStatus,
-    entryFile: safeEntryFile,
-    publishedUrl
-  }, {
-    toolName: "publish_project",
-    ok: true,
-    summary: `Published ${projectId}.`,
-    details: { entryFile: safeEntryFile, publishedUrl }
+    const safeEntryFile = assertSafeProjectFilePath(entryFile ?? metadata.entryFile);
+    await stat(resolveProjectFilePath(projectRoot, projectId, safeEntryFile));
+    const publishedUrl = makeProjectPublicUrl(publicBaseUrl, options.shareBasePath, projectId, safeEntryFile);
+    const updated = addHistory({
+      ...metadata,
+      status: "published" as ProjectStatus,
+      entryFile: safeEntryFile,
+      publishedUrl
+    }, {
+      toolName: "publish_project",
+      ok: true,
+      summary: `Published ${projectId}.`,
+      details: { entryFile: safeEntryFile, publishedUrl }
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return updated;
   });
-  await writeProjectMetadata(projectRoot, updated);
-  return updated;
 }
 
 export async function forkProject(
@@ -797,39 +824,45 @@ export async function forkProject(
 
 export async function setProjectStatus(projectRoot: string, projectId: string, status: Exclude<ProjectStatus, "deleted">, publicBaseUrl: string, options: PublishProjectOptions = {}): Promise<ProjectMetadata> {
   if (status === "published") {
+    // Delegates to publishProject, which acquires the lock itself — do not wrap here
+    // (the lock is not reentrant; nesting would deadlock).
     return publishProject(projectRoot, projectId, publicBaseUrl, undefined, options);
   }
 
-  const metadata = await getProject(projectRoot, projectId);
-  if (metadata.status === "deleted") throw new Error("Cannot update a deleted project.");
-  const updated = addHistory({
-    ...metadata,
-    status,
-    publishedUrl: undefined
-  }, {
-    toolName: "set_project_status",
-    ok: true,
-    summary: `Set ${projectId} status to ${status}.`,
-    details: { status }
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot update a deleted project.");
+    const updated = addHistory({
+      ...metadata,
+      status,
+      publishedUrl: undefined
+    }, {
+      toolName: "set_project_status",
+      ok: true,
+      summary: `Set ${projectId} status to ${status}.`,
+      details: { status }
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return updated;
   });
-  await writeProjectMetadata(projectRoot, updated);
-  return updated;
 }
 
 export async function unpublishProject(projectRoot: string, projectId: string, reason: string): Promise<ProjectMetadata> {
-  const metadata = await getProject(projectRoot, projectId);
-  if (metadata.status === "deleted") throw new Error("Cannot unpublish a deleted project.");
-  const updated = addHistory({
-    ...metadata,
-    status: "draft" as ProjectStatus,
-    publishedUrl: undefined
-  }, {
-    toolName: "unpublish_project",
-    ok: true,
-    summary: reason
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot unpublish a deleted project.");
+    const updated = addHistory({
+      ...metadata,
+      status: "draft" as ProjectStatus,
+      publishedUrl: undefined
+    }, {
+      toolName: "unpublish_project",
+      ok: true,
+      summary: reason
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return updated;
   });
-  await writeProjectMetadata(projectRoot, updated);
-  return updated;
 }
 
 export async function recordProjectBrowserInspection(
@@ -838,32 +871,34 @@ export async function recordProjectBrowserInspection(
   browserInspection: ProjectBrowserInspectionSummary,
   toolName = "browser_validate_project"
 ): Promise<ProjectMetadata> {
-  const metadata = await getProject(projectRoot, projectId);
-  const previousValidation = metadata.lastValidation;
-  const errors = [...(previousValidation?.errors ?? []), ...browserInspection.blockingErrors];
-  const warnings = [...(previousValidation?.warnings ?? []), ...browserInspection.warnings];
-  const lastValidation: ProjectValidationResult = {
-    ok: (previousValidation?.ok ?? true) && browserInspection.ok,
-    status: errors.length > 0 ? "failed" : warnings.length > 0 ? "warnings" : "valid",
-    profile: previousValidation?.profile ?? "static_html",
-    projectId,
-    entryFile: previousValidation?.entryFile ?? metadata.entryFile,
-    filesChecked: previousValidation?.filesChecked ?? 0,
-    warnings,
-    errors,
-    checkedAt: browserInspection.inspectedAt,
-    browserInspection
-  };
-  const updated = addHistory({ ...metadata, lastValidation }, {
-    toolName,
-    ok: browserInspection.ok,
-    summary: browserInspection.ok
-      ? `Browser validation passed for ${projectId}.`
-      : `Browser validation failed for ${projectId}.`,
-    details: browserInspection
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    const previousValidation = metadata.lastValidation;
+    const errors = [...(previousValidation?.errors ?? []), ...browserInspection.blockingErrors];
+    const warnings = [...(previousValidation?.warnings ?? []), ...browserInspection.warnings];
+    const lastValidation: ProjectValidationResult = {
+      ok: (previousValidation?.ok ?? true) && browserInspection.ok,
+      status: errors.length > 0 ? "failed" : warnings.length > 0 ? "warnings" : "valid",
+      profile: previousValidation?.profile ?? "static_html",
+      projectId,
+      entryFile: previousValidation?.entryFile ?? metadata.entryFile,
+      filesChecked: previousValidation?.filesChecked ?? 0,
+      warnings,
+      errors,
+      checkedAt: browserInspection.inspectedAt,
+      browserInspection
+    };
+    const updated = addHistory({ ...metadata, lastValidation }, {
+      toolName,
+      ok: browserInspection.ok,
+      summary: browserInspection.ok
+        ? `Browser validation passed for ${projectId}.`
+        : `Browser validation failed for ${projectId}.`,
+      details: browserInspection
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return updated;
   });
-  await writeProjectMetadata(projectRoot, updated);
-  return updated;
 }
 
 export async function publishProjectAndReport(projectRoot: string, projectId: string, publicBaseUrl: string, entryFile?: string, options: PublishProjectOptions = {}): Promise<{
@@ -917,32 +952,36 @@ export async function publishProjectAndReport(projectRoot: string, projectId: st
 }
 
 export async function deleteProjectFile(projectRoot: string, projectId: string, relativePath: string): Promise<void> {
-  const metadata = await getProject(projectRoot, projectId);
-  if (metadata.status === "deleted") throw new Error("Cannot delete files from a deleted project.");
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot delete files from a deleted project.");
 
-  const safeRelativePath = assertSafeProjectStoredPath(relativePath);
-  const absolutePath = resolveProjectStoredPath(projectRoot, projectId, safeRelativePath);
-  await rm(absolutePath, { force: true });
-  const updated = addHistory(metadata, {
-    toolName: "delete_project_file",
-    ok: true,
-    summary: `Deleted ${safeRelativePath}.`,
-    details: { path: safeRelativePath }
+    const safeRelativePath = assertSafeProjectStoredPath(relativePath);
+    const absolutePath = resolveProjectStoredPath(projectRoot, projectId, safeRelativePath);
+    await rm(absolutePath, { force: true });
+    const updated = addHistory(metadata, {
+      toolName: "delete_project_file",
+      ok: true,
+      summary: `Deleted ${safeRelativePath}.`,
+      details: { path: safeRelativePath }
+    });
+    await writeProjectMetadata(projectRoot, updated);
   });
-  await writeProjectMetadata(projectRoot, updated);
 }
 
 export async function deleteProject(projectRoot: string, projectId: string): Promise<ProjectMetadata> {
-  const metadata = await getProject(projectRoot, projectId);
-  const updated = addHistory({
-    ...metadata,
-    status: "deleted" as ProjectStatus,
-    publishedUrl: undefined
-  }, {
-    toolName: "delete_project",
-    ok: true,
-    summary: `Soft-deleted project ${projectId}.`
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    const updated = addHistory({
+      ...metadata,
+      status: "deleted" as ProjectStatus,
+      publishedUrl: undefined
+    }, {
+      toolName: "delete_project",
+      ok: true,
+      summary: `Soft-deleted project ${projectId}.`
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return updated;
   });
-  await writeProjectMetadata(projectRoot, updated);
-  return updated;
 }

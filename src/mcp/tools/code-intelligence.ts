@@ -141,7 +141,7 @@ async function inferProjectFiles(root: string, include: boolean): Promise<Array<
 }
 
 function extractFilesFromOutput(raw: string): string[] {
-  const fileMatch = /[A-Za-z0-9._\\/-]+\\.[A-Za-z0-9]+:\\d+/g;
+  const fileMatch = /[A-Za-z0-9._\/-]+\.[A-Za-z0-9]+:\d+/g;
   const candidate = raw.match(fileMatch) ?? [];
   const byName = new Map<string, true>();
   for (const entry of candidate) {
@@ -151,8 +151,8 @@ function extractFilesFromOutput(raw: string): string[] {
 }
 
 function extractStack(raw: string, maxLines: number): string[] {
-  const lines = raw.split(/\\r?\\n/).map((line) => line.trim()).filter(Boolean);
-  const selected = lines.filter((line) => /at\\s/.test(line) || /\\(.*:\\d+:\\d+\\)/.test(line) || /Error/.test(line));
+  const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const selected = lines.filter((line) => /at\s/.test(line) || /\(.*:\d+:\d+\)/.test(line) || /Error/.test(line));
   if (selected.length > 0) return selected.slice(0, maxLines);
   return lines.slice(0, maxLines);
 }
@@ -164,10 +164,10 @@ function parseExitCode(value: unknown, fallback: number): number {
 
 function parseGitStatus(output: string): Array<{ path: string; status: string }> {
   return output
-    .split(/\\r?\\n/)
+    .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => ({ status: line.slice(0, 2).trim() || "M", path: line.replace(/^[MADRCU!?* ]+\\s*/u, "").trim() }))
+    .map((line) => ({ status: line.slice(0, 2).trim() || "M", path: line.replace(/^[MADRCU!?* ]+\s*/u, "").trim() }))
     .filter((entry) => entry.path);
 }
 
@@ -485,11 +485,11 @@ export const codeIntelligenceTools: ToolModule[] = [
         : "";
       const diffItems = outputDiff
         ? outputDiff
-          .split(/\\r?\\n/)
+          .split(/\r?\n/)
           .map((line) => line.trim())
           .filter(Boolean)
           .map((line) => {
-            const [status, file] = line.split(/\\s+/, 2);
+            const [status, file] = line.split(/\s+/, 2);
             return { file: file || "", status: status || "M" };
           })
           .filter((entry) => entry.file)
@@ -511,7 +511,7 @@ export const codeIntelligenceTools: ToolModule[] = [
         gitBase: base || "working-tree",
         gitTarget: target || "working-tree",
         diffSummary: includeDiff && parsed.includeDiffSummary
-          ? outputDiff.trim().split(/\\r?\\n/).slice(0, 30)
+          ? outputDiff.trim().split(/\r?\n/).slice(0, 30)
           : []
       };
       return {
