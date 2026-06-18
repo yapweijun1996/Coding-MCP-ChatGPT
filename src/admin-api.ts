@@ -673,6 +673,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       const post = await upsertBlogPost({
         title,
         content,
+        format: body.format === "html" ? "html" : "markdown",
         slug: typeof body.slug === "string" && body.slug.trim() ? body.slug.trim() : undefined,
         excerpt: typeof body.excerpt === "string" ? body.excerpt : undefined,
         coverImageUrl: typeof body.coverImageUrl === "string" ? body.coverImageUrl : undefined,

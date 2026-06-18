@@ -1,5 +1,10 @@
 import type { BlogPost, BlogTheme } from "./store.js";
 import { renderMarkdown, escapeBlogHtml as escapeHtml } from "./markdown.js";
+import { sanitizeBlogHtml } from "./sanitize-html.js";
+
+function renderBody(post: BlogPost): string {
+  return post.format === "html" ? sanitizeBlogHtml(post.content) : renderMarkdown(post.content);
+}
 
 const baseCss = `
   :root { color-scheme: light dark; }
@@ -104,7 +109,7 @@ export function renderBlogPost(post: BlogPost, theme: BlogTheme): string {
     <article class="post-full">
       <h1>${escapeHtml(post.title)}</h1>
       <p class="post-meta">${formatDate(post.publishedAt ?? post.createdAt)}${post.tags.length ? ` · ${post.tags.map((tag) => escapeHtml(tag)).join(", ")}` : ""}</p>
-      <div class="post-body">${renderMarkdown(post.content)}</div>
+      <div class="post-body">${renderBody(post)}</div>
     </article>`;
   return shell(theme, body, `${post.title} — ${theme.title || "Blog"}`, post.seoDescription ?? post.excerpt ?? undefined);
 }

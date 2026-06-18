@@ -4,12 +4,14 @@ import path from "node:path";
 import pg from "pg";
 
 export type BlogPostStatus = "draft" | "published";
+export type BlogPostFormat = "markdown" | "html";
 
 export interface BlogPost {
   id: string;
   slug: string;
   title: string;
-  content: string; // markdown source
+  content: string; // markdown source or sanitized-on-render HTML, per `format`
+  format: BlogPostFormat;
   excerpt: string;
   coverImageUrl: string | null;
   tags: string[];
@@ -31,6 +33,7 @@ export interface BlogTheme {
 export interface BlogUpsertInput {
   title: string;
   content: string;
+  format?: BlogPostFormat;
   slug?: string;
   excerpt?: string;
   coverImageUrl?: string | null;
@@ -95,6 +98,7 @@ function mapRow(row: Record<string, unknown>): BlogPost {
     slug: String(row.slug),
     title: String(row.title),
     content: String(row.content),
+    format: row.format === "html" ? "html" : "markdown",
     excerpt: String(row.excerpt ?? ""),
     coverImageUrl: row.cover_image_url ? String(row.cover_image_url) : null,
     tags: Array.isArray(row.tags) ? (row.tags as string[]) : [],
@@ -129,6 +133,8 @@ export async function initializeBlogStore(input: { databaseUrl?: string; statePa
         published_at timestamptz
       );
     `);
+    // Backward-compatible column add for databases created before `format` existed.
+    await pool.query("alter table blog_posts add column if not exists format text not null default 'markdown'");
   } else {
     pool = undefined;
     await loadFileState();
@@ -169,6 +175,7 @@ export async function upsertBlogPost(input: BlogUpsertInput): Promise<BlogPost> 
     slug,
     title: input.title,
     content: input.content,
+    format: input.format ?? existing?.format ?? "markdown",
     excerpt: input.excerpt ?? existing?.excerpt ?? "",
     coverImageUrl: input.coverImageUrl ?? existing?.coverImageUrl ?? null,
     tags: input.tags ?? existing?.tags ?? [],
@@ -182,13 +189,13 @@ export async function upsertBlogPost(input: BlogUpsertInput): Promise<BlogPost> 
 
   if (pool) {
     await pool.query(`
-      insert into blog_posts (id, slug, title, content, excerpt, cover_image_url, tags, seo_description, author_user_id, status, created_at, updated_at, published_at)
-      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+      insert into blog_posts (id, slug, title, content, format, excerpt, cover_image_url, tags, seo_description, author_user_id, status, created_at, updated_at, published_at)
+      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
       on conflict (slug) do update set
-        title = excluded.title, content = excluded.content, excerpt = excluded.excerpt,
+        title = excluded.title, content = excluded.content, format = excluded.format, excerpt = excluded.excerpt,
         cover_image_url = excluded.cover_image_url, tags = excluded.tags, seo_description = excluded.seo_description,
         status = excluded.status, updated_at = excluded.updated_at, published_at = excluded.published_at
-    `, [post.id, post.slug, post.title, post.content, post.excerpt, post.coverImageUrl, post.tags, post.seoDescription, post.authorUserId, post.status, post.createdAt, post.updatedAt, post.publishedAt]);
+    `, [post.id, post.slug, post.title, post.content, post.format, post.excerpt, post.coverImageUrl, post.tags, post.seoDescription, post.authorUserId, post.status, post.createdAt, post.updatedAt, post.publishedAt]);
     return post;
   }
 

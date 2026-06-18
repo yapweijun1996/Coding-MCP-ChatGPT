@@ -618,10 +618,11 @@ function ProjectDetailPage({ projectId, setConfirm, toast }: { projectId: string
 
 type BlogPostRow = { slug: string; title: string; status: "draft" | "published"; tags: string[]; publishedAt: string | null; updatedAt: string };
 type BlogThemeForm = { title: string; css: string; headerHtml: string; footerHtml: string };
-type BlogEditor = { originalSlug: string | null; title: string; slug: string; content: string; excerpt: string; tags: string; status: "draft" | "published"; seoDescription: string; coverImageUrl: string };
-type BlogPostFull = { slug: string; title: string; content: string; excerpt: string; tags: string[]; status: "draft" | "published"; seoDescription: string | null; coverImageUrl: string | null };
+type BlogFormat = "markdown" | "html";
+type BlogEditor = { originalSlug: string | null; title: string; slug: string; content: string; format: BlogFormat; excerpt: string; tags: string; status: "draft" | "published"; seoDescription: string; coverImageUrl: string };
+type BlogPostFull = { slug: string; title: string; content: string; format: BlogFormat; excerpt: string; tags: string[]; status: "draft" | "published"; seoDescription: string | null; coverImageUrl: string | null };
 
-const emptyEditor: BlogEditor = { originalSlug: null, title: "", slug: "", content: "", excerpt: "", tags: "", status: "published", seoDescription: "", coverImageUrl: "" };
+const emptyEditor: BlogEditor = { originalSlug: null, title: "", slug: "", content: "", format: "markdown", excerpt: "", tags: "", status: "published", seoDescription: "", coverImageUrl: "" };
 
 function BlogPage({ setConfirm, toast, isAdmin }: { setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void; isAdmin: boolean }) {
   const [posts, setPosts] = useState<BlogPostRow[]>();
@@ -649,7 +650,7 @@ function BlogPage({ setConfirm, toast, isAdmin }: { setConfirm: (state: ConfirmS
   const editPost = async (slug: string) => {
     try {
       const { post } = await api<{ post: BlogPostFull }>(`/blog/posts/${encodeURIComponent(slug)}`);
-      setEditor({ originalSlug: post.slug, title: post.title, slug: post.slug, content: post.content, excerpt: post.excerpt ?? "", tags: post.tags.join(", "), status: post.status, seoDescription: post.seoDescription ?? "", coverImageUrl: post.coverImageUrl ?? "" });
+      setEditor({ originalSlug: post.slug, title: post.title, slug: post.slug, content: post.content, format: post.format === "html" ? "html" : "markdown", excerpt: post.excerpt ?? "", tags: post.tags.join(", "), status: post.status, seoDescription: post.seoDescription ?? "", coverImageUrl: post.coverImageUrl ?? "" });
     } catch (err) {
       toast("error", err instanceof Error ? err.message : "Failed to load post.");
     }
@@ -661,7 +662,7 @@ function BlogPage({ setConfirm, toast, isAdmin }: { setConfirm: (state: ConfirmS
     setSaving(true);
     try {
       await api("/blog/posts", { method: "POST", body: JSON.stringify({
-        title: editor.title, content: editor.content, slug: editor.slug.trim() || undefined,
+        title: editor.title, content: editor.content, format: editor.format, slug: editor.slug.trim() || undefined,
         excerpt: editor.excerpt, tags: editor.tags, status: editor.status,
         seoDescription: editor.seoDescription, coverImageUrl: editor.coverImageUrl || undefined
       }) });
@@ -684,7 +685,8 @@ function BlogPage({ setConfirm, toast, isAdmin }: { setConfirm: (state: ConfirmS
             <strong>{editor.originalSlug ? `Editing "${editor.originalSlug}"` : "New post"}</strong>
             <label>Title<input value={editor.title} onChange={(event) => setEditor((c) => c && ({ ...c, title: event.target.value }))} placeholder="Post title" /></label>
             <label>Slug (optional)<input value={editor.slug} onChange={(event) => setEditor((c) => c && ({ ...c, slug: event.target.value }))} placeholder="auto-generated from title" /></label>
-            <label>Content (Markdown)<textarea rows={12} value={editor.content} onChange={(event) => setEditor((c) => c && ({ ...c, content: event.target.value }))} placeholder="# Heading&#10;&#10;Body in **Markdown**." /></label>
+            <label>Format<select value={editor.format} onChange={(event) => setEditor((c) => c && ({ ...c, format: event.target.value === "html" ? "html" : "markdown" }))}><option value="markdown">Markdown</option><option value="html">HTML (sanitized)</option></select></label>
+            <label>Content ({editor.format === "html" ? "HTML — scripts/handlers stripped on render" : "Markdown"})<textarea rows={12} value={editor.content} onChange={(event) => setEditor((c) => c && ({ ...c, content: event.target.value }))} placeholder={editor.format === "html" ? "<h2>Heading</h2><p>Body in <strong>HTML</strong>.</p>" : "# Heading&#10;&#10;Body in **Markdown**."} /></label>
             <label>Excerpt<textarea rows={2} value={editor.excerpt} onChange={(event) => setEditor((c) => c && ({ ...c, excerpt: event.target.value }))} placeholder="Short summary for the index" /></label>
             <label>Tags (comma-separated)<input value={editor.tags} onChange={(event) => setEditor((c) => c && ({ ...c, tags: event.target.value }))} placeholder="news, product" /></label>
             <label>SEO description<input value={editor.seoDescription} onChange={(event) => setEditor((c) => c && ({ ...c, seoDescription: event.target.value }))} placeholder="Meta description" /></label>

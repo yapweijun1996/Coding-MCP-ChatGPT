@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { renderMarkdown } from "../src/blog/markdown.js";
+import { sanitizeBlogHtml } from "../src/blog/sanitize-html.js";
 import { initializeBlogStore, upsertBlogPost, getBlogPostBySlug, listBlogPosts, deleteBlogPost, setBlogTheme, slugify } from "../src/blog/store.js";
 import { blogTools } from "../src/mcp/tools/blog.js";
 
@@ -53,6 +54,35 @@ test("markdown renderer escapes HTML and renders a safe subset", () => {
   const xss = renderMarkdown("<script>alert(1)</script>");
   assert.doesNotMatch(xss, /<script>/);
   assert.match(xss, /&lt;script&gt;/);
+});
+
+test("HTML sanitizer keeps safe markup and strips dangerous content", () => {
+  // safe formatting kept
+  const safe = sanitizeBlogHtml('<h2>Title</h2><p class="lead" style="color:red">Hi <strong>there</strong></p><a href="https://ok.test">link</a><img src="/a.png" alt="x">');
+  assert.match(safe, /<h2>Title<\/h2>/);
+  assert.match(safe, /<p class="lead" style="color:red">/);
+  assert.match(safe, /<strong>there<\/strong>/);
+  assert.match(safe, /<a href="https:\/\/ok\.test" rel="noreferrer noopener">|<a href="https:\/\/ok\.test">/);
+  assert.match(safe, /<img src="\/a\.png" alt="x">/);
+
+  // script element removed with content
+  const s = sanitizeBlogHtml('<p>ok</p><script>alert(1)</script>');
+  assert.doesNotMatch(s, /<script/i);
+  assert.doesNotMatch(s, /alert\(1\)/);
+
+  // event handler stripped
+  assert.doesNotMatch(sanitizeBlogHtml('<img src=x onerror="alert(1)">'), /onerror/i);
+
+  // javascript: URL dropped
+  assert.doesNotMatch(sanitizeBlogHtml('<a href="javascript:alert(1)">x</a>'), /javascript:/i);
+
+  // iframe + style + svg removed
+  assert.doesNotMatch(sanitizeBlogHtml('<iframe src="https://evil.test"></iframe>'), /<iframe/i);
+  assert.doesNotMatch(sanitizeBlogHtml('<style>body{x}</style><p>y</p>'), /<style/i);
+  assert.doesNotMatch(sanitizeBlogHtml('<svg><script>alert(1)</script></svg>'), /<svg|<script/i);
+
+  // unknown tag unwrapped, inner text kept
+  assert.equal(sanitizeBlogHtml("<marquee>hello</marquee>"), "hello");
 });
 
 test("slugify produces url-safe slugs", () => {
@@ -125,6 +155,14 @@ test("blog routes render index and post, and gate writes to admins", async () =>
 
     const missing = await fetch(`${baseUrl}/blog/does-not-exist`);
     assert.equal(missing.status, 404);
+
+    // HTML-format post: safe markup rendered, script stripped.
+    const htmlPost = await publishTool.handler({ title: "Html Post", format: "html", content: '<h2>Custom</h2><p style="color:teal">Rich</p><script>alert(1)</script>' }, { ...ctxBase, userId: adminId });
+    assert.equal(htmlPost.ok, true);
+    const htmlRendered = await (await fetch(`${baseUrl}/blog/html-post`)).text();
+    assert.match(htmlRendered, /<h2>Custom<\/h2>/);
+    assert.match(htmlRendered, /style="color:teal"/);
+    assert.doesNotMatch(htmlRendered, /<script>alert/);
 
     // RSS feed lists the published post.
     const rss = await fetch(`${baseUrl}/blog/rss.xml`);

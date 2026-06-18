@@ -6,6 +6,7 @@ import { deleteBlogPost, getBlogPostBySlug, listBlogPosts, setBlogTheme, upsertB
 const publishSchema = z.object({
   title: z.string().min(1).max(200),
   content: z.string().min(1).max(200000),
+  format: z.enum(["markdown", "html"]).optional(),
   slug: z.string().min(1).max(120).optional(),
   excerpt: z.string().max(500).optional(),
   coverImageUrl: z.string().url().max(1000).optional(),
@@ -45,7 +46,8 @@ export const blogTools: ToolModule[] = [
         type: "object",
         properties: {
           title: { type: "string", description: "Post title." },
-          content: { type: "string", description: "Post body in Markdown." },
+          content: { type: "string", description: "Post body. Markdown by default, or HTML when format=html." },
+          format: { type: "string", enum: ["markdown", "html"], description: "Content format. Defaults to markdown. HTML is sanitized on render (scripts/event handlers/unsafe URLs are stripped)." },
           slug: { type: "string", description: "URL slug; auto-generated from the title if omitted." },
           excerpt: { type: "string", description: "Short summary shown on the blog index." },
           coverImageUrl: { type: "string", description: "Optional cover image URL." },
