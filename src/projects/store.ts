@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { TextDecoder } from "node:util";
 
@@ -479,6 +479,58 @@ export async function writeProjectFile(projectRoot: string, projectId: string, r
   return file;
 }
 
+export async function patchProjectFile(
+  projectRoot: string,
+  projectId: string,
+  relativePath: string,
+  operations: Array<{ find: string; replace: string; all?: boolean }>
+): Promise<ProjectFileInfo> {
+  const metadata = await getProject(projectRoot, projectId);
+  if (metadata.status === "deleted") throw new Error("Cannot patch a deleted project.");
+
+  const safeRelativePath = assertSafeProjectFilePath(relativePath);
+  const absolutePath = resolveProjectStoredPath(projectRoot, projectId, safeRelativePath);
+  const fileStatBefore = await stat(absolutePath);
+  if (fileStatBefore.size > maxProjectFileBytes) {
+    throw new Error(`Project file is too large to patch. Size=${fileStatBefore.size}, maxBytes=${maxProjectFileBytes}.`);
+  }
+
+  let content = await readFile(absolutePath, "utf8");
+  const applied: Array<{ find: string; replace: string; count: number; all: boolean }> = [];
+  for (const operation of operations) {
+    if (!operation.find) throw new Error("Patch find text must not be empty.");
+    const count = operation.all
+      ? content.split(operation.find).length - 1
+      : content.includes(operation.find) ? 1 : 0;
+    if (count === 0) throw new Error(`Patch find text not found in ${safeRelativePath}: ${operation.find.slice(0, 80)}`);
+    content = operation.all
+      ? content.split(operation.find).join(operation.replace)
+      : content.replace(operation.find, operation.replace);
+    applied.push({ find: operation.find, replace: operation.replace, count, all: operation.all === true });
+  }
+
+  if (Buffer.byteLength(content, "utf8") > maxProjectFileBytes) {
+    throw new Error("Patched project file content exceeds 1 MiB.");
+  }
+
+  await writeFile(absolutePath, content, "utf8");
+  const fileStat = await stat(absolutePath);
+  const file = {
+    path: safeRelativePath,
+    size: fileStat.size,
+    modifiedAt: fileStat.mtime.toISOString()
+  };
+  const updated = addHistory(metadata, {
+    toolName: "patch_project_file",
+    ok: true,
+    summary: `Patched ${file.path}.`,
+    details: { path: file.path, operations: applied.map((operation) => ({ count: operation.count, all: operation.all })) }
+  });
+  await writeProjectMetadata(projectRoot, updated);
+
+  return file;
+}
+
 export async function writeProjectAsset(projectRoot: string, projectId: string, relativePath: string, content: Buffer, contentType?: string): Promise<ProjectFileInfo> {
   const safeRelativePath = assertSafeProjectAssetPath(relativePath);
   validateProjectAssetBytes(safeRelativePath, content, contentType);
@@ -505,6 +557,21 @@ export async function writeProjectAsset(projectRoot: string, projectId: string, 
   await writeProjectMetadata(projectRoot, updated);
 
   return file;
+}
+
+export async function importProjectAssetFromLocalFile(
+  projectRoot: string,
+  projectId: string,
+  relativePath: string,
+  sourcePath: string,
+  contentType?: string
+): Promise<ProjectFileInfo> {
+  const sourceStat = await stat(sourcePath);
+  if (!sourceStat.isFile()) throw new Error("sourcePath must point to a file.");
+  const maxBytes = path.extname(relativePath).toLowerCase() === ".pptx" ? maxProjectPresentationAssetBytes : maxProjectImageAssetBytes;
+  if (sourceStat.size > maxBytes) throw new Error("Local asset exceeds the size limit.");
+  const buffer = await readFile(sourcePath);
+  return writeProjectAsset(projectRoot, projectId, relativePath, buffer, contentType);
 }
 
 export async function readProjectFile(projectRoot: string, projectId: string, relativePath: string, maxBytes = maxProjectFileBytes): Promise<string> {
@@ -665,6 +732,44 @@ export async function publishProject(projectRoot: string, projectId: string, pub
   });
   await writeProjectMetadata(projectRoot, updated);
   return updated;
+}
+
+export async function forkProject(
+  projectRoot: string,
+  sourceProjectId: string,
+  input: { title?: string; summary?: string; createdByClientId: string }
+): Promise<ProjectMetadata> {
+  const source = await getProject(projectRoot, sourceProjectId);
+  if (source.status === "deleted") throw new Error("Cannot fork a deleted project.");
+
+  const id = `project_${randomUUID()}`;
+  const now = new Date().toISOString();
+  const metadata: ProjectMetadata = {
+    id,
+    title: input.title ?? `${source.title} V2`,
+    summary: input.summary ?? source.summary,
+    createdAt: now,
+    updatedAt: now,
+    createdByClientId: input.createdByClientId,
+    status: "draft",
+    entryFile: source.entryFile,
+    lastValidation: undefined,
+    taskHistory: [
+      {
+        id: randomUUID(),
+        time: now,
+        toolName: "fork_project",
+        ok: true,
+        summary: `Forked ${sourceProjectId} into ${id}.`,
+        details: { sourceProjectId }
+      }
+    ]
+  };
+
+  await mkdir(getProjectDirectory(projectRoot, id), { recursive: true });
+  await cp(getProjectFilesDirectory(projectRoot, sourceProjectId), getProjectFilesDirectory(projectRoot, id), { recursive: true });
+  await writeProjectMetadata(projectRoot, metadata);
+  return metadata;
 }
 
 export async function setProjectStatus(projectRoot: string, projectId: string, status: Exclude<ProjectStatus, "deleted">, publicBaseUrl: string): Promise<ProjectMetadata> {

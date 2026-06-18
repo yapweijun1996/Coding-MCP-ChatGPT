@@ -58,11 +58,25 @@ type SmokeStep =
   | { action: "waitForUrl"; url: string; timeoutMs?: number }
   | { action: "waitForSelector"; selector: string; timeoutMs?: number };
 
+type AxeImpact = "minor" | "moderate" | "serious" | "critical";
+type AxeViolation = {
+  id?: string;
+  impact?: string;
+  description?: string;
+  help?: string;
+  helpUrl?: string;
+  nodes?: unknown[];
+};
+
 const VIEWPORTS: Record<ViewportName, ViewportConfig> = {
   desktop: { width: 1440, height: 900, isMobile: false },
   tablet: { width: 820, height: 1180, isMobile: true },
   mobile: { width: 390, height: 844, isMobile: true }
 };
+
+function isAxeImpact(value: string): value is AxeImpact {
+  return value === "minor" || value === "moderate" || value === "serious" || value === "critical";
+}
 
 const browserDomSnapshotSchema = z.object({
   sessionId: z.string().min(1).optional(),
@@ -660,18 +674,14 @@ export const browserObservabilityTools: ToolModule[] = [
         const result = typeof builder.withRules === "function" && parsed.rules.length > 0
           ? await builder.withRules(parsed.rules).analyze()
           : await builder.analyze();
-        const violations = (result.violations || [])
-          .filter((entry) => parsed.impact.length === 0 || parsed.impact.includes(String((entry as { impact?: string }).impact ?? "")))
+        const rawViolations = (Array.isArray((result as { violations?: unknown }).violations) ? (result as { violations: unknown[] }).violations : []) as AxeViolation[];
+        const violations = rawViolations
+          .filter((entry: AxeViolation) => {
+            const impact = String(entry.impact ?? "");
+            return parsed.impact.length === 0 || (isAxeImpact(impact) && parsed.impact.includes(impact));
+          })
           .slice(0, parsed.maxViolations)
-          .map((entry) => {
-            const violation = entry as {
-              id?: string;
-              impact?: string;
-              description?: string;
-              help?: string;
-              helpUrl?: string;
-              nodes?: unknown[];
-            };
+          .map((violation: AxeViolation) => {
             return {
               id: violation.id ?? "",
               impact: violation.impact ?? "unknown",
@@ -684,7 +694,13 @@ export const browserObservabilityTools: ToolModule[] = [
               suggestions: (Array.isArray(violation.nodes) ? violation.nodes.slice(0, 3).map((node) => String((node as { failureSummary?: string }).failureSummary ?? "")) : []).filter(Boolean)
             };
           });
-        const rows = violations.map((violation) => ({
+        const rows = violations.map((violation: {
+          id: string;
+          impact: string;
+          description: string;
+          helpUrl: string;
+          suggestions: string[];
+        }) => ({
           rule: violation.id,
           impact: violation.impact,
           description: violation.description,
@@ -821,14 +837,16 @@ export const browserObservabilityTools: ToolModule[] = [
             logs: []
           };
           try {
-            const timeout = step.timeoutMs ?? parsed.timeoutMs;
             if (step.action === "click") {
+              const timeout = step.timeoutMs ?? parsed.timeoutMs;
               result.logs.push(`click ${step.selector}`);
               await page.click(step.selector, { timeout });
             } else if (step.action === "fill") {
+              const timeout = step.timeoutMs ?? parsed.timeoutMs;
               result.logs.push(`fill ${step.selector}`);
               await page.fill(step.selector, step.value, { timeout });
             } else if (step.action === "assert") {
+              const timeout = step.timeoutMs ?? parsed.timeoutMs;
               result.logs.push(`assert text contains ${step.text}`);
               await page.getByText(step.text).first().waitFor({ timeout });
             } else if (step.action === "screenshot") {
@@ -837,9 +855,11 @@ export const browserObservabilityTools: ToolModule[] = [
               snapshots.push(result.snapshot);
               result.logs.push("screenshot saved");
             } else if (step.action === "waitForUrl") {
+              const timeout = step.timeoutMs ?? parsed.timeoutMs;
               result.logs.push(`waitForUrl ${step.url}`);
               await page.waitForURL(step.url, { timeout });
             } else {
+              const timeout = step.timeoutMs ?? parsed.timeoutMs;
               result.logs.push(`waitForSelector ${step.selector}`);
               await page.waitForSelector(step.selector, { timeout });
             }

@@ -9,8 +9,9 @@
 4. [Agent 可靠交付流程](./agent-delivery-reliability.md)
 5. [ChatGPT MCP 对接](./chatgpt.md)
 6. [Cloudflare Tunnel 部署](./cloudflare.md)
-7. [运维与治理](./operations.md)
-8. [故障排查](./troubleshooting.md)
+7. [Docker 部署](./docker.md)
+8. [运维与治理](./operations.md)
+9. [故障排查](./troubleshooting.md)
 
 文档更新原则：
 

@@ -17,6 +17,24 @@
 4. 开发模式启动：`npm run dev`
 5. 生产构建：`npm run build && npm start`
 
+## Docker 启动
+
+如果希望用容器管理服务：
+
+```bash
+cp .env.docker.example .env.docker
+npm run docker:up
+curl -sS http://127.0.0.1:6859/health
+```
+
+常用管理命令：
+
+- `npm run docker:logs`
+- `npm run docker:down`
+- `npm run docker:build`
+
+完整说明见 [Docker 部署](./docker.md)。
+
 ## 必要配置示例
 
 ```bash

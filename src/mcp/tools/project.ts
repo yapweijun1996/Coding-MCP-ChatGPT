@@ -1,5 +1,6 @@
 import path from "node:path";
 import { z } from "zod";
+import { createArtifact, makeArtifactUrl } from "../../artifacts/store.js";
 import { createShareArtifact } from "../../share/store.js";
 import { assertSafePublicUrl } from "../../security/url.js";
 import {
@@ -7,10 +8,13 @@ import {
   createProject,
   deleteProject,
   deleteProjectFile,
+  forkProject,
   getProjectActivity,
   getProjectManifest,
   getProjectWithFiles,
+  importProjectAssetFromLocalFile,
   listProjects,
+  patchProjectFile,
   publishProjectAndReport,
   publishProject,
   readProjectFile,
@@ -56,10 +60,33 @@ const writeProjectAssetInputSchema = z.object({
   contentType: z.string().min(1).max(120).optional()
 });
 
+const importProjectAssetFromLocalFileInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  relativePath: z.string().min(1).max(240),
+  sourcePath: z.string().min(1).max(2000),
+  contentType: z.string().min(1).max(120).optional()
+});
+
 const importProjectAssetFromUrlInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   relativePath: z.string().min(1).max(240),
   url: z.string().url()
+});
+
+const patchProjectFileInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  relativePath: z.string().min(1).max(240),
+  operations: z.array(z.object({
+    find: z.string().min(1).max(20000),
+    replace: z.string().max(20000),
+    all: z.boolean().optional().default(false)
+  })).min(1).max(40)
+});
+
+const forkProjectInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  title: z.string().min(1).max(160).optional(),
+  summary: z.string().max(2000).optional()
 });
 
 const readProjectFileInputSchema = z.object({
@@ -88,6 +115,14 @@ const validateProjectInputSchema = z.object({
 const getProjectActivityInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   limit: z.number().int().min(1).max(100).optional().default(50)
+});
+
+const screenshotProjectInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  entryFile: z.string().min(1).max(240).optional(),
+  viewports: z.array(z.enum(["desktop", "tablet", "mobile"])).min(1).max(3).optional().default(["desktop", "tablet", "mobile"]),
+  fullPage: z.boolean().optional().default(false),
+  timeoutMs: z.number().int().min(1000).max(120000).optional().default(30000)
 });
 
 const deliverStaticProjectInputSchema = z.object({
@@ -127,6 +162,10 @@ function maxBytesForAssetPath(relativePath: string): number {
   return path.extname(relativePath).toLowerCase() === ".pptx" ? maxImportedPresentationBytes : maxImportedImageBytes;
 }
 
+function resolveLocalSourcePath(workspaceRoot: string, sourcePath: string): string {
+  return path.isAbsolute(sourcePath) ? path.resolve(sourcePath) : path.resolve(workspaceRoot, sourcePath);
+}
+
 async function fetchProjectAsset(url: string, relativePath: string): Promise<{ buffer: Buffer; contentType: string; finalUrl: string }> {
   let currentUrl = new URL(url);
   const maxBytes = maxBytesForAssetPath(relativePath);
@@ -162,6 +201,12 @@ async function fetchProjectAsset(url: string, relativePath: string): Promise<{ b
 
 function withoutScreenshots(results: Awaited<ReturnType<typeof inspectWebpageUrl>>) {
   return results.map(({ screenshotDataUrl, ...result }) => result);
+}
+
+function bufferFromDataUrl(dataUrl: string): { contentType: string; buffer: Buffer } {
+  const match = /^data:([^;,]+);base64,(.+)$/i.exec(dataUrl);
+  if (!match) throw new Error("Screenshot data URL is not valid base64.");
+  return { contentType: match[1], buffer: Buffer.from(match[2], "base64") };
 }
 
 export const projectTools: ToolModule[] = [
@@ -318,6 +363,39 @@ export const projectTools: ToolModule[] = [
   },
   {
     definition: {
+      name: "import_project_asset_from_local_file",
+      description: "Import a local uploaded/generated image or PPTX file into a persistent project, e.g. copy /mnt/data/character.png to assets/character.png.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          relativePath: { type: "string", description: "Project-relative asset path, e.g. assets/character.png." },
+          sourcePath: { type: "string", description: "Absolute local runtime path, or workspace-relative path, to an uploaded/generated asset." },
+          contentType: { type: "string", description: "Optional MIME type, e.g. image/png." }
+        },
+        required: ["projectId", "relativePath", "sourcePath"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: importProjectAssetFromLocalFileInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = input as z.infer<typeof importProjectAssetFromLocalFileInputSchema>;
+      const sourcePath = resolveLocalSourcePath(ctx.workspaceRoot, parsed.sourcePath);
+      const file = await importProjectAssetFromLocalFile(ctx.projectRoot, parsed.projectId, parsed.relativePath, sourcePath, parsed.contentType);
+      return {
+        ok: true,
+        summary: `Imported local asset ${file.path} in project ${parsed.projectId}.`,
+        jobId: parsed.projectId,
+        artifacts: [file.path],
+        structuredContent: { ...file, sourcePath },
+        logs: [JSON.stringify({ ...file, sourcePath }, null, 2)],
+        errors: []
+      };
+    }
+  },
+  {
+    definition: {
       name: "import_project_asset_from_url",
       description: "Import an HTTPS image or PPTX asset into a persistent project after private-network and MIME validation.",
       inputSchema: {
@@ -345,6 +423,68 @@ export const projectTools: ToolModule[] = [
         logs: [JSON.stringify({ ...file, sourceUrl: parsed.url, finalUrl: imported.finalUrl, contentType: imported.contentType }, null, 2)],
         errors: []
       };
+    }
+  },
+  {
+    definition: {
+      name: "patch_project_file",
+      description: "Patch a UTF-8 project file with exact find/replace operations without rewriting the whole file.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          relativePath: { type: "string", description: "Project-relative text file path." },
+          operations: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                find: { type: "string", description: "Exact text to find." },
+                replace: { type: "string", description: "Replacement text." },
+                all: { type: "boolean", description: "Replace all occurrences instead of only the first." }
+              },
+              required: ["find", "replace"],
+              additionalProperties: false
+            }
+          }
+        },
+        required: ["projectId", "relativePath", "operations"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: patchProjectFileInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = input as z.infer<typeof patchProjectFileInputSchema>;
+      const file = await patchProjectFile(ctx.projectRoot, parsed.projectId, parsed.relativePath, parsed.operations);
+      return { ok: true, summary: `Patched ${file.path} in project ${parsed.projectId}.`, jobId: parsed.projectId, artifacts: [file.path], logs: [JSON.stringify(file, null, 2)], errors: [] };
+    }
+  },
+  {
+    definition: {
+      name: "fork_project",
+      description: "Create a draft V2-style copy of an existing project, preserving files but not publish status.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string", description: "Source project id." },
+          title: { type: "string", description: "Optional title for the fork." },
+          summary: { type: "string", description: "Optional summary for the fork." }
+        },
+        required: ["projectId"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: forkProjectInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = input as z.infer<typeof forkProjectInputSchema>;
+      const project = await forkProject(ctx.projectRoot, parsed.projectId, {
+        title: parsed.title,
+        summary: parsed.summary,
+        createdByClientId: ctx.clientId
+      });
+      return { ok: true, summary: `Forked ${parsed.projectId} into ${project.id}.`, jobId: project.id, artifacts: [project.id], structuredContent: project as unknown as Record<string, unknown>, logs: [JSON.stringify(project, null, 2)], errors: [] };
     }
   },
   {
@@ -504,6 +644,77 @@ export const projectTools: ToolModule[] = [
         structuredContent: report,
         logs: [JSON.stringify(report, null, 2)],
         errors: []
+      };
+    }
+  },
+  {
+    definition: {
+      name: "screenshot_project",
+      description: "Publish or reuse a project preview and capture desktop/tablet/mobile screenshots as image artifacts for visual QA.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          entryFile: { type: "string", description: "Entry file to inspect. Defaults to project entryFile." },
+          viewports: { type: "array", items: { type: "string", enum: ["desktop", "tablet", "mobile"] } },
+          fullPage: { type: "boolean", description: "Capture full-page screenshots." },
+          timeoutMs: { type: "number", minimum: 1000, maximum: 120000 }
+        },
+        required: ["projectId"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: screenshotProjectInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = input as z.infer<typeof screenshotProjectInputSchema>;
+      const published = await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile);
+      const results = await inspectWebpageUrl(published.publishedUrl!, {
+        viewports: parsed.viewports,
+        waitUntil: "networkidle",
+        screenshot: true,
+        fullPage: parsed.fullPage,
+        timeoutMs: parsed.timeoutMs,
+        maxIssues: 12
+      });
+      const screenshotUrls: string[] = [];
+      for (const result of results) {
+        if (!result.screenshotDataUrl) continue;
+        const screenshot = bufferFromDataUrl(result.screenshotDataUrl);
+        const artifact = await createArtifact({
+          artifactRoot: ctx.artifactRoot,
+          filename: `${parsed.projectId}-${result.viewport}-screenshot.jpg`,
+          contentType: screenshot.contentType,
+          content: screenshot.buffer
+        });
+        const screenshotUrl = makeArtifactUrl(ctx.publicBaseUrl, artifact.id, artifact.filename);
+        result.screenshotUrl = screenshotUrl;
+        screenshotUrls.push(screenshotUrl);
+      }
+      const reportHtml = renderWebpageInspectionReport(published.publishedUrl!, results);
+      const reportShare = await createShareArtifact({
+        shareRoot: ctx.shareRoot,
+        title: "Project Screenshot Inspection",
+        summary: `Screenshot inspection for ${parsed.projectId}.`,
+        filename: `project-screenshots-${parsed.projectId}.html`,
+        html: reportHtml
+      });
+      const reportUrl = makeShareUrl(ctx.publicBaseUrl, reportShare.id, reportShare.filename);
+      const resultForLogs = withoutScreenshots(results);
+      const inspection = { ...summarizeBrowserInspection(resultForLogs), reportUrl, screenshotUrls, inspectedAt: new Date().toISOString() };
+      await recordProjectBrowserInspection(ctx.projectRoot, parsed.projectId, inspection, "screenshot_project");
+      return {
+        ok: inspection.ok,
+        summary: inspection.ok
+          ? `Captured ${screenshotUrls.length} screenshot(s) for project ${parsed.projectId}.`
+          : `Captured screenshots for project ${parsed.projectId}; visual/runtime issues were found.`,
+        jobId: parsed.projectId,
+        previewUrl: reportUrl,
+        shareUrl: reportUrl,
+        artifacts: [reportUrl, ...screenshotUrls],
+        structuredContent: inspection as unknown as Record<string, unknown>,
+        logs: [JSON.stringify(inspection, null, 2)],
+        errors: inspection.blockingErrors
       };
     }
   },

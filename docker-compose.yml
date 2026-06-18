@@ -1,0 +1,30 @@
+services:
+  coding-mcp-chatgpt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: coding-mcp-chatgpt:local
+    container_name: coding-mcp-chatgpt
+    restart: unless-stopped
+    env_file:
+      - .env.docker
+    ports:
+      - "6859:6859"
+    volumes:
+      - ./.docker-data/projects:/data/projects
+      - ./.docker-data/shares:/data/shares
+      - ./.docker-data/artifacts:/data/artifacts
+      - ./.docker-data/state:/data/state
+      - ./:/data/workspace
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:' + (process.env.PORT || '6859') + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

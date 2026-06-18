@@ -603,6 +603,12 @@ app.get("/share/:shareId/:filename(*)", async (req, res) => {
     const project = await getProject(projectRoot, req.params.shareId);
     if (project.status === "published") {
       const contentType = getProjectFileContentType(req.params.filename);
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+      if (contentType === "text/html") {
+        res.setHeader("Clear-Site-Data", "\"cache\"");
+      }
       if (isProjectTextFilePath(req.params.filename)) {
         const content = await readProjectFile(projectRoot, project.id, req.params.filename, 1024 * 1024);
         res.type(contentType).send(content);

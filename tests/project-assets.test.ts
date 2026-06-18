@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -6,9 +6,14 @@ import assert from "node:assert/strict";
 import {
   createProject,
   deleteProject,
+  forkProject,
   getProjectManifest,
+  importProjectAssetFromLocalFile,
+  patchProjectFile,
+  publishProject,
   readProjectFile,
-  writeProjectAsset
+  writeProjectAsset,
+  writeProjectFile
 } from "../src/projects/store.js";
 import { projectTools } from "../src/mcp/tools/project.js";
 import type { ToolContext } from "../src/mcp/types.js";
@@ -80,6 +85,7 @@ test("write_project_asset tool accepts raw base64 and rejects data URLs", async 
       workspaceRoot: root,
       commandTimeoutMs: 1000,
       shareRoot: path.join(root, "shares"),
+      artifactRoot: path.join(root, "artifacts"),
       projectRoot: root,
       clientId: "test-client"
     };
@@ -112,6 +118,7 @@ test("import_project_asset_from_url rejects private-network URLs before fetch", 
       workspaceRoot: root,
       commandTimeoutMs: 1000,
       shareRoot: path.join(root, "shares"),
+      artifactRoot: path.join(root, "artifacts"),
       projectRoot: root,
       clientId: "test-client"
     };
@@ -123,4 +130,88 @@ test("import_project_asset_from_url rejects private-network URLs before fetch", 
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("importProjectAssetFromLocalFile copies a generated local file into project assets", async () => {
+  await withProject(async (root, projectId) => {
+    const sourcePath = path.join(root, "runtime-character.png");
+    await writeFile(sourcePath, pngBytes);
+
+    const file = await importProjectAssetFromLocalFile(root, projectId, "assets/character.png", sourcePath, "image/png");
+    assert.equal(file.path, "assets/character.png");
+
+    const manifest = await getProjectManifest(root, projectId);
+    assert.equal(manifest.files.some((item) => item.path === "assets/character.png"), true);
+    assert.equal(manifest.taskHistory.at(-1)?.toolName, "write_project_asset");
+  });
+});
+
+test("import_project_asset_from_local_file tool resolves workspace-relative sources", async () => {
+  const tool = projectTools.find((item) => item.definition.name === "import_project_asset_from_local_file");
+  assert.ok(tool);
+  await withProject(async (root, projectId) => {
+    await writeFile(path.join(root, "character.png"), pngBytes);
+    const ctx: ToolContext = {
+      publicBaseUrl: "https://example.test",
+      workspaceRoot: root,
+      commandTimeoutMs: 1000,
+      shareRoot: path.join(root, "shares"),
+      artifactRoot: path.join(root, "artifacts"),
+      projectRoot: root,
+      clientId: "test-client"
+    };
+
+    const result = await tool.handler({
+      projectId,
+      relativePath: "assets/character.png",
+      sourcePath: "character.png",
+      contentType: "image/png"
+    }, ctx);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.artifacts, ["assets/character.png"]);
+  });
+});
+
+test("patchProjectFile applies exact replacements without rewriting the whole project", async () => {
+  await withProject(async (root, projectId) => {
+    await writeProjectFile(root, projectId, "index.html", "<h1>Hello</h1><p>Hello</p>");
+
+    const file = await patchProjectFile(root, projectId, "index.html", [
+      { find: "Hello", replace: "Hi" },
+      { find: "</p>", replace: "</p><script src=\"app.js\"></script>" }
+    ]);
+
+    assert.equal(file.path, "index.html");
+    assert.equal(await readProjectFile(root, projectId, "index.html"), "<h1>Hi</h1><p>Hello</p><script src=\"app.js\"></script>");
+    const manifest = await getProjectManifest(root, projectId);
+    assert.equal(manifest.taskHistory.at(-1)?.toolName, "patch_project_file");
+    await assert.rejects(patchProjectFile(root, projectId, "index.html", [{ find: "Missing", replace: "x" }]), /not found/);
+  });
+});
+
+test("forkProject creates a draft copy with the same files and no published URL", async () => {
+  await withProject(async (root, projectId) => {
+    await writeProjectFile(root, projectId, "index.html", "<!doctype html><html><body>V1</body></html>");
+    await publishProject(root, projectId, "https://example.test");
+
+    const fork = await forkProject(root, projectId, {
+      title: "Asset test V2",
+      createdByClientId: "test-client"
+    });
+
+    assert.notEqual(fork.id, projectId);
+    assert.equal(fork.status, "draft");
+    assert.equal(fork.publishedUrl, undefined);
+    assert.equal(await readProjectFile(root, fork.id, "index.html"), "<!doctype html><html><body>V1</body></html>");
+  });
+});
+
+test("publishProject keeps stable preview URLs", async () => {
+  await withProject(async (root, projectId) => {
+    await writeProjectFile(root, projectId, "index.html", "<!doctype html><html><body>Cache safe</body></html>");
+
+    const published = await publishProject(root, projectId, "https://example.test");
+
+    assert.equal(published.publishedUrl, `https://example.test/share/${projectId}/index.html`);
+  });
 });

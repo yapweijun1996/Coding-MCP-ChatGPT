@@ -50,6 +50,16 @@
 5. 在 ChatGPT 的自定义应用 / 开发者模式里添加应用并绑定 `https://gmb01.xyz/mcp`
 6. 用最小工具集验证写作流：创建/修改文件 -> 运行 -> 返回 preview 链接
 
+### Docker 快速启动
+
+```bash
+cp .env.docker.example .env.docker
+npm run docker:up
+curl -sS http://127.0.0.1:6859/health
+```
+
+更多容器部署与数据目录说明见 `docs/docker.md`。
+
 ## 架构与边界
 
 ### 建议架构

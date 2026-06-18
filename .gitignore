@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .env
+.env.docker
 http.env
 ecosystem.local.cjs
 *.log
@@ -11,3 +12,4 @@ coverage/
 .artifacts/
 .projects/
 .state/
+.docker-data/
