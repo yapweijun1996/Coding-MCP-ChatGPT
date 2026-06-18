@@ -39,6 +39,25 @@ export function isBlockedIpAddress(address: string): boolean {
   return true;
 }
 
+/**
+ * fetch() that re-validates the target on every redirect hop. Plain fetch follows
+ * 30x responses without re-checking, so an allowed entry URL can redirect into a
+ * private/reserved address (SSRF). This validates the entry URL and each Location
+ * with assertSafePublicUrl before following it. (DNS rebinding between validation
+ * and connection is a separate concern requiring a pinned-IP agent / egress proxy.)
+ */
+export async function safeFetch(input: string | URL, init: RequestInit = {}, options: SafeUrlOptions = {}): Promise<Response> {
+  const maxRedirects = 5;
+  let current = await assertSafePublicUrl(input, options);
+  for (let hop = 0; hop <= maxRedirects; hop += 1) {
+    const response = await fetch(current.toString(), { ...init, redirect: "manual" });
+    const location = response.status >= 300 && response.status < 400 ? response.headers.get("location") : null;
+    if (!location) return response;
+    current = await assertSafePublicUrl(new URL(location, current), options);
+  }
+  throw new Error("Too many redirects.");
+}
+
 export async function assertSafePublicUrl(input: string | URL, options: SafeUrlOptions = {}): Promise<URL> {
   const url = input instanceof URL ? input : new URL(input);
   const protocols = options.protocols ?? ["https:"];

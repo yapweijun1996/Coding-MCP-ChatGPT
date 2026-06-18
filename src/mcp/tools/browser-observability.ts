@@ -222,6 +222,9 @@ async function makeShareArtifact(ctx: ToolContext, filename: string, title: stri
 }
 
 async function openTemporarySession(url: string, timeoutMs: number): Promise<TempSession> {
+  // NOTE: these tools deliberately inspect arbitrary URLs including local dev servers
+  // (localhost), so no public-only SSRF guard is applied here. They are off by default;
+  // operators enabling them accept that they can reach private addresses.
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -251,15 +254,20 @@ async function openTemporarySession(url: string, timeoutMs: number): Promise<Tem
     session.pageErrors.push({ message: error.message, stack: error.stack });
   });
 
-  await page.goto(url, { waitUntil: "networkidle", timeout: timeoutMs });
-  return {
-    session,
-    close: async () => {
-      await page.close().catch(() => undefined);
-      await context.close().catch(() => undefined);
-      await browser.close().catch(() => undefined);
-    }
+  const close = async () => {
+    await page.close().catch(() => undefined);
+    await context.close().catch(() => undefined);
+    await browser.close().catch(() => undefined);
   };
+  // goto runs before `close` reaches the caller, so on failure (timeout/abort) the
+  // caller never gets a handle to close it — close here to avoid orphaning the browser.
+  try {
+    await page.goto(url, { waitUntil: "networkidle", timeout: timeoutMs });
+  } catch (error) {
+    await close();
+    throw error;
+  }
+  return { session, close };
 }
 
 async function resolveSession(sessionId: string | undefined, url: string | undefined): Promise<TempSession> {

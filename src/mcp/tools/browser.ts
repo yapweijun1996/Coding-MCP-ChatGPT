@@ -255,16 +255,25 @@ export const browserTools: ToolModule[] = [
       ];
 
       if (parsed.startUrl) {
-        await page.goto(parsed.startUrl, { waitUntil: "load", timeout: parsed.timeoutMs });
-        logs.push(`Navigated to ${parsed.startUrl}`);
-        const screenshotResult = await screenshotAndRespond(session, `Open session at ${parsed.startUrl}`, ctx, `Started browser session ${id}.`, [
-          `startUrl=${parsed.startUrl}`
-        ]);
-        return {
-          ...screenshotResult,
-          jobId: id,
-          summary: `Started browser session ${id}.`
-        };
+        try {
+          await page.goto(parsed.startUrl, { waitUntil: "load", timeout: parsed.timeoutMs });
+          logs.push(`Navigated to ${parsed.startUrl}`);
+          const screenshotResult = await screenshotAndRespond(session, `Open session at ${parsed.startUrl}`, ctx, `Started browser session ${id}.`, [
+            `startUrl=${parsed.startUrl}`
+          ]);
+          return {
+            ...screenshotResult,
+            jobId: id,
+            summary: `Started browser session ${id}.`
+          };
+        } catch (error) {
+          // The session is already registered; a failed initial navigation would
+          // otherwise leave a live browser in the map, burning a session slot forever.
+          await page.close().catch(() => undefined);
+          await browser.close().catch(() => undefined);
+          browserSessions.delete(id);
+          throw error;
+        }
       }
 
       return {

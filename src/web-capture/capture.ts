@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { assertSafePublicUrl } from "../security/url.js";
+import { assertSafePublicUrl, safeFetch } from "../security/url.js";
+import { installSsrfRouteGuard } from "../security/playwright-guard.js";
 
 export type WebCaptureMode = "single_page" | "same_origin_depth_1";
 export type CaptureViewport = "desktop" | "tablet" | "mobile";
@@ -139,8 +140,7 @@ export async function readWebpageCapture(captureRoot: string, captureId: string)
 
 async function readRobotsTxt(origin: string, timeoutMs: number): Promise<{ warnings: string[]; disallowRules: string[] }> {
   try {
-    const robotsUrl = await assertSafePublicUrl(new URL("/robots.txt", origin));
-    const response = await fetch(robotsUrl, { signal: AbortSignal.timeout(Math.min(timeoutMs, 10000)) });
+    const response = await safeFetch(new URL("/robots.txt", origin), { signal: AbortSignal.timeout(Math.min(timeoutMs, 10000)) });
     if (response.status === 404) return { warnings: ["robots.txt was not found."], disallowRules: [] };
     if (!response.ok) return { warnings: [`robots.txt returned ${response.status}.`], disallowRules: [] };
     const text = await response.text();
@@ -181,6 +181,7 @@ async function collectPage(targetUrl: URL, viewport: CaptureViewport, options: W
       deviceScaleFactor: viewport === "desktop" ? 1 : 2
     });
     const page = await context.newPage();
+    await installSsrfRouteGuard(page, false);
 
     if (options.includeNetwork) {
       page.on("request", (request) => resourceStarts.set(`${request.method()} ${request.url()}`, Date.now()));

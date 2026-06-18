@@ -9,7 +9,21 @@ import { createShareArtifact } from "../../share/store.js";
 import { makeShareUrl } from "../result.js";
 import type { ToolContext, ToolModule, ToolResult } from "../types.js";
 import { childEnv } from "../child-env.js";
+import { assertSafePublicUrl } from "../../security/url.js";
+import { installSsrfRouteGuard } from "../../security/playwright-guard.js";
 import type { Page, Request, Response } from "playwright";
+
+const INSPECTION_PROTOCOLS = ["http:", "https:"];
+
+// SSRF guard for the public web-inspect tools. The headless browser/Lighthouse would
+// otherwise fetch any URL the caller supplies — including cloud metadata
+// (169.254.169.254) and internal services — and return the response to the client.
+// `inspect_local_project` is the one legitimate private-network consumer and passes
+// allowPrivateNetwork=true.
+async function guardInspectionUrl(url: string, allowPrivateNetwork: boolean): Promise<void> {
+  if (allowPrivateNetwork) return;
+  await assertSafePublicUrl(url, { protocols: INSPECTION_PROTOCOLS });
+}
 
 export type ViewportName = "desktop" | "tablet" | "mobile";
 
@@ -298,7 +312,7 @@ function setupNetworkCapture(page: Page, slowRequestMs: number, maxIssues: numbe
   return summary;
 }
 
-async function inspectWithPlaywright(url: string, options: InspectWebpagePlusOptions, ctx?: ToolContext): Promise<ViewportResult[]> {
+async function inspectWithPlaywright(url: string, options: InspectWebpagePlusOptions, ctx?: ToolContext, allowPrivateNetwork = false): Promise<ViewportResult[]> {
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true });
   const results: ViewportResult[] = [];
@@ -312,6 +326,7 @@ async function inspectWithPlaywright(url: string, options: InspectWebpagePlusOpt
       const context = await browser.newContext({ viewport: { width: preset.width, height: preset.height }, isMobile: preset.isMobile, deviceScaleFactor: viewportName === "desktop" ? 1 : 2 });
       if (options.captureTrace) await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
       const page = await context.newPage();
+      await installSsrfRouteGuard(page, allowPrivateNetwork);
       const consoleErrors: string[] = [];
       const consoleWarnings: string[] = [];
       const pageErrors: string[] = [];
@@ -378,18 +393,20 @@ function toolResult(summary: string, reportUrl: string, structured: Record<strin
   return { ok: true, summary, shareUrl: reportUrl, previewUrl: reportUrl, artifacts: [reportUrl], structuredContent: structured, logs: [jsonForLog(structured)], errors: [] };
 }
 
-async function handleInspectWebpage(input: unknown, ctx: ToolContext, plus: boolean): Promise<ToolResult> {
+async function handleInspectWebpage(input: unknown, ctx: ToolContext, plus: boolean, allowPrivateNetwork = false): Promise<ToolResult> {
   const parsed = (plus ? inspectWebpagePlusSchema : inspectWebpageSchema).parse(input);
+  await guardInspectionUrl(parsed.url, allowPrivateNetwork);
   const options = plus ? parsed as InspectWebpagePlusOptions : { ...parsed, captureNetwork: false, captureTrace: false, slowRequestMs: 2500 };
-  const results = await inspectWithPlaywright(parsed.url, options, plus ? ctx : undefined);
+  const results = await inspectWithPlaywright(parsed.url, options, plus ? ctx : undefined, allowPrivateNetwork);
   const reportUrl = await createHtmlReport(ctx, plus ? "Webpage Debug Report" : "Webpage Inspection Report", `Inspected ${parsed.url}`, plus ? "web-debug" : "web-inspect", renderWebpageInspectionReport(parsed.url, results));
   const resultForLogs = results.map(resultWithoutImages);
   const inspection = { ...summarizeBrowserInspection(resultForLogs), reportUrl, inspectedAt: new Date().toISOString() };
   return toolResult(inspection.ok ? `Inspected ${parsed.url}; no blocking responsive/runtime issues found.` : `Inspected ${parsed.url}; blocking responsive/runtime issues were found.`, reportUrl, inspection);
 }
 
-async function handleAccessibility(input: unknown, ctx: ToolContext): Promise<ToolResult> {
+async function handleAccessibility(input: unknown, ctx: ToolContext, allowPrivateNetwork = false): Promise<ToolResult> {
   const parsed = auditAccessibilitySchema.parse(input);
+  await guardInspectionUrl(parsed.url, allowPrivateNetwork);
   const { chromium } = await import("playwright");
   const { AxeBuilder } = await import("@axe-core/playwright");
   const browser = await chromium.launch({ headless: true });
@@ -399,6 +416,7 @@ async function handleAccessibility(input: unknown, ctx: ToolContext): Promise<To
       const preset = viewportPresets[viewportName];
       const context = await browser.newContext({ viewport: { width: preset.width, height: preset.height }, isMobile: preset.isMobile, deviceScaleFactor: viewportName === "desktop" ? 1 : 2 });
       const page = await context.newPage();
+      await installSsrfRouteGuard(page, allowPrivateNetwork);
       await page.goto(parsed.url, { waitUntil: "networkidle", timeout: parsed.timeoutMs });
       let builder = new AxeBuilder({ page });
       if (parsed.includedRules.length) builder = builder.withRules(parsed.includedRules);
@@ -431,8 +449,9 @@ async function handleAccessibility(input: unknown, ctx: ToolContext): Promise<To
   return toolResult(`Accessibility audit found ${totalViolations} violation(s).`, reportUrl, { reportUrl, url: parsed.url, totalViolations, results });
 }
 
-async function handleLighthouse(input: unknown, ctx: ToolContext): Promise<ToolResult> {
+async function handleLighthouse(input: unknown, ctx: ToolContext, allowPrivateNetwork = false): Promise<ToolResult> {
   const parsed = auditLighthouseSchema.parse(input);
+  await guardInspectionUrl(parsed.url, allowPrivateNetwork);
   const lighthouse = (await import("lighthouse")).default;
   const chromeLauncher = await import("chrome-launcher");
   const chrome = await chromeLauncher.launch({ chromeFlags: ["--headless=new", "--no-sandbox", "--disable-gpu"] });
@@ -448,6 +467,16 @@ async function handleLighthouse(input: unknown, ctx: ToolContext): Promise<ToolR
     });
     if (!result) throw new Error("Lighthouse did not return a result.");
     const lhr = result.lhr;
+    // Lighthouse drives its own Chrome, so installSsrfRouteGuard cannot intercept its
+    // navigations. Validate the URL it actually landed on: if the entry URL redirected
+    // into a private/reserved host, discard the report so its contents never reach the
+    // client (the request fired, but the response is withheld — that kills the exfil).
+    if (!allowPrivateNetwork) {
+      const finalUrl = (lhr as { mainDocumentUrl?: string; finalDisplayedUrl?: string; finalUrl?: string }).mainDocumentUrl
+        ?? (lhr as { finalDisplayedUrl?: string }).finalDisplayedUrl
+        ?? (lhr as { finalUrl?: string }).finalUrl;
+      if (finalUrl) await assertSafePublicUrl(finalUrl, { protocols: INSPECTION_PROTOCOLS });
+    }
     const scores = Object.fromEntries(Object.entries(lhr.categories).map(([key, category]) => [key, category.score === null ? null : Math.round(category.score * 100)]));
     const failedAudits = Object.values(lhr.audits)
       .filter((audit) => audit.score !== null && audit.score !== undefined && audit.score < 1 && audit.scoreDisplayMode !== "notApplicable")
@@ -492,6 +521,7 @@ async function runFlowStep(page: Page, step: z.infer<typeof flowStepSchema>, def
 
 async function handleInteractionFlow(input: unknown, ctx: ToolContext): Promise<ToolResult> {
   const parsed = inspectInteractionFlowSchema.parse(input);
+  await guardInspectionUrl(parsed.url, false);
   const { chromium } = await import("playwright");
   const preset = viewportPresets[parsed.viewport];
   const browser = await chromium.launch({ headless: true });
@@ -502,6 +532,7 @@ async function handleInteractionFlow(input: unknown, ctx: ToolContext): Promise<
   try {
     const context = await browser.newContext({ viewport: { width: preset.width, height: preset.height }, isMobile: preset.isMobile, deviceScaleFactor: parsed.viewport === "desktop" ? 1 : 2 });
     const page = await context.newPage();
+    await installSsrfRouteGuard(page, false);
     page.on("console", (message) => { if (message.type() === "error") consoleErrors.push(message.text()); });
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await page.goto(parsed.url, { waitUntil: "networkidle", timeout: parsed.timeoutMs });
@@ -565,10 +596,12 @@ async function handleLocalProject(input: unknown, ctx: ToolContext): Promise<Too
   const server = startLocalServer(ctx, parsed);
   try {
     await waitForHttp(server.url, parsed.timeoutMs);
-    const inspection = await handleInspectWebpage({ url: server.url, viewports: parsed.viewports, timeoutMs: parsed.timeoutMs, screenshot: true, captureNetwork: true, captureTrace: false }, ctx, true);
+    // Local project inspection targets its own spawned dev server on localhost, so
+    // private-network access is expected and explicitly permitted here.
+    const inspection = await handleInspectWebpage({ url: server.url, viewports: parsed.viewports, timeoutMs: parsed.timeoutMs, screenshot: true, captureNetwork: true, captureTrace: false }, ctx, true, true);
     const parts: Record<string, unknown> = { inspection: inspection.structuredContent, serverLogs: server.logs.slice(-40) };
-    if (parsed.includeAccessibility) parts.accessibility = (await handleAccessibility({ url: server.url, viewports: parsed.viewports.filter((viewport) => viewport !== "tablet"), timeoutMs: parsed.timeoutMs }, ctx)).structuredContent;
-    if (parsed.includeLighthouse) parts.lighthouse = (await handleLighthouse({ url: server.url, categories: ["accessibility", "seo"], formFactor: "desktop", timeoutMs: Math.max(parsed.timeoutMs, 30000) }, ctx)).structuredContent;
+    if (parsed.includeAccessibility) parts.accessibility = (await handleAccessibility({ url: server.url, viewports: parsed.viewports.filter((viewport) => viewport !== "tablet"), timeoutMs: parsed.timeoutMs }, ctx, true)).structuredContent;
+    if (parsed.includeLighthouse) parts.lighthouse = (await handleLighthouse({ url: server.url, categories: ["accessibility", "seo"], formFactor: "desktop", timeoutMs: Math.max(parsed.timeoutMs, 30000) }, ctx, true)).structuredContent;
     const reportUrl = await createHtmlReport(ctx, "Local Project Inspection Report", `Inspected ${server.url}`, "local-project-inspect", renderInspectionReport("Local Project Inspection Report", server.url, [`<section><h2>Summary</h2><pre>${escapeHtml(jsonForLog(parts))}</pre></section>`]));
     return toolResult(`Local project inspection completed for ${server.url}.`, reportUrl, { reportUrl, url: server.url, ...parts });
   } finally {

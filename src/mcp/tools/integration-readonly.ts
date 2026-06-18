@@ -8,6 +8,7 @@ import {
   trimLogLines,
   trimStructuredContent
 } from "./agent-tool-utils.js";
+import { safeFetch } from "../../security/url.js";
 
 const DEFAULT_HOSTS = ["localhost", "127.0.0.1", "::1"];
 
@@ -171,7 +172,9 @@ export const integrationReadonlyTools: ToolModule[] = [
       const expected = parseIntToArray(parsed.expectStatus);
 
       try {
-        const response = await fetch(parsed.url, {
+        // safeFetch re-validates every redirect hop so an allowlisted host cannot
+        // 30x-redirect the request into a private/internal address (SSRF).
+        const response = await safeFetch(parsed.url, {
           method: parsed.method,
           headers: {
             "Content-Type": "application/json",
@@ -179,7 +182,7 @@ export const integrationReadonlyTools: ToolModule[] = [
           },
           body: parsed.method === "POST" ? parsed.body : undefined,
           signal: controller.signal
-        });
+        }, { protocols: ["http:", "https:"] });
 
         const elapsedMs = Date.now() - startAt;
         const rawBody = parsed.method === "HEAD" ? "" : await response.text();

@@ -7,7 +7,7 @@ import { z } from "zod";
 import { createJobResult } from "../result.js";
 import type { ToolModule } from "../types.js";
 import { legacyDelegatedTools } from "./legacy-delegate.js";
-import { assertSafePublicUrl } from "../../security/url.js";
+import { safeFetch } from "../../security/url.js";
 import { childEnv } from "../child-env.js";
 
 const execFileAsync = promisify(execFile);
@@ -224,17 +224,16 @@ const checkUrlTool: ToolModule = {
   handler: async (input, ctx) => {
     const parsed = input as z.infer<typeof checkUrlSchema>;
     const target = parseUrl(parsed.url);
-    await assertSafePublicUrl(target, { protocols: ["http:", "https:"] });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), parsed.timeoutMs);
     const startedAt = Date.now();
 
     try {
-      const response = await fetch(target.toString(), {
+      const response = await safeFetch(target, {
         method: parsed.method,
         signal: controller.signal,
         headers: { "User-Agent": "Coding-MCP-CheckURL/0.1" }
-      });
+      }, { protocols: ["http:", "https:"] });
       const durationMs = Date.now() - startedAt;
       const contentType = response.headers.get("content-type") ?? "unknown";
       const bodyText = parsed.method === "GET" ? await response.text() : "";
