@@ -163,9 +163,15 @@ test("admin session cookie Secure flag follows request and ADMIN_COOKIE_SECURE m
     assert.equal(localHttp.status, 200);
     assert.doesNotMatch(localHttp.headers.get("set-cookie") ?? "", /;\s*Secure/i);
 
+    const forwardedHttpsNoTrust = await loginResponse(baseUrl, { "X-Forwarded-Proto": "https" });
+    assert.equal(forwardedHttpsNoTrust.status, 200);
+    assert.doesNotMatch(forwardedHttpsNoTrust.headers.get("set-cookie") ?? "", /;\s*Secure/i, "X-Forwarded-Proto must not be trusted without ADMIN_TRUST_PROXY");
+
+    process.env.ADMIN_TRUST_PROXY = "true";
     const forwardedHttps = await loginResponse(baseUrl, { "X-Forwarded-Proto": "https" });
     assert.equal(forwardedHttps.status, 200);
-    assert.match(forwardedHttps.headers.get("set-cookie") ?? "", /;\s*Secure/i);
+    assert.match(forwardedHttps.headers.get("set-cookie") ?? "", /;\s*Secure/i, "X-Forwarded-Proto should be trusted when ADMIN_TRUST_PROXY=true");
+    process.env.ADMIN_TRUST_PROXY = "";
 
     process.env.ADMIN_COOKIE_SECURE = "false";
     const forcedInsecure = await loginResponse(baseUrl, { "X-Forwarded-Proto": "https" });
