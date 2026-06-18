@@ -87,12 +87,13 @@ const metadataFilename = "project.json";
 const filesDirectoryName = "files";
 const workspaceDirectoryName = "workspace";
 const maxTaskHistoryItems = 100;
-const allowedTextExtensions = new Set([".html", ".css", ".js", ".json", ".txt", ".md", ".svg"]);
+const allowedTextExtensions = new Set([".html", ".css", ".js", ".mjs", ".json", ".txt", ".md", ".svg"]);
 const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".pptx"]);
 const projectContentTypes = new Map([
   [".html", "text/html"],
   [".css", "text/css"],
   [".js", "application/javascript"],
+  [".mjs", "application/javascript"],
   [".json", "application/json"],
   [".txt", "text/plain"],
   [".md", "text/markdown"],

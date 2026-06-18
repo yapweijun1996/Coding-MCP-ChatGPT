@@ -20,6 +20,7 @@ The MCP server uses a single source of truth registry for tool metadata, handler
 - `src/mcp/tools/research.ts`: research source, evidence, notes, report, and publish workflow tools.
 - `src/mcp/tools/share.ts`: legacy standalone HTML share tool, disabled by default.
 - `src/mcp/tools/web-rebuild.ts`: webpage capture, analysis, and static rebuild tools backed by Playwright and Project publish.
+- `src/mcp/tools/presentation.ts`: HTML deck, PPTX deck, immersive page, and browser-rendered video presentation tools.
 - `src/mcp/tools/workspace.ts`: workspace file tools delegated to legacy implementation.
 - `src/mcp/tools/command.ts`: stable npm checks plus disabled high-risk diagnostics/server helpers.
 - `src/mcp/tools/git.ts`: git tools delegated to legacy implementation.
@@ -42,6 +43,7 @@ Enabled by default:
 - Code intelligence: `refactor_hints` for advisory oversized-file and mixed-responsibility refactor signals.
 - Browser validation: `inspect_webpage`.
 - Webpage rebuild workflow: `capture_webpage`, `analyze_webpage_capture`, `generate_improved_static_page`.
+- Presentation generation: `create_html_deck`, `create_pptx_deck`, `create_immersive_page`, `create_video_presentation`.
 - Stable command checks backed by current package scripts: `run_command`, `run_typecheck`, `run_tests`, `run_build`.
 - Workspace and git tools delegated from the legacy implementation.
 
@@ -95,6 +97,12 @@ For idea-to-demo React, Vue, or Vite apps, use the App project workflow:
 5. `run_project_build`.
 6. `publish_project_dist` with `outputDir: "dist"` and `entryFile: "index.html"`.
 7. Return the `shareUrl` and Admin ZIP download link.
+
+## Presentation workflow
+
+Use `create_video_presentation` when an agent needs a presentation-style video preview from scene data. The tool creates a published Project with `index.html`, `video.css`, `video.js`, and a vendored MIT MP4 muxer module. It returns the Project `shareUrl`; MP4 export happens inside the browser through WebCodecs when the user's browser supports H.264 encoding.
+
+The MCP server does not render MP4 files server-side. If WebCodecs is unavailable, the generated page shows a clear browser capability error and remains usable as an animated HTML preview.
 
 ## Refactor hint workflow
 

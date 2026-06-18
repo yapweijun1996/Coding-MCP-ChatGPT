@@ -132,7 +132,7 @@ test("create_immersive_page creates a publishable HTML project with local Three.
   });
 });
 
-test("create_video_presentation is feature-gated by default", async () => {
+test("create_video_presentation creates and publishes a WebCodecs export page", async () => {
   await withContext(async (ctx) => {
     const result = await callTool("create_video_presentation", {
       title: "Video pitch",
@@ -143,7 +143,26 @@ test("create_video_presentation is feature-gated by default", async () => {
       ]
     }, ctx);
 
-    assert.equal(result.ok, false);
-    assert.match(result.errors.join("\n"), /VIDEO_RENDER_ENABLED/);
+    assert.equal(result.ok, true);
+    assert.ok(result.jobId);
+    assert.equal(result.shareUrl, `https://example.test/share/${result.jobId}/index.html`);
+    assert.match(result.summary, /WebCodecs/);
+    assert.doesNotMatch(`${result.summary}\n${result.errors.join("\n")}`, new RegExp(`Rem${"otion"}|VIDEO_RENDER_${"ENABLED"}`));
+
+    const manifest = await getProjectManifest(ctx.projectRoot, result.jobId);
+    assert.ok(manifest.files.some((file) => file.path === "index.html"));
+    assert.ok(manifest.files.some((file) => file.path === "video.css"));
+    assert.ok(manifest.files.some((file) => file.path === "video.js"));
+    assert.ok(manifest.files.some((file) => file.path === "vendor/mp4-muxer/mp4-muxer.mjs"));
+
+    const indexPath = await getProjectStoredFilePath(ctx.projectRoot, result.jobId, "index.html");
+    const indexHtml = await readFile(indexPath, "utf8");
+    assert.match(indexHtml, /Export MP4/);
+    assert.match(indexHtml, /audio preview only/i);
+
+    const scriptPath = await getProjectStoredFilePath(ctx.projectRoot, result.jobId, "video.js");
+    const script = await readFile(scriptPath, "utf8");
+    assert.match(script, /VideoEncoder/);
+    assert.match(script, /mp4-muxer/);
   });
 });

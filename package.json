@@ -27,7 +27,8 @@
     "reveal.js": "^6.0.1",
     "three": "^0.184.0",
     "yaml": "^2.9.0",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "mp4-muxer": "^5.2.2"
   },
   "devDependencies": {
     "@types/archiver": "^8.0.0",
@@ -39,8 +40,5 @@
   "engines": {
     "node": ">=20"
   },
-  "optionalDependencies": {
-    "@remotion/renderer": "^4.0.478",
-    "remotion": "^4.0.478"
-  }
+  "license": "MIT"
 }

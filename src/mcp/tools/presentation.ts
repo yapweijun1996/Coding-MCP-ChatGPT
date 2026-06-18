@@ -142,6 +142,10 @@ function cssString(value: string): string {
   return JSON.stringify(value);
 }
 
+function jsonForScript(value: unknown): string {
+  return JSON.stringify(value).replaceAll("<", "\\u003c");
+}
+
 async function copyRevealVendor(ctx: ToolContext, projectId: string): Promise<string[]> {
   const revealDist = path.dirname(require.resolve("reveal.js"));
   const assets = [
@@ -458,6 +462,14 @@ async function writeOptionalThreeVendor(ctx: ToolContext, projectId: string, ena
   return [file.path];
 }
 
+async function copyMp4MuxerVendor(ctx: ToolContext, projectId: string): Promise<string[]> {
+  const muxerCjsPath = require.resolve("mp4-muxer");
+  const muxerPath = path.join(path.dirname(muxerCjsPath), "mp4-muxer.mjs");
+  const content = await readFile(muxerPath, "utf8");
+  const file = await writeProjectFile(ctx.projectRoot, projectId, "vendor/mp4-muxer/mp4-muxer.mjs", content);
+  return [file.path];
+}
+
 async function handleCreateImmersivePage(input: ImmersivePageInput, ctx: ToolContext): Promise<ToolResult> {
   const project = await createBaseProject(ctx, input.title, `Generated immersive ${input.style} page.`, "index.html");
   const files = [
@@ -480,23 +492,372 @@ async function handleCreateImmersivePage(input: ImmersivePageInput, ctx: ToolCon
   };
 }
 
-function handleCreateVideoPresentation(input: VideoPresentationInput): ToolResult {
+function videoDimensions(aspectRatio: VideoPresentationInput["aspectRatio"]): { width: number; height: number } {
+  if (aspectRatio === "9:16") return { width: 1080, height: 1920 };
+  if (aspectRatio === "1:1") return { width: 1080, height: 1080 };
+  return { width: 1920, height: 1080 };
+}
+
+function renderVideoPresentationPage(input: VideoPresentationInput): string {
+  const dimensions = videoDimensions(input.aspectRatio);
   const duration = input.scenes.reduce((total, scene) => total + scene.durationSeconds, 0);
-  if (process.env.VIDEO_RENDER_ENABLED !== "true") {
-    return {
-      ok: false,
-      summary: "Video rendering is disabled. Set VIDEO_RENDER_ENABLED=true after configuring the Remotion render pipeline.",
-      artifacts: [],
-      logs: [JSON.stringify({ title: input.title, aspectRatio: input.aspectRatio, fps: input.fps, durationSeconds: duration, outputPath: input.outputPath }, null, 2)],
-      errors: ["VIDEO_RENDER_ENABLED is not true."]
-    };
+  const payload = {
+    title: input.title,
+    aspectRatio: input.aspectRatio,
+    fps: input.fps,
+    width: dimensions.width,
+    height: dimensions.height,
+    durationSeconds: duration,
+    outputPath: input.outputPath,
+    audioPath: input.audioPath,
+    scenes: input.scenes
+  };
+  const audio = input.audioPath
+    ? `<audio id="preview-audio" src="${escapeHtml(input.audioPath)}" preload="metadata"></audio><p class="audio-note">Audio preview only. MP4 export is video-only in this MIT-safe browser renderer.</p>`
+    : `<p class="audio-note">Audio preview only. MP4 export is video-only in this MIT-safe browser renderer.</p>`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(input.title)}</title>
+  <link rel="stylesheet" href="./video.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="stage-panel">
+      <canvas id="video-canvas" width="${dimensions.width}" height="${dimensions.height}" aria-label="${escapeHtml(input.title)} preview canvas"></canvas>
+    </section>
+    <section class="controls-panel" aria-label="Video presentation controls">
+      <div>
+        <p class="eyebrow">Browser-rendered presentation</p>
+        <h1>${escapeHtml(input.title)}</h1>
+      </div>
+      <div class="status-grid">
+        <span><strong id="scene-label">Scene 1</strong></span>
+        <span><strong>${escapeHtml(input.aspectRatio)}</strong> aspect</span>
+        <span><strong>${escapeHtml(String(input.fps))}</strong> fps</span>
+        <span><strong>${escapeHtml(duration.toFixed(1))}s</strong> total</span>
+      </div>
+      <input id="timeline" type="range" min="0" max="${escapeHtml(String(duration))}" step="0.01" value="0" aria-label="Timeline">
+      <div class="button-row">
+        <button id="play-button" type="button">Play</button>
+        <button id="export-button" type="button">Export MP4</button>
+      </div>
+      <p id="status" role="status">Ready.</p>
+      ${audio}
+    </section>
+  </main>
+  <script id="video-data" type="application/json">${jsonForScript(payload)}</script>
+  <script type="module" src="./video.js"></script>
+</body>
+</html>`;
+}
+
+function videoPresentationCss(): string {
+  return `
+:root { --bg:#f5f7f5; --ink:#17211b; --muted:#66746b; --line:#d6ddd7; --panel:#fff; --accent:#136f63; }
+* { box-sizing:border-box; }
+body { margin:0; min-height:100vh; background:var(--bg); color:var(--ink); font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.app-shell { min-height:100vh; display:grid; grid-template-columns:minmax(0,1fr) 380px; }
+.stage-panel { display:grid; place-items:center; padding:clamp(16px, 4vw, 48px); background:#101613; }
+canvas { width:min(100%, 1280px); max-height:calc(100vh - 48px); aspect-ratio:var(--canvas-aspect, 16 / 9); background:#0c1110; border:1px solid rgba(255,255,255,.12); box-shadow:0 20px 80px rgba(0,0,0,.35); }
+.controls-panel { border-left:1px solid var(--line); background:var(--panel); padding:28px; display:flex; flex-direction:column; gap:22px; }
+.eyebrow { margin:0 0 8px; color:var(--accent); font-size:12px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+h1 { margin:0; font-size:28px; line-height:1.08; letter-spacing:0; }
+.status-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; color:var(--muted); font-size:13px; }
+.status-grid span { border:1px solid var(--line); border-radius:8px; padding:10px; }
+.status-grid strong { display:block; color:var(--ink); font-size:15px; }
+input[type="range"] { width:100%; accent-color:var(--accent); }
+.button-row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+button { appearance:none; border:1px solid var(--accent); border-radius:8px; min-height:42px; padding:0 14px; background:var(--accent); color:white; font-weight:800; cursor:pointer; }
+button + button { background:white; color:var(--accent); }
+button:disabled { opacity:.55; cursor:not-allowed; }
+#status, .audio-note { margin:0; color:var(--muted); font-size:13px; line-height:1.45; }
+audio { width:100%; }
+@media (max-width: 900px) {
+  .app-shell { grid-template-columns:1fr; }
+  .controls-panel { border-left:0; border-top:1px solid var(--line); }
+  canvas { max-height:65vh; }
+}
+`;
+}
+
+function videoPresentationScript(): string {
+  return `
+import { Muxer, ArrayBufferTarget } from "./vendor/mp4-muxer/mp4-muxer.mjs";
+
+const data = JSON.parse(document.getElementById("video-data").textContent);
+const canvas = document.getElementById("video-canvas");
+const ctx = canvas.getContext("2d");
+const playButton = document.getElementById("play-button");
+const exportButton = document.getElementById("export-button");
+const timeline = document.getElementById("timeline");
+const statusEl = document.getElementById("status");
+const sceneLabel = document.getElementById("scene-label");
+const audio = document.getElementById("preview-audio");
+const sceneImages = new Map();
+let playing = false;
+let startedAt = 0;
+let pausedAt = 0;
+let rafId = 0;
+
+document.documentElement.style.setProperty("--canvas-aspect", \`\${data.width} / \${data.height}\`);
+
+function setStatus(message) {
+  statusEl.textContent = message;
+}
+
+function sceneAt(timeSeconds) {
+  let cursor = 0;
+  for (let index = 0; index < data.scenes.length; index++) {
+    const scene = data.scenes[index];
+    const next = cursor + scene.durationSeconds;
+    if (timeSeconds <= next || index === data.scenes.length - 1) {
+      return { scene, index, local: Math.max(0, timeSeconds - cursor), duration: scene.durationSeconds };
+    }
+    cursor = next;
   }
+  return { scene: data.scenes[0], index: 0, local: 0, duration: data.scenes[0].durationSeconds };
+}
+
+function loadImage(src) {
+  if (!src) return Promise.resolve(null);
+  if (sceneImages.has(src)) return sceneImages.get(src);
+  const promise = new Promise((resolve) => {
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => resolve(image);
+    image.onerror = () => resolve(null);
+    image.src = src;
+  });
+  sceneImages.set(src, promise);
+  return promise;
+}
+
+function roundedRect(context, x, y, width, height, radius) {
+  const r = Math.min(radius, width / 2, height / 2);
+  context.beginPath();
+  context.moveTo(x + r, y);
+  context.arcTo(x + width, y, x + width, y + height, r);
+  context.arcTo(x + width, y + height, x, y + height, r);
+  context.arcTo(x, y + height, x, y, r);
+  context.arcTo(x, y, x + width, y, r);
+  context.closePath();
+}
+
+function wrapText(context, text, x, y, maxWidth, lineHeight, maxLines) {
+  const words = String(text || "").split(/\\s+/).filter(Boolean);
+  const lines = [];
+  let line = "";
+  for (const word of words) {
+    const test = line ? \`\${line} \${word}\` : word;
+    if (context.measureText(test).width > maxWidth && line) {
+      lines.push(line);
+      line = word;
+      if (lines.length === maxLines - 1) break;
+    } else {
+      line = test;
+    }
+  }
+  if (line && lines.length < maxLines) lines.push(line);
+  for (let i = 0; i < lines.length; i++) context.fillText(lines[i], x, y + i * lineHeight);
+}
+
+function transitionAlpha(kind, local, duration) {
+  if (kind === "cut") return 1;
+  const ramp = Math.min(1, local / Math.min(0.6, duration / 3));
+  return Math.max(0.08, ramp);
+}
+
+async function renderAt(timeSeconds) {
+  const { scene, index, local, duration } = sceneAt(timeSeconds);
+  const progress = duration > 0 ? local / duration : 0;
+  sceneLabel.textContent = \`Scene \${index + 1} of \${data.scenes.length}\`;
+  timeline.value = String(Math.min(timeSeconds, data.durationSeconds));
+
+  ctx.save();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+  gradient.addColorStop(0, "#0f1f1d");
+  gradient.addColorStop(0.48, "#18302b");
+  gradient.addColorStop(1, "#f2f4ea");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.globalAlpha = transitionAlpha(scene.transition, local, duration);
+  const image = await loadImage(scene.imagePath);
+  if (image) {
+    const scale = Math.max(canvas.width / image.width, canvas.height / image.height) * (1 + progress * 0.035);
+    const w = image.width * scale;
+    const h = image.height * scale;
+    ctx.globalAlpha *= 0.34;
+    ctx.drawImage(image, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+    ctx.globalAlpha = transitionAlpha(scene.transition, local, duration);
+  }
+
+  const pad = Math.round(canvas.width * 0.07);
+  const panelW = Math.min(canvas.width - pad * 2, Math.round(canvas.width * 0.68));
+  const panelH = Math.round(canvas.height * 0.5);
+  const panelY = Math.round((canvas.height - panelH) / 2);
+  ctx.fillStyle = "rgba(255,255,255,0.88)";
+  roundedRect(ctx, pad, panelY, panelW, panelH, 28);
+  ctx.fill();
+
+  ctx.fillStyle = "#136f63";
+  ctx.font = \`700 \${Math.max(24, canvas.width * 0.018)}px system-ui, sans-serif\`;
+  ctx.fillText(\`SCENE \${index + 1}\`, pad + 54, panelY + 72);
+
+  ctx.fillStyle = "#17211b";
+  ctx.font = \`800 \${Math.max(58, canvas.width * 0.055)}px Georgia, serif\`;
+  wrapText(ctx, scene.title || data.title, pad + 54, panelY + 165, panelW - 108, Math.max(64, canvas.width * 0.064), 3);
+
+  ctx.fillStyle = "#3d4a43";
+  ctx.font = \`400 \${Math.max(28, canvas.width * 0.024)}px system-ui, sans-serif\`;
+  wrapText(ctx, scene.body || "", pad + 56, panelY + panelH - 150, panelW - 112, Math.max(38, canvas.width * 0.031), 4);
+
+  const barW = canvas.width - pad * 2;
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "rgba(255,255,255,0.32)";
+  roundedRect(ctx, pad, canvas.height - pad, barW, 12, 6);
+  ctx.fill();
+  ctx.fillStyle = "#74c7b8";
+  roundedRect(ctx, pad, canvas.height - pad, barW * Math.min(1, timeSeconds / data.durationSeconds), 12, 6);
+  ctx.fill();
+  ctx.restore();
+}
+
+function tick() {
+  if (!playing) return;
+  const now = performance.now();
+  const elapsed = (now - startedAt) / 1000;
+  const time = Math.min(data.durationSeconds, elapsed);
+  renderAt(time);
+  if (time >= data.durationSeconds) {
+    playing = false;
+    playButton.textContent = "Play";
+    if (audio) audio.pause();
+    pausedAt = 0;
+    return;
+  }
+  rafId = requestAnimationFrame(tick);
+}
+
+playButton.addEventListener("click", () => {
+  playing = !playing;
+  playButton.textContent = playing ? "Pause" : "Play";
+  if (playing) {
+    startedAt = performance.now() - pausedAt * 1000;
+    if (audio) {
+      audio.currentTime = pausedAt;
+      audio.play().catch(() => {});
+    }
+    tick();
+  } else {
+    cancelAnimationFrame(rafId);
+    pausedAt = Number(timeline.value);
+    if (audio) audio.pause();
+  }
+});
+
+timeline.addEventListener("input", () => {
+  pausedAt = Number(timeline.value);
+  if (playing) startedAt = performance.now() - pausedAt * 1000;
+  if (audio) audio.currentTime = pausedAt;
+  renderAt(pausedAt);
+});
+
+async function ensureWebCodecs() {
+  if (!("VideoEncoder" in globalThis) || !("VideoFrame" in globalThis)) {
+    throw new Error("This browser does not support WebCodecs VideoEncoder.");
+  }
+  const config = {
+    codec: "avc1.420028",
+    width: data.width,
+    height: data.height,
+    bitrate: Math.max(2_500_000, data.width * data.height * 1.2),
+    framerate: data.fps,
+    hardwareAcceleration: "prefer-hardware"
+  };
+  const support = await VideoEncoder.isConfigSupported(config);
+  if (!support.supported) throw new Error("This browser cannot encode H.264 MP4 with WebCodecs.");
+  return support.config;
+}
+
+async function exportMp4() {
+  exportButton.disabled = true;
+  playButton.disabled = true;
+  try {
+    const encoderConfig = await ensureWebCodecs();
+    const target = new ArrayBufferTarget();
+    const muxer = new Muxer({
+      target,
+      video: { codec: "avc", width: data.width, height: data.height, frameRate: data.fps },
+      fastStart: "in-memory"
+    });
+    let encodeError = null;
+    const encoder = new VideoEncoder({
+      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+      error: (error) => { encodeError = error; }
+    });
+    encoder.configure(encoderConfig);
+    const totalFrames = Math.ceil(data.durationSeconds * data.fps);
+    for (let frame = 0; frame < totalFrames; frame++) {
+      const seconds = frame / data.fps;
+      await renderAt(seconds);
+      const videoFrame = new VideoFrame(canvas, { timestamp: Math.round(seconds * 1_000_000) });
+      encoder.encode(videoFrame, { keyFrame: frame % (data.fps * 2) === 0 });
+      videoFrame.close();
+      if (frame % 10 === 0) {
+        setStatus(\`Encoding frame \${frame + 1} of \${totalFrames}...\`);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+    await encoder.flush();
+    if (encodeError) throw encodeError;
+    encoder.close();
+    muxer.finalize();
+    const blob = new Blob([target.buffer], { type: "video/mp4" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = data.outputPath || "video.mp4";
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setStatus(\`Exported \${(blob.size / 1024 / 1024).toFixed(2)} MB MP4. Audio is preview-only in this version.\`);
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : "MP4 export failed.");
+  } finally {
+    exportButton.disabled = false;
+    playButton.disabled = false;
+  }
+}
+
+exportButton.addEventListener("click", exportMp4);
+renderAt(0);
+`;
+}
+
+async function handleCreateVideoPresentation(input: VideoPresentationInput, ctx: ToolContext): Promise<ToolResult> {
+  const duration = input.scenes.reduce((total, scene) => total + scene.durationSeconds, 0);
+  const project = await createBaseProject(ctx, input.title, "Generated browser-rendered video presentation.", "index.html");
+  const files = [
+    await writeProjectFile(ctx.projectRoot, project.id, "index.html", renderVideoPresentationPage(input)),
+    await writeProjectFile(ctx.projectRoot, project.id, "video.css", videoPresentationCss()),
+    await writeProjectFile(ctx.projectRoot, project.id, "video.js", videoPresentationScript())
+  ];
+  const vendor = await copyMp4MuxerVendor(ctx, project.id);
+  const published = await maybePublish(ctx, project.id, true);
+  const manifest = await getProjectManifest(ctx.projectRoot, project.id);
   return {
-    ok: false,
-    summary: "Video rendering is not implemented in this build.",
-    artifacts: [],
-    logs: [JSON.stringify({ title: input.title, aspectRatio: input.aspectRatio, fps: input.fps, durationSeconds: duration, outputPath: input.outputPath }, null, 2)],
-    errors: ["Remotion render execution is reserved for the next implementation phase."]
+    ok: true,
+    summary: `Created and published browser-rendered video presentation ${project.id}. MP4 export must be run in a browser via WebCodecs.`,
+    jobId: project.id,
+    previewUrl: published.previewUrl,
+    shareUrl: published.shareUrl,
+    artifacts: [...files.map((file) => file.path), ...vendor],
+    logs: [JSON.stringify({ projectId: project.id, files: manifest.files, publishedUrl: published.metadata?.publishedUrl, durationSeconds: duration, fps: input.fps, aspectRatio: input.aspectRatio, exportMode: "browser_webcodecs" }, null, 2)],
+    errors: []
   };
 }
 
@@ -566,7 +927,7 @@ export const presentationTools: ToolModule[] = [
   {
     definition: {
       name: "create_video_presentation",
-      description: "Prepare a video presentation request. Rendering is feature-gated behind VIDEO_RENDER_ENABLED.",
+      description: "Create and publish a browser-rendered video presentation with a WebCodecs MP4 export button.",
       inputSchema: {
         type: "object",
         properties: {
@@ -583,6 +944,6 @@ export const presentationTools: ToolModule[] = [
     },
     enabledByDefault: true,
     schema: createVideoPresentationInputSchema,
-    handler: (input) => handleCreateVideoPresentation(input as VideoPresentationInput)
+    handler: async (input, ctx) => handleCreateVideoPresentation(input as VideoPresentationInput, ctx)
   }
 ];
