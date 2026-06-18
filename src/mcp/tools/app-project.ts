@@ -22,8 +22,8 @@ const maxLogBytes = 40000;
 const maxWorkspaceTextBytes = 1024 * 1024;
 const defaultNpmTimeoutMs = 300000;
 const defaultDevPort = 5173;
-const allowedWorkspaceExtensions = new Set([".html", ".css", ".js", ".jsx", ".ts", ".tsx", ".json", ".md", ".txt", ".svg", ".vue"]);
-const textDistExtensions = new Set([".html", ".css", ".js", ".json", ".txt", ".md", ".svg"]);
+const allowedWorkspaceExtensions = new Set([".html", ".css", ".js", ".jsx", ".ts", ".tsx", ".json", ".webmanifest", ".md", ".txt", ".svg", ".vue"]);
+const textDistExtensions = new Set([".html", ".css", ".js", ".json", ".webmanifest", ".txt", ".md", ".svg"]);
 const assetDistExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
 type AppTemplate = "vite-react" | "vite-vue" | "vite-vanilla";

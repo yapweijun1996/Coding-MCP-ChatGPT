@@ -7,6 +7,7 @@ import {
   createProject,
   deleteProject,
   forkProject,
+  getProjectFileContentType,
   getProjectManifest,
   importProjectAssetFromLocalFile,
   patchProjectFile,
@@ -73,6 +74,15 @@ test("readProjectFile remains text-only for binary assets", async () => {
   await withProject(async (root, projectId) => {
     await writeProjectAsset(root, projectId, "assets/hero.png", pngBytes, "image/png");
     await assert.rejects(readProjectFile(root, projectId, "assets/hero.png"), /Unsupported project file extension/);
+  });
+});
+
+test("writeProjectFile accepts web app manifests", async () => {
+  await withProject(async (root, projectId) => {
+    const file = await writeProjectFile(root, projectId, "site.webmanifest", JSON.stringify({ name: "Demo", start_url: "/" }));
+    assert.equal(file.path, "site.webmanifest");
+    assert.equal(await readProjectFile(root, projectId, "site.webmanifest"), "{\"name\":\"Demo\",\"start_url\":\"/\"}");
+    assert.equal(getProjectFileContentType("site.webmanifest"), "application/manifest+json");
   });
 });
 
