@@ -5,6 +5,7 @@ import { gitTools } from "./git.js";
 import { presentationTools } from "./presentation.js";
 import { previewTools } from "./preview.js";
 import { projectTools } from "./project.js";
+import { projectDevTools } from "./project-dev.js";
 import { researchTools } from "./research.js";
 import { skillTools } from "./skills.js";
 import { browserObservabilityTools } from "./browser-observability.js";
@@ -35,6 +36,7 @@ export const allToolModules: ToolModule[] = [
   ...gitTools,
   ...appProjectTools,
   ...projectTools,
+  ...projectDevTools,
   ...researchTools,
   ...shareTools,
   ...siteTools,

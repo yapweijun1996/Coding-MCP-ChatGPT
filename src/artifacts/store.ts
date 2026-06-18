@@ -11,7 +11,7 @@ export interface ArtifactRecord {
   createdAt: string;
 }
 
-const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
+const MAX_ARTIFACT_BYTES = 250 * 1024 * 1024;
 
 function sanitizeArtifactId(id: string): string {
   if (!/^[0-9a-f-]{36}$/i.test(id)) throw new Error("Invalid artifact id.");
@@ -80,6 +80,11 @@ function contentTypeForFilename(filename: string): string {
   if (extension === "json") return "application/json";
   if (extension === "png") return "image/png";
   if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "webm") return "video/webm";
+  if (extension === "mp4") return "video/mp4";
+  if (extension === "mp3") return "audio/mpeg";
+  if (extension === "wav") return "audio/wav";
+  if (extension === "ogg") return "audio/ogg";
   if (extension === "zip") return "application/zip";
   if (extension === "html") return "text/html";
   return "application/octet-stream";

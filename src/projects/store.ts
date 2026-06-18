@@ -46,6 +46,12 @@ export interface ProjectTaskHistoryItem {
   details?: unknown;
 }
 
+export interface ProjectWorkspaceBinding {
+  path: string;
+  gitRoot?: string;
+  boundAt: string;
+}
+
 export interface ProjectMetadata {
   id: string;
   title: string;
@@ -56,6 +62,7 @@ export interface ProjectMetadata {
   status: ProjectStatus;
   entryFile: string;
   publishedUrl?: string;
+  workspaceBinding?: ProjectWorkspaceBinding;
   lastValidation?: ProjectValidationResult;
   taskHistory?: ProjectTaskHistoryItem[];
 }
@@ -75,6 +82,7 @@ export interface ProjectManifest {
   files: ProjectFileInfo[];
   entryFile: string;
   publishedUrl?: string;
+  workspaceBinding?: ProjectWorkspaceBinding;
   lastValidation?: ProjectValidationResult;
   taskHistory: ProjectTaskHistoryItem[];
 }
@@ -94,6 +102,7 @@ export interface PublishProjectOptions {
 
 export const maxProjectFileBytes = 1024 * 1024;
 export const maxProjectImageAssetBytes = 10 * 1024 * 1024;
+export const maxProjectMediaAssetBytes = 100 * 1024 * 1024;
 export const maxProjectPresentationAssetBytes = 25 * 1024 * 1024;
 
 const metadataFilename = "project.json";
@@ -101,7 +110,7 @@ const filesDirectoryName = "files";
 const workspaceDirectoryName = "workspace";
 const maxTaskHistoryItems = 100;
 const allowedTextExtensions = new Set([".html", ".css", ".js", ".mjs", ".json", ".webmanifest", ".txt", ".md", ".svg"]);
-const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".pptx"]);
+const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mp4", ".webm", ".pptx"]);
 const projectContentTypes = new Map([
   [".html", "text/html"],
   [".css", "text/css"],
@@ -117,6 +126,16 @@ const projectContentTypes = new Map([
   [".jpeg", "image/jpeg"],
   [".webp", "image/webp"],
   [".gif", "image/gif"],
+  [".glb", "model/gltf-binary"],
+  [".gltf", "model/gltf+json"],
+  [".hdr", "image/vnd.radiance"],
+  [".exr", "image/aces"],
+  [".ktx2", "image/ktx2"],
+  [".mp3", "audio/mpeg"],
+  [".wav", "audio/wav"],
+  [".ogg", "audio/ogg"],
+  [".mp4", "video/mp4"],
+  [".webm", "video/webm"],
   [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"]
 ]);
 
@@ -271,6 +290,8 @@ function validateProjectAssetBytes(relativePath: string, buffer: Buffer, content
   if (buffer.length === 0) throw new Error("Project asset content is empty.");
   if (extension === ".pptx") {
     if (buffer.length > maxProjectPresentationAssetBytes) throw new Error("PPTX asset exceeds 25 MiB.");
+  } else if ([".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mp4", ".webm"].includes(extension)) {
+    if (buffer.length > maxProjectMediaAssetBytes) throw new Error("Media/model asset exceeds 100 MiB.");
   } else if (buffer.length > maxProjectImageAssetBytes) {
     throw new Error("Image asset exceeds 10 MiB.");
   }
@@ -279,6 +300,12 @@ function validateProjectAssetBytes(relativePath: string, buffer: Buffer, content
   if ((extension === ".jpg" || extension === ".jpeg") && !hasBytes(buffer, [0xff, 0xd8, 0xff])) throw new Error("JPEG asset has invalid magic bytes.");
   if (extension === ".gif" && !includesAscii(buffer.subarray(0, 6), "GIF87a") && !includesAscii(buffer.subarray(0, 6), "GIF89a")) throw new Error("GIF asset has invalid magic bytes.");
   if (extension === ".webp" && (!includesAscii(buffer.subarray(0, 4), "RIFF") || !includesAscii(buffer.subarray(8, 12), "WEBP"))) throw new Error("WebP asset has invalid magic bytes.");
+  if (extension === ".glb" && !includesAscii(buffer.subarray(0, 4), "glTF")) throw new Error("GLB asset has invalid magic bytes.");
+  if (extension === ".gltf") {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const parsed = JSON.parse(decoder.decode(buffer)) as { asset?: { version?: unknown } };
+    if (!parsed.asset || typeof parsed.asset.version !== "string") throw new Error("GLTF asset must contain asset.version.");
+  }
   if (extension === ".pptx" && (!hasBytes(buffer, [0x50, 0x4b]) || !includesAscii(buffer, "[Content_Types].xml") || !includesAscii(buffer, "ppt/"))) {
     throw new Error("PPTX asset must be an OOXML presentation package.");
   }
@@ -469,9 +496,34 @@ export async function getProjectManifest(projectRoot: string, projectId: string)
     files,
     entryFile: metadata.entryFile,
     publishedUrl: metadata.publishedUrl,
+    workspaceBinding: metadata.workspaceBinding,
     lastValidation: metadata.lastValidation,
     taskHistory: metadata.taskHistory ?? []
   };
+}
+
+export async function bindProjectWorkspace(
+  projectRoot: string,
+  projectId: string,
+  binding: Omit<ProjectWorkspaceBinding, "boundAt">
+): Promise<ProjectMetadata> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot bind a workspace to a deleted project.");
+    const workspaceBinding: ProjectWorkspaceBinding = {
+      path: binding.path,
+      gitRoot: binding.gitRoot,
+      boundAt: new Date().toISOString()
+    };
+    const updated = addHistory({ ...metadata, workspaceBinding }, {
+      toolName: "bind_project_workspace",
+      ok: true,
+      summary: `Bound project ${projectId} to workspace ${workspaceBinding.path}.`,
+      details: workspaceBinding
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return updated;
+  });
 }
 
 export async function getProjectActivity(projectRoot: string, projectId: string, limit = 50): Promise<ProjectActivity> {

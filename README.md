@@ -368,6 +368,17 @@ Stable command and browser-inspection helpers enabled by default:
 - `run_typecheck`
 - `run_tests`
 - `run_build`
+- `bind_project_workspace`
+- `list_project_files`
+- `search_in_project`
+- `apply_patch`
+- `write_project_workspace_asset`
+- `import_project_workspace_asset_from_local_file`
+- `run_project_npm_command`
+- `inspect_project_workspace`
+- `record_project_workspace_video`
+- `publish_project_workspace`
+- `record_project_task`
 - `inspect_webpage`
 - `inspect_webpage_plus`
 - `audit_accessibility`
@@ -377,6 +388,7 @@ Stable command and browser-inspection helpers enabled by default:
 
 The following command and network/process helpers are disabled by default and must be enabled from Admin before use:
 
+- `run_shell_command`
 - `run_lint`
 - `run_format_check`
 - `run_format_write`
@@ -398,3 +410,16 @@ Browser QA tools:
 - `audit_lighthouse`: Lighthouse quality audit for performance, accessibility, best practices, SEO, and PWA.
 - `inspect_interaction_flow`: safe declarative browser flow test without arbitrary JavaScript execution.
 - `inspect_local_project`: starts the local project server, runs browser QA, and stops the server by default.
+
+Real repository workflow:
+
+- `bind_project_workspace`: attach a `projectId` to a real local workspace path and detected Git root.
+- `git_status`, `git_diff`, `git_commit`, and `git_push`: accept optional `projectId` so Git runs in the bound repository instead of the MCP server's default workspace.
+- `list_project_files` / `search_in_project`: inspect the bound repository.
+- `apply_patch`: apply a unified diff after `git apply --check`.
+- `write_project_workspace_asset` / `import_project_workspace_asset_from_local_file`: add binary assets such as textures, GLB/GLTF models, HDR files, audio, and video to the bound repository.
+- `run_project_npm_command`: run install/build/test/lint/typecheck in the bound repository.
+- `inspect_project_workspace`: run responsive screenshot, console, layout, and optional accessibility checks against the bound repository's local dev server.
+- `record_project_workspace_video`: record real browser output to WebM, or MP4 when `ffmpeg` is installed.
+- `publish_project_workspace`: publish built output such as `dist/` to the project share URL.
+- `record_project_task`: append queue/progress state to project activity history.
