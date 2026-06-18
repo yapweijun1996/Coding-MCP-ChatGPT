@@ -9,6 +9,7 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
+COPY admin-ui ./admin-ui
 RUN npm run build
 
 FROM mcr.microsoft.com/playwright:v1.61.0-noble AS runtime
@@ -31,6 +32,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/admin-ui/dist ./admin-ui/dist
 
 RUN mkdir -p /data/workspace /data/shares /data/artifacts /data/projects /data/state
 

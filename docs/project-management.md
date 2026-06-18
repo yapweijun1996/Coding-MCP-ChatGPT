@@ -60,10 +60,10 @@ Recommended ChatGPT workflow:
 
 ## Admin pages
 
-- `/admin`: project list, connector status, tool toggles, activity log.
-- `/admin/projects/:projectId`: project detail and read-only code viewer.
-- `/admin/projects/:projectId/files?path=...`: JSON file content.
-- `/admin/projects/:projectId/download.zip`: dynamic ZIP download of project files.
+- `/admin`: React operations console with project, connector, tool, skill, special-tool, activity, and settings views.
+- `/admin/projects/:projectId`: React project detail route for status, files, validation, and task history.
+- `/admin/api/projects/:projectId`: authenticated JSON project detail.
+- `/admin/api/projects/:projectId/download.zip`: authenticated dynamic ZIP download of project files.
 - `/share/:projectId/:filename`: public published project file.
 
 ## Safety boundaries
@@ -79,7 +79,7 @@ Recommended ChatGPT workflow:
 
 ## Current limitation
 
-The first version provides code viewing with a read-only textarea. Monaco Editor or a stronger online editor can be added later, but full VS Code/code-server is intentionally not exposed to the public internet in this MVP.
+The Admin UI exposes project files and task history for inspection, but it does not provide an in-browser code editor. Monaco Editor or a stronger online editor can be added later, but full VS Code/code-server is intentionally not exposed to the public internet in this MVP.
 
 ## Tool module location
 

@@ -111,6 +111,7 @@ curl -sS http://127.0.0.1:6859/health
 - `KB_MCP_HTTP_KEY`：非 ChatGPT 客户端可用的静态 Key（若保留）
 - `ADMIN_SESSION_SECRET`：管理员会话保护（如有前端管理页）
 - `ADMIN_PASSCODE`：访问 `/admin` 的管理员口令（默认可复用 OAuth owner passcode）
+- `ADMIN_COOKIE_SECURE`：Admin session cookie 的 `Secure` 策略，支持 `auto` / `true` / `false`（默认 `auto`，按 HTTPS 请求或 `X-Forwarded-Proto: https` 自动启用）
 - `NODE_ENV`：`development` / `production`
 - `MCP_DEV_TOKEN`：MVP 阶段保护 `/mcp` 的 Bearer token
 - `PUBLIC_BASE_URL`：外部访问地址（默认 `https://gmb01.xyz`）
@@ -304,9 +305,11 @@ Key tools:
 
 Admin endpoints:
 
-- `/admin` shows projects, connector status, tool toggles, and activity.
-- `/admin/projects/:projectId` shows file list and read-only source code.
-- `/admin/projects/:projectId/download.zip` downloads project files.
+- `/admin` serves the React Admin operations console with cookie-session login.
+- `/admin/projects/:projectId` is a React project detail route for project status, files, validation, and task history.
+- `/admin/api/projects/:projectId/download.zip` downloads project files for authenticated admins.
+- `/admin/api/*` provides the JSON API used by the Admin UI for projects, connectors, tools, skills, special tools, activity, and settings.
+- Admin login applies an in-memory per-process failed-login limiter. For multi-instance or public deployments, keep a reverse proxy/WAF rate limit in front of `/admin/api/session`.
 
 See `docs/project-management.md` for details.
 

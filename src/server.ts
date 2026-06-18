@@ -1,9 +1,11 @@
-import { ZipArchive } from "archiver";
 import express from "express";
-import { listActivity, recordActivity } from "./activity.js";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { recordActivity } from "./activity.js";
 import { readArtifact } from "./artifacts/store.js";
-import { renderAdminPage, renderPublicSharePage, renderProjectPage, type PublicShareLocale } from "./admin.js";
-import { countJobs, getJob } from "./jobs/store.js";
+import { registerAdminApi } from "./admin-api.js";
+import { renderPublicSharePage, type PublicShareLocale } from "./admin.js";
+import { getJob } from "./jobs/store.js";
 import { toolDefinitions } from "./mcp/registry.js";
 import { callTool } from "./mcp/router.js";
 import type { ToolResult } from "./mcp/types.js";
@@ -14,46 +16,33 @@ import {
   getClientIdForAccessToken,
   initializeOAuthState,
   isValidAccessToken,
-  listOAuthClientStatus,
   parseAuthorizeParams,
   recordClientUse,
   registerClient,
   renderConsentPage,
   revokeToken,
-  revokeClient,
   validateAuthorizeRequest,
   type AuthorizeParams,
   type OAuthConfig
 } from "./oauth.js";
 import { renderPreviewPage } from "./preview.js";
 import {
-  countProjects,
-  deleteProject,
   getProject,
   getProjectFileContentType,
-  getProjectFilesDirectory,
-  getProjectWorkspaceDirectory,
-  getProjectManifest,
   getProjectStoredFilePath,
-  getProjectWithFiles,
   isProjectTextFilePath,
   listProjects,
   readProjectFile,
-  setProjectStatus
 } from "./projects/store.js";
-import { getResearchSummary } from "./research/store.js";
-import { countShares, readShareArtifact } from "./share/store.js";
-import { initializeSkillState, listSkillStates, setSkillEnabled } from "./skills/state.js";
+import { readShareArtifact } from "./share/store.js";
+import { initializeSkillState } from "./skills/state.js";
 import {
   consumeVisibleBrowserExpiredCleanup,
-  disableVisibleBrowserControl,
-  enableVisibleBrowserControl,
-  getSpecialToolStates,
   isVisibleBrowserControlEnabled,
   isVisibleBrowserToolName,
   visibleBrowserToolNames
 } from "./special-tools.js";
-import { getToolAccess, isToolEffectivelyEnabled, listEffectiveToolStates, setToolEnabled } from "./tool-state.js";
+import { getToolAccess, isToolEffectivelyEnabled, listEffectiveToolStates } from "./tool-state.js";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
@@ -62,7 +51,7 @@ type JsonRpcRequest = {
   params?: unknown;
 };
 
-const app = express();
+export const app = express();
 
 const port = Number.parseInt(process.env.PORT ?? "6859", 10);
 const host = process.env.HOST ?? "127.0.0.1";
@@ -84,6 +73,8 @@ const oauthConfig: OAuthConfig = {
 };
 initializeOAuthState(oauthConfig.statePath);
 initializeSkillState(skillStatePath);
+
+const adminDistPath = process.env.ADMIN_UI_DIST ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../admin-ui/dist");
 
 app.use(express.json({ limit: "40mb" }));
 app.use(express.urlencoded({ extended: false, limit: "64kb" }));
@@ -335,110 +326,30 @@ app.post("/mcp", async (req, res) => {
   res.json(jsonRpcError(request.id, -32601, `Method not found: ${request.method}`));
 });
 
-app.get("/admin", async (req, res) => {
-  if (!requireAdmin(req, res)) return;
-
-  const projects = await listProjects(projectRoot, true);
-  const activeProjects = projects.filter((project) => project.status !== "deleted");
-  res.type("html").send(renderAdminPage({
-    publicBaseUrl,
-    adminToken: adminPasscode,
-    clients: listOAuthClientStatus(),
-    specialTools: getSpecialToolStates(),
-    skills: listSkillStates(),
-    tools: listEffectiveToolStates().filter((tool) => !isVisibleBrowserToolName(tool.name)),
-    activity: listActivity(),
-    projects,
-    stats: {
-      jobs: countJobs(),
-      shares: countShares(),
-      projects: activeProjects.length,
-      enabledTools: listEffectiveToolStates().filter((tool) => tool.enabled && !isVisibleBrowserToolName(tool.name)).length + (isVisibleBrowserControlEnabled() ? visibleBrowserToolNames.length : 0),
-      connectedClients: listOAuthClientStatus().length
-    }
-  }));
+registerAdminApi(app, {
+  adminPasscode,
+  publicBaseUrl,
+  projectRoot,
+  workspaceRoot,
+  shareRoot,
+  artifactRoot
 });
 
-app.get("/admin/projects/:projectId", async (req, res) => {
-  if (!requireAdmin(req, res)) return;
+app.use("/admin/assets", express.static(path.join(adminDistPath, "assets"), {
+  immutable: true,
+  maxAge: "1y"
+}));
 
-  try {
-    const project = await getProjectWithFiles(projectRoot, req.params.projectId);
-    const selectedPath = typeof req.query.path === "string" ? req.query.path : project.files[0]?.path;
-    let selectedContent: string | undefined;
-    let error: string | undefined;
-    if (selectedPath) {
-      try {
-        selectedContent = await readProjectFile(projectRoot, req.params.projectId, selectedPath, 1024 * 1024);
-      } catch (readError) {
-        error = readError instanceof Error ? readError.message : "Unable to read file.";
-      }
-    }
-
-    const manifest = await getProjectManifest(projectRoot, req.params.projectId);
-    const researchSummary = await getResearchSummary(projectRoot, req.params.projectId);
-
-    res.type("html").send(renderProjectPage({
-      publicBaseUrl,
-      adminToken: adminPasscode,
-      project: project.metadata,
-      files: project.files,
-      manifest,
-      researchSummary,
-      selectedPath,
-      selectedContent,
-      error
-    }));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Project not found.";
-    res.status(404).type("html").send(message);
-  }
-});
-
-app.get("/admin/projects/:projectId/files", async (req, res) => {
-  if (!requireAdmin(req, res)) return;
-  if (typeof req.query.path !== "string") {
-    res.status(400).json({ ok: false, error: "Missing path query." });
+app.get(/^\/admin(?:\/.*)?$/, (req, res, next) => {
+  if (req.path.startsWith("/admin/api")) {
+    next();
     return;
   }
-
-  try {
-    const content = await readProjectFile(projectRoot, req.params.projectId, req.query.path, 1024 * 1024);
-    res.json({ ok: true, projectId: req.params.projectId, path: req.query.path, content });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unable to read project file.";
-    res.status(400).json({ ok: false, error: message });
-  }
-});
-
-app.get("/admin/projects/:projectId/download.zip", async (req, res) => {
-  if (!requireAdmin(req, res)) return;
-
-  try {
-    const project = await getProject(projectRoot, req.params.projectId);
-    if (project.status === "deleted") {
-      res.status(404).send("Project is deleted.");
-      return;
+  res.sendFile(path.join(adminDistPath, "index.html"), (error) => {
+    if (error && !res.headersSent) {
+      res.status(503).type("html").send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Admin UI unavailable</title><style>body{font-family:ui-sans-serif,system-ui,sans-serif;background:#f4f6f8;color:#18231f;margin:0}main{width:min(520px,calc(100vw - 32px));margin:72px auto;background:#fff;border:1px solid #dce3df;border-radius:8px;padding:24px}code{background:#eef3f0;padding:2px 5px;border-radius:4px}</style></head><body><main><h1>Admin UI is not built</h1><p>Run <code>npm run build:admin</code> or <code>npm run build</code>, then restart the server.</p></main></body></html>`);
     }
-
-    const archive = new ZipArchive({ zlib: { level: 9 } });
-    archive.on("error", (error: Error) => {
-      if (!res.headersSent) res.status(500).send(error.message);
-      else res.end();
-    });
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename="${project.id}.zip"`);
-    archive.pipe(res);
-    archive.directory(getProjectFilesDirectory(projectRoot, project.id), "published");
-    archive.glob("**/*", {
-      cwd: getProjectWorkspaceDirectory(projectRoot, project.id),
-      ignore: ["node_modules/**", "dist/**"]
-    }, { prefix: "workspace" });
-    await archive.finalize();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unable to download project.";
-    res.status(404).send(message);
-  }
+  });
 });
 
 app.get(["/share", "/share/"], async (req, res) => {
@@ -451,140 +362,6 @@ app.get(["/share", "/share/"], async (req, res) => {
     }));
   } catch {
     res.status(500).type("text/plain").send("Unable to load public share index.");
-  }
-});
-
-app.post("/admin/projects/:projectId/delete", async (req, res) => {
-  if (!requireAdmin(req, res)) return;
-
-  try {
-    await deleteProject(projectRoot, req.params.projectId);
-  } catch {
-    // Keep admin delete idempotent from the browser.
-  }
-  res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
-});
-
-app.post("/admin/projects/:projectId/status", async (req, res) => {
-  if (!requireAdmin(req, res)) return;
-  const body = req.body as Partial<Record<string, string>>;
-  const status = body.status;
-
-  try {
-    if (status !== "published" && status !== "private" && status !== "draft") {
-      throw new Error("Invalid project status.");
-    }
-    await setProjectStatus(projectRoot, req.params.projectId, status, publicBaseUrl);
-    res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Project status update failed.";
-    res.status(400).type("text/plain").send(message);
-  }
-});
-
-app.post("/admin/tools/toggle", (req, res) => {
-  if (!requireAdmin(req, res)) return;
-  const body = req.body as Partial<Record<string, string>>;
-  try {
-    if (!body.name) throw new Error("Missing tool name.");
-    if (isVisibleBrowserToolName(body.name)) throw new Error("Browser control tools are managed from Special Tools.");
-    setToolEnabled(body.name, body.enabled === "1");
-    res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Tool toggle failed.";
-    res.status(400).send(message);
-  }
-});
-
-app.post("/admin/skills/toggle", (req, res) => {
-  if (!requireAdmin(req, res)) return;
-  const body = req.body as Partial<Record<string, string>>;
-  try {
-    if (!body.id) throw new Error("Missing skill id.");
-    const enabled = body.enabled === "1";
-    setSkillEnabled(body.id, enabled);
-    recordActivity({
-      clientId: "admin",
-      method: "admin/skills",
-      toolName: body.id,
-      ok: true,
-      summary: `${enabled ? "Enabled" : "Disabled"} skill ${body.id}.`
-    });
-    res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Skill toggle failed.";
-    res.status(400).send(message);
-  }
-});
-
-app.post("/admin/special-tools/visible-browser/enable", (req, res) => {
-  if (!requireAdmin(req, res)) return;
-  const body = req.body as Partial<Record<string, string>>;
-  try {
-    const durationMinutes = Number.parseInt(body.durationMinutes ?? "15", 10);
-    const state = enableVisibleBrowserControl(durationMinutes, "admin");
-    recordActivity({
-      clientId: "admin",
-      method: "admin/special-tools",
-      toolName: "visible_browser_control",
-      ok: true,
-      summary: `Enabled visible browser control until ${state.enabledUntil}.`
-    });
-    res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Special tool enable failed.";
-    res.status(400).send(message);
-  }
-});
-
-app.post("/admin/special-tools/visible-browser/disable", async (req, res) => {
-  if (!requireAdmin(req, res)) return;
-  try {
-    disableVisibleBrowserControl("admin-disabled");
-    const closed = await closeAllBrowserSessions();
-    recordActivity({
-      clientId: "admin",
-      method: "admin/special-tools",
-      toolName: "visible_browser_control",
-      ok: true,
-      summary: `Disabled visible browser control. Closed ${closed.length} browser session(s).`
-    });
-    res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Special tool disable failed.";
-    res.status(400).send(message);
-  }
-});
-
-app.post("/admin/special-tools/visible-browser/kill", async (req, res) => {
-  if (!requireAdmin(req, res)) return;
-  try {
-    disableVisibleBrowserControl("admin-kill");
-    const closed = await closeAllBrowserSessions();
-    recordActivity({
-      clientId: "admin",
-      method: "admin/special-tools",
-      toolName: "visible_browser_control",
-      ok: true,
-      summary: `Killed visible browser control. Closed ${closed.length} browser session(s).`
-    });
-    res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Special tool kill failed.";
-    res.status(400).send(message);
-  }
-});
-
-app.post("/admin/connectors/revoke", (req, res) => {
-  if (!requireAdmin(req, res)) return;
-  const body = req.body as Partial<Record<string, string>>;
-  try {
-    if (!body.clientId) throw new Error("Missing clientId.");
-    revokeClient(body.clientId);
-    res.redirect(303, `/admin?token=${encodeURIComponent(adminPasscode)}`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Connector revoke failed.";
-    res.status(400).send(message);
   }
 });
 
@@ -648,6 +425,8 @@ app.get("/artifact/:artifactId/:filename(*)", async (req, res) => {
   }
 });
 
-app.listen(port, host, () => {
-  console.log(`coding-mcp-chatgpt listening on http://${host}:${port}`);
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  app.listen(port, host, () => {
+    console.log(`coding-mcp-chatgpt listening on http://${host}:${port}`);
+  });
+}

@@ -81,6 +81,8 @@ http://127.0.0.1:6859/admin
 
 - 优先使用 `ADMIN_PASSCODE`
 - 未设置时使用 `KB_MCP_OAUTH_PASSCODE`
+- `ADMIN_COOKIE_SECURE` 控制 Admin session cookie 的 `Secure` 属性：默认 `auto`，HTTPS 请求或 `X-Forwarded-Proto: https` 会启用；本地 HTTP 不启用。可设置为 `true` 或 `false` 强制覆盖。
+- Admin 登录有单进程内存失败限流；多实例或公网部署仍应在反代/WAF 层对 `/admin/api/session` 加限流。
 
 ## 可观测性
 

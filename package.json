@@ -2,13 +2,16 @@
   "name": "coding-mcp-chatgpt",
   "version": "0.1.0",
   "description": "Minimal ChatGPT-compatible coding MCP server with preview links.",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc",
+    "build": "npm run build:server && npm run build:admin",
+    "build:server": "tsc",
+    "build:admin": "tsc -p admin-ui/tsconfig.json --noEmit && vite build --config admin-ui/vite.config.ts",
     "start": "node dist/server.js",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p admin-ui/tsconfig.json --noEmit",
     "test": "npm run typecheck && tsx --test tests/*.test.ts",
     "check:mcp": "npm run build && node scripts/check-mcp-registry.mjs",
     "docker:build": "docker compose build",
@@ -22,23 +25,29 @@
     "chrome-launcher": "^1.2.1",
     "express": "^4.19.2",
     "lighthouse": "^13.4.0",
+    "lucide-react": "^1.20.0",
+    "mp4-muxer": "^5.2.2",
     "playwright": "^1.61.0",
     "pptxgenjs": "^4.0.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
     "reveal.js": "^6.0.1",
     "three": "^0.184.0",
     "yaml": "^2.9.0",
-    "zod": "^3.23.8",
-    "mp4-muxer": "^5.2.2"
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/archiver": "^8.0.0",
     "@types/express": "^4.17.21",
     "@types/node": "^22.10.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vite": "^8.0.16"
   },
   "engines": {
     "node": ">=20"
-  },
-  "license": "MIT"
+  }
 }
