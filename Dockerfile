@@ -24,6 +24,7 @@ ENV NODE_ENV=production \
     PROJECT_ROOT=/data/projects \
     SKILL_STATE_PATH=/data/state/skill-state.json \
     SITE_STATE_PATH=/data/state/site-state.json \
+    BLOG_STATE_PATH=/data/state/blog-state.json \
     OAUTH_STATE_PATH=/data/state/oauth-state.json \
     COMMAND_TIMEOUT_MS=30000
 

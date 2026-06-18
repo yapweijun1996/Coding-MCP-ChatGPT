@@ -138,7 +138,12 @@ Use this skill to discover the available workspace/project context before taking
       "create_video_presentation",
       "set_homepage",
       "clear_homepage",
-      "get_homepage"
+      "get_homepage",
+      "publish_blog_post",
+      "list_blog_posts",
+      "get_blog_post",
+      "delete_blog_post",
+      "set_blog_theme"
     ],
     protocolMarkdown: `# Coding Delivery
 

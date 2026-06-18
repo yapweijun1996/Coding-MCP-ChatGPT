@@ -38,6 +38,8 @@ import {
   readProjectFile,
 } from "./projects/store.js";
 import { readShareArtifact } from "./share/store.js";
+import { getBlogPostBySlug, getBlogTheme, initializeBlogStore, listBlogPosts } from "./blog/store.js";
+import { renderBlogIndex, renderBlogPost } from "./blog/render.js";
 import { getHomepage, initializeSiteState } from "./site/store.js";
 import { initializeSkillState } from "./skills/state.js";
 import {
@@ -50,6 +52,7 @@ import { getToolAccess, isToolEffectivelyEnabled, listEffectiveToolStates } from
 import {
   getAllProjectRoots,
   getProjectRootForUser,
+  getWorkspaceRootForUser,
   getPublicShareBasePathForUser,
   getSession as getUserSession,
   getUserByEmail,
@@ -79,6 +82,7 @@ const usersRoot = process.env.USERS_ROOT ?? `${workspaceRoot}/.users`;
 const userStatePath = process.env.USER_STATE_PATH ?? `${workspaceRoot}/.state/users-state.json`;
 const skillStatePath = process.env.SKILL_STATE_PATH ?? `${workspaceRoot}/.state/skill-state.json`;
 const siteStatePath = process.env.SITE_STATE_PATH ?? `${workspaceRoot}/.state/site-state.json`;
+const blogStatePath = process.env.BLOG_STATE_PATH ?? `${workspaceRoot}/.state/blog-state.json`;
 const commandTimeoutMs = Number.parseInt(process.env.COMMAND_TIMEOUT_MS ?? "30000", 10);
 const devToken = process.env.MCP_DEV_TOKEN;
 const adminPasscode = process.env.ADMIN_PASSCODE ?? process.env.KB_MCP_OAUTH_PASSCODE ?? "";
@@ -92,6 +96,7 @@ const oauthConfig: OAuthConfig = {
 initializeOAuthState(oauthConfig.statePath);
 initializeSkillState(skillStatePath);
 initializeSiteState(siteStatePath);
+await initializeBlogStore({ databaseUrl: process.env.DATABASE_URL, statePath: blogStatePath });
 await initializeUserStore({
   databaseUrl: process.env.DATABASE_URL,
   statePath: userStatePath,
@@ -118,6 +123,15 @@ function jsonRpcError(id: JsonRpcRequest["id"], code: number, message: string): 
   return { jsonrpc: "2.0", id: id ?? null, error: { code, message } };
 }
 
+// Express 4 does not catch rejections from async route handlers — an unhandled
+// rejection there hangs the request and (without a process guard) can crash the
+// process. Wrap async handlers so any rejection is forwarded to the error middleware.
+function asyncRoute(handler: express.RequestHandler): express.RequestHandler {
+  return (req, res, next) => {
+    Promise.resolve(handler(req, res, next)).catch(next);
+  };
+}
+
 function getBearerToken(header: string | undefined): string | undefined {
   if (!header) return undefined;
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
@@ -128,6 +142,7 @@ interface McpAuth {
   clientId: string;
   userId?: string;
   projectRoot: string;
+  workspaceRoot: string;
   publicShareBasePath?: string;
 }
 
@@ -150,12 +165,15 @@ async function requireMcpAuth(req: express.Request, res: express.Response): Prom
         clientId,
         userId,
         projectRoot: await getProjectRootForUser(userId),
+        workspaceRoot: await getWorkspaceRootForUser(userId),
         publicShareBasePath: getPublicShareBasePathForUser(user)
       };
     }
-    return { clientId, projectRoot };
+    // Legacy token without a bound user: falls back to the global roots. These clients
+    // are migrated to the legacy user on startup, so this path is an edge case only.
+    return { clientId, projectRoot, workspaceRoot };
   }
-  if (devToken && token === devToken) return { clientId: "dev-token", projectRoot };
+  if (devToken && token === devToken) return { clientId: "dev-token", projectRoot, workspaceRoot };
 
   res
     .status(401)
@@ -282,10 +300,10 @@ function renderDefaultLanding(): string {
 </html>`;
 }
 
-app.get("/", async (_req, res) => {
+app.get("/", asyncRoute(async (_req, res) => {
   if (await serveHomepageFile(res)) return;
   res.type("html").send(renderDefaultLanding());
-});
+}));
 
 app.get("/health", (_req, res) => {
   res.json({
@@ -351,7 +369,7 @@ function isValidCsrfToken(supplied: string, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-app.get("/authorize", async (req, res) => {
+app.get("/authorize", asyncRoute(async (req, res) => {
   const params = parseAuthorizeParams(req);
   if (!params) {
     res.status(400).send("Invalid authorization request.");
@@ -366,9 +384,9 @@ app.get("/authorize", async (req, res) => {
   const validation = validateAuthorizeRequest(params);
   const switchAccountUrl = `/admin/login?next=${encodeURIComponent(req.originalUrl)}`;
   res.type("html").send(renderConsentPage(params, validation, { email: session.user.email, role: session.user.role }, switchAccountUrl, session.session.csrfToken));
-});
+}));
 
-app.post("/oauth/approve", async (req, res) => {
+app.post("/oauth/approve", asyncRoute(async (req, res) => {
   const session = await getUserSession(readSessionIdFromRequest(req));
   if (!session) {
     res.redirect(302, `/admin/login?next=${encodeURIComponent("/authorize")}`);
@@ -405,7 +423,7 @@ app.post("/oauth/approve", async (req, res) => {
     const switchAccountUrl = `/admin/login?next=${encodeURIComponent("/authorize")}`;
     res.status(400).type("html").send(renderConsentPage(params, message, { email: session.user.email, role: session.user.role }, switchAccountUrl, session.session.csrfToken));
   }
-});
+}));
 
 app.post("/token", (req, res) => {
   try {
@@ -430,7 +448,7 @@ app.post("/revoke", (req, res) => {
   res.status(200).json({ ok: true });
 });
 
-app.post("/mcp", async (req, res) => {
+app.post("/mcp", asyncRoute(async (req, res) => {
   const auth = await requireMcpAuth(req, res);
   if (!auth) return;
   const { clientId, userId } = auth;
@@ -490,7 +508,7 @@ app.post("/mcp", async (req, res) => {
 
     const result = await callTool(name, params.arguments ?? {}, {
       publicBaseUrl,
-      workspaceRoot,
+      workspaceRoot: auth.workspaceRoot,
       commandTimeoutMs,
       shareRoot,
       artifactRoot,
@@ -506,7 +524,7 @@ app.post("/mcp", async (req, res) => {
 
   recordActivity({ userId, clientId, method: request.method, ok: false, summary: "Method not found." });
   res.json(jsonRpcError(request.id, -32601, `Method not found: ${request.method}`));
-});
+}));
 
 registerAdminApi(app, {
   adminPasscode,
@@ -534,7 +552,7 @@ app.get(/^\/admin(?:\/.*)?$/, (req, res, next) => {
   });
 });
 
-app.get(["/share", "/share/"], async (req, res) => {
+app.get(["/share", "/share/"], asyncRoute(async (req, res) => {
   try {
     const roots = await getAllProjectRoots();
     const projects = (await Promise.all(roots.map((root) => listProjects(root, false).catch(() => [])))).flat().filter((project) => project.status === "published");
@@ -546,7 +564,7 @@ app.get(["/share", "/share/"], async (req, res) => {
   } catch {
     res.status(500).type("text/plain").send("Unable to load public share index.");
   }
-});
+}));
 
 app.get("/outcome/:jobId", (req, res) => {
   const job = getJob(req.params.jobId);
@@ -558,7 +576,7 @@ app.get("/outcome/:jobId", (req, res) => {
   res.type("html").send(renderPreviewPage(job));
 });
 
-app.get("/@:username", async (req, res) => {
+app.get("/@:username", asyncRoute(async (req, res) => {
   try {
     const user = await getUserByUsername(req.params.username);
     if (!user?.username || !user.publicShareUsernameEnabled || !user.projectRoot) {
@@ -574,9 +592,9 @@ app.get("/@:username", async (req, res) => {
   } catch {
     res.status(404).type("text/plain").send("Public profile not found.");
   }
-});
+}));
 
-app.get("/@:username/share/:shareId/:filename(*)", async (req, res) => {
+app.get("/@:username/share/:shareId/:filename(*)", asyncRoute(async (req, res) => {
   try {
     const user = await getUserByUsername(req.params.username);
     if (!user?.username || !user.publicShareUsernameEnabled || !user.projectRoot) {
@@ -589,9 +607,9 @@ app.get("/@:username/share/:shareId/:filename(*)", async (req, res) => {
     // Fall through to 404.
   }
   if (!res.headersSent) res.status(404).type("text/plain").send("Share not found.");
-});
+}));
 
-app.get("/share/:shareId/:filename(*)", async (req, res) => {
+app.get("/share/:shareId/:filename(*)", asyncRoute(async (req, res) => {
   try {
     for (const root of await getAllProjectRoots()) {
       try {
@@ -614,9 +632,9 @@ app.get("/share/:shareId/:filename(*)", async (req, res) => {
   }
   res.setHeader("Content-Security-Policy", "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; base-uri 'none'; form-action 'self';");
   res.type("html").send(artifact.html);
-});
+}));
 
-app.get("/artifact/:artifactId/:filename(*)", async (req, res) => {
+app.get("/artifact/:artifactId/:filename(*)", asyncRoute(async (req, res) => {
   try {
     const artifact = await readArtifact(artifactRoot, req.params.artifactId, req.params.filename);
     if (!artifact) {
@@ -627,17 +645,78 @@ app.get("/artifact/:artifactId/:filename(*)", async (req, res) => {
   } catch {
     res.status(404).type("text/plain").send("Artifact not found.");
   }
-});
+}));
+
+const blogCsp = "default-src 'self' 'unsafe-inline' data: https:; base-uri 'none'; form-action 'self';";
+
+app.get(["/blog", "/blog/"], asyncRoute(async (_req, res) => {
+  const [posts, theme] = await Promise.all([listBlogPosts({ status: "published" }), getBlogTheme()]);
+  res.setHeader("Content-Security-Policy", blogCsp);
+  res.type("html").send(renderBlogIndex(posts, theme));
+}));
+
+app.get("/blog/:slug", asyncRoute(async (req, res) => {
+  const post = await getBlogPostBySlug(req.params.slug);
+  if (!post || post.status !== "published") {
+    res.status(404).type("text/plain").send("Post not found.");
+    return;
+  }
+  const theme = await getBlogTheme();
+  res.setHeader("Content-Security-Policy", blogCsp);
+  res.type("html").send(renderBlogPost(post, theme));
+}));
 
 // Fallback: serve root-level assets of the homepage project (e.g. /styles.css, /assets/app.js).
 // Registered last so it never shadows a named route; falls through to 404 when no homepage is set.
-app.get("/:asset(*)", async (req, res) => {
+app.get("/:asset(*)", asyncRoute(async (req, res) => {
   if (await serveHomepageFile(res, req.params.asset)) return;
   res.status(404).type("text/plain").send("Not found.");
+}));
+
+// Terminal error middleware. Registered last so it catches anything forwarded by
+// asyncRoute (or thrown synchronously) instead of letting the request hang.
+app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error(`Request failed: ${req.method} ${req.originalUrl}`, error);
+  if (res.headersSent) return;
+  if (req.path === "/mcp") {
+    res.status(500).json(jsonRpcError(null, -32603, "Internal server error."));
+    return;
+  }
+  res.status(500).type("text/plain").send("Internal server error.");
 });
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  app.listen(port, host, () => {
+  // Last-resort guards. An unhandled rejection is usually a missed catch in one
+  // request — log it and keep serving. An uncaught exception leaves process state
+  // undefined (half-mutated stores, leaked handles), so log and exit; PM2
+  // (autorestart: true in ecosystem.config.cjs) brings a clean process back.
+  process.on("unhandledRejection", (reason) => {
+    console.error("Unhandled promise rejection:", reason);
+  });
+  process.on("uncaughtException", (error) => {
+    console.error("Uncaught exception, exiting for a clean restart:", error);
+    process.exit(1);
+  });
+
+  const server = app.listen(port, host, () => {
     console.log(`coding-mcp-chatgpt listening on http://${host}:${port}`);
   });
+
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`Received ${signal}, shutting down gracefully...`);
+    server.close(() => console.log("HTTP server closed."));
+    try {
+      const closed = await closeAllBrowserSessions();
+      if (closed.length) console.log(`Closed ${closed.length} browser session(s).`);
+    } catch (error) {
+      console.error("Error while closing browser sessions:", error);
+    }
+    // Give the server a moment to drain, then exit.
+    setTimeout(() => process.exit(0), 1000).unref();
+  };
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
 }
