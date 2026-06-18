@@ -17,7 +17,7 @@ import {
   setProjectStatus
 } from "./projects/store.js";
 import { getResearchSummary } from "./research/store.js";
-import { deleteBlogPost, getBlogTheme, listBlogPosts, setBlogTheme } from "./blog/store.js";
+import { deleteBlogPost, getBlogPostBySlug, getBlogTheme, listBlogPosts, setBlogTheme, upsertBlogPost } from "./blog/store.js";
 import { clearHomepage, getHomepage, setHomepage } from "./site/store.js";
 import type { SkillState } from "./skills/state.js";
 import { listSkillStates, setSkillEnabled } from "./skills/state.js";
@@ -646,6 +646,46 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     if (!requireAdmin(user, res)) return;
     const posts = await listBlogPosts();
     ok(res, { posts: posts.map((post) => ({ slug: post.slug, title: post.title, status: post.status, tags: post.tags, publishedAt: post.publishedAt, updatedAt: post.updatedAt })) });
+  }));
+
+  api.get("/blog/posts/:slug", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    const post = await getBlogPostBySlug(req.params.slug);
+    if (!post) { fail(res, 404, "Blog post not found."); return; }
+    ok(res, { post });
+  }));
+
+  api.post("/blog/posts", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    const body = readBody(req);
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    const content = typeof body.content === "string" ? body.content : "";
+    if (!title) { fail(res, 400, "Title is required."); return; }
+    if (!content) { fail(res, 400, "Content is required."); return; }
+    const tags = Array.isArray(body.tags)
+      ? body.tags.filter((tag): tag is string => typeof tag === "string")
+      : typeof body.tags === "string"
+        ? body.tags.split(",").map((tag) => tag.trim()).filter(Boolean)
+        : undefined;
+    try {
+      const post = await upsertBlogPost({
+        title,
+        content,
+        slug: typeof body.slug === "string" && body.slug.trim() ? body.slug.trim() : undefined,
+        excerpt: typeof body.excerpt === "string" ? body.excerpt : undefined,
+        coverImageUrl: typeof body.coverImageUrl === "string" ? body.coverImageUrl : undefined,
+        seoDescription: typeof body.seoDescription === "string" ? body.seoDescription : undefined,
+        tags,
+        status: body.status === "draft" ? "draft" : "published",
+        authorUserId: user.id
+      });
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/blog/upsert", toolName: post.slug, ok: true, summary: `Saved blog post ${post.slug}.` });
+      ok(res, { post });
+    } catch (error) {
+      fail(res, 400, error instanceof Error ? error.message : "Failed to save blog post.");
+    }
   }));
 
   api.delete("/blog/posts/:slug", asyncRoute(async (req, res) => {

@@ -618,11 +618,17 @@ function ProjectDetailPage({ projectId, setConfirm, toast }: { projectId: string
 
 type BlogPostRow = { slug: string; title: string; status: "draft" | "published"; tags: string[]; publishedAt: string | null; updatedAt: string };
 type BlogThemeForm = { title: string; css: string; headerHtml: string; footerHtml: string };
+type BlogEditor = { originalSlug: string | null; title: string; slug: string; content: string; excerpt: string; tags: string; status: "draft" | "published"; seoDescription: string; coverImageUrl: string };
+type BlogPostFull = { slug: string; title: string; content: string; excerpt: string; tags: string[]; status: "draft" | "published"; seoDescription: string | null; coverImageUrl: string | null };
+
+const emptyEditor: BlogEditor = { originalSlug: null, title: "", slug: "", content: "", excerpt: "", tags: "", status: "published", seoDescription: "", coverImageUrl: "" };
 
 function BlogPage({ setConfirm, toast, isAdmin }: { setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void; isAdmin: boolean }) {
   const [posts, setPosts] = useState<BlogPostRow[]>();
   const [theme, setTheme] = useState<BlogThemeForm>({ title: "", css: "", headerHtml: "", footerHtml: "" });
   const [error, setError] = useState("");
+  const [editor, setEditor] = useState<BlogEditor | null>(null);
+  const [saving, setSaving] = useState(false);
   const reload = useCallback(() => {
     api<{ posts: BlogPostRow[] }>("/blog/posts").then((result) => setPosts(result.posts)).catch((err: unknown) => setError(err instanceof Error ? err.message : "Unable to load posts."));
     api<{ theme: BlogThemeForm }>("/blog/theme").then((result) => setTheme(result.theme)).catch(() => undefined);
@@ -640,13 +646,58 @@ function BlogPage({ setConfirm, toast, isAdmin }: { setConfirm: (state: ConfirmS
     }
   };
 
+  const editPost = async (slug: string) => {
+    try {
+      const { post } = await api<{ post: BlogPostFull }>(`/blog/posts/${encodeURIComponent(slug)}`);
+      setEditor({ originalSlug: post.slug, title: post.title, slug: post.slug, content: post.content, excerpt: post.excerpt ?? "", tags: post.tags.join(", "), status: post.status, seoDescription: post.seoDescription ?? "", coverImageUrl: post.coverImageUrl ?? "" });
+    } catch (err) {
+      toast("error", err instanceof Error ? err.message : "Failed to load post.");
+    }
+  };
+
+  const savePost = async () => {
+    if (!editor) return;
+    if (!editor.title.trim() || !editor.content.trim()) { toast("error", "Title and content are required."); return; }
+    setSaving(true);
+    try {
+      await api("/blog/posts", { method: "POST", body: JSON.stringify({
+        title: editor.title, content: editor.content, slug: editor.slug.trim() || undefined,
+        excerpt: editor.excerpt, tags: editor.tags, status: editor.status,
+        seoDescription: editor.seoDescription, coverImageUrl: editor.coverImageUrl || undefined
+      }) });
+      toast("success", editor.originalSlug ? "Post updated." : "Post created.");
+      setEditor(null);
+      reload();
+    } catch (err) {
+      toast("error", err instanceof Error ? err.message : "Failed to save post.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <>
       <section className="panel">
-        <PanelTitle title="Blog posts" action={<a className="button subtle" href="/blog/" target="_blank" rel="noreferrer"><ExternalLink size={16} /> View blog</a>} />
+        <PanelTitle title="Blog posts" action={<div className="row-actions"><button className="button primary" type="button" onClick={() => setEditor({ ...emptyEditor })}>New post</button><a className="button subtle" href="/blog/" target="_blank" rel="noreferrer"><ExternalLink size={16} /> View blog</a></div>} />
+        {editor && (
+          <div className="settings-form" style={{ marginBottom: "20px", paddingBottom: "20px", borderBottom: "1px solid var(--border, #e3e8e2)" }}>
+            <strong>{editor.originalSlug ? `Editing "${editor.originalSlug}"` : "New post"}</strong>
+            <label>Title<input value={editor.title} onChange={(event) => setEditor((c) => c && ({ ...c, title: event.target.value }))} placeholder="Post title" /></label>
+            <label>Slug (optional)<input value={editor.slug} onChange={(event) => setEditor((c) => c && ({ ...c, slug: event.target.value }))} placeholder="auto-generated from title" /></label>
+            <label>Content (Markdown)<textarea rows={12} value={editor.content} onChange={(event) => setEditor((c) => c && ({ ...c, content: event.target.value }))} placeholder="# Heading&#10;&#10;Body in **Markdown**." /></label>
+            <label>Excerpt<textarea rows={2} value={editor.excerpt} onChange={(event) => setEditor((c) => c && ({ ...c, excerpt: event.target.value }))} placeholder="Short summary for the index" /></label>
+            <label>Tags (comma-separated)<input value={editor.tags} onChange={(event) => setEditor((c) => c && ({ ...c, tags: event.target.value }))} placeholder="news, product" /></label>
+            <label>SEO description<input value={editor.seoDescription} onChange={(event) => setEditor((c) => c && ({ ...c, seoDescription: event.target.value }))} placeholder="Meta description" /></label>
+            <label>Status<select value={editor.status} onChange={(event) => setEditor((c) => c && ({ ...c, status: event.target.value === "draft" ? "draft" : "published" }))}><option value="published">Published</option><option value="draft">Draft</option></select></label>
+            <div className="row-actions">
+              <button className="button primary" type="button" disabled={saving} onClick={savePost}>{saving ? "Saving..." : "Save post"}</button>
+              <button className="button subtle" type="button" onClick={() => setEditor(null)}>Cancel</button>
+            </div>
+          </div>
+        )}
         {error && <EmptyState title="Blog unavailable" body={error} />}
         {!error && !posts && <div className="table-loader">Loading posts...</div>}
-        {posts && posts.length === 0 && <EmptyState title="No posts yet" body="Ask the assistant to write a post with publish_blog_post, or it will appear here." />}
+        {posts && posts.length === 0 && <EmptyState title="No posts yet" body="Click New post to write one here, or ask the assistant to publish one." />}
         {posts && posts.length > 0 && (
           <div className="table-wrap"><table><thead><tr><th>Title</th><th>Slug</th><th>Status</th><th>Tags</th><th>Updated</th><th>Actions</th></tr></thead><tbody>
             {posts.map((post) => <tr key={post.slug}>
@@ -657,6 +708,7 @@ function BlogPage({ setConfirm, toast, isAdmin }: { setConfirm: (state: ConfirmS
               <td data-label="Updated">{fmtDate(post.updatedAt)}</td>
               <td data-label="Actions"><div className="row-actions">
                 {post.status === "published" && <IconButton label="Open post" href={`/blog/${encodeURIComponent(post.slug)}`} tone="primary" target="_blank" rel="noreferrer"><ExternalLink size={18} /></IconButton>}
+                <IconButton label="Edit post" onClick={() => editPost(post.slug)}><Eye size={18} /></IconButton>
                 <IconButton label="Delete post" tone="danger" onClick={() => setConfirm({ title: "Delete post", body: `Delete "${post.title}". This cannot be undone.`, confirmLabel: "Delete", tone: "danger", onConfirm: async () => { await api(`/blog/posts/${encodeURIComponent(post.slug)}`, { method: "DELETE" }); toast("success", "Post deleted."); reload(); } })}><Trash2 size={18} /></IconButton>
               </div></td>
             </tr>)}

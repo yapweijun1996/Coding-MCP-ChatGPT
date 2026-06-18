@@ -165,3 +165,37 @@ test("admin API lists, deletes blog posts and saves the theme", async () => {
     assert.ok(!after.posts.some((post) => post.slug === "admin-managed"));
   });
 });
+
+test("admin API creates and edits blog posts (CRUD)", async () => {
+  await initializeBlogStore({ statePath: process.env.BLOG_STATE_PATH! });
+  await withServer(async (baseUrl) => {
+    const login = await fetch(`${baseUrl}/admin/api/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: "admin@example.test", password: "test-admin-password" }) });
+    const cookie = login.headers.get("set-cookie")!.split(";")[0];
+    const csrf = (await login.json() as { csrfToken: string }).csrfToken;
+    const headers = { Cookie: cookie, "Content-Type": "application/json", "X-CSRF-Token": csrf };
+
+    // create requires CSRF
+    const noCsrf = await fetch(`${baseUrl}/admin/api/blog/posts`, { method: "POST", headers: { Cookie: cookie, "Content-Type": "application/json" }, body: JSON.stringify({ title: "T", content: "x" }) });
+    assert.equal(noCsrf.status, 403);
+
+    // create via admin UI path
+    const create = await fetch(`${baseUrl}/admin/api/blog/posts`, { method: "POST", headers, body: JSON.stringify({ title: "Admin Written", content: "# Hi\n\nFrom **admin**.", tags: "news, ops", status: "published" }) });
+    assert.equal(create.status, 200);
+    const created = (await create.json() as { post: { slug: string; tags: string[] } }).post;
+    assert.equal(created.slug, "admin-written");
+    assert.deepEqual(created.tags, ["news", "ops"]);
+
+    // fetch single (with content) for editing
+    const single = await (await fetch(`${baseUrl}/admin/api/blog/posts/admin-written`, { headers: { Cookie: cookie } })).json() as { post: { content: string } };
+    assert.match(single.post.content, /From \*\*admin\*\*/);
+
+    // edit (same slug) updates content
+    const edit = await fetch(`${baseUrl}/admin/api/blog/posts`, { method: "POST", headers, body: JSON.stringify({ title: "Admin Written", slug: "admin-written", content: "Updated body", status: "draft" }) });
+    assert.equal(edit.status, 200);
+    assert.equal((await edit.json() as { post: { status: string } }).post.status, "draft");
+
+    // missing title rejected
+    const bad = await fetch(`${baseUrl}/admin/api/blog/posts`, { method: "POST", headers, body: JSON.stringify({ content: "x" }) });
+    assert.equal(bad.status, 400);
+  });
+});
