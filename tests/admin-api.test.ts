@@ -148,6 +148,17 @@ test("profile username controls public username share URLs", async () => {
     assert.equal(namedShare.status, 200);
     assert.match(await namedShare.text(), /rel="canonical" href="https:\/\/example\.test\/@demo_user\/share\//);
 
+    // The per-user public index page (target of the admin "Public Index" link) lists the user's project.
+    const userIndex = await fetch(`${baseUrl}/@demo_user`);
+    assert.equal(userIndex.status, 200);
+    const userIndexHtml = await userIndex.text();
+    assert.ok(userIndexHtml.includes(project.id), "user index should list the published project");
+    assert.ok(userIndexHtml.includes(`/@demo_user/share/${project.id}`), "user index should link via the username share path");
+
+    // An unknown / not-public username index is 404.
+    const unknownIndex = await fetch(`${baseUrl}/@other_user`);
+    assert.equal(unknownIndex.status, 404);
+
     const legacyShare = await fetch(`${baseUrl}/share/${project.id}/index.html`);
     assert.equal(legacyShare.status, 200);
 
