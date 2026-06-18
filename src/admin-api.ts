@@ -742,7 +742,13 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
         username: readBodyString(req, "username"),
         publicShareUsernameEnabled: Boolean(readBody(req).publicShareUsernameEnabled)
       });
-      ok(res, { user: updated });
+      const projectRoot = await getProjectRootForUser(updated.id);
+      const shareBasePath = getPublicShareBasePathForUser(updated);
+      const publishedProjects = (await listProjects(projectRoot, true)).filter((project) => project.status === "published");
+      for (const project of publishedProjects) {
+        await setProjectStatus(projectRoot, project.id, "published", config.publicBaseUrl, { shareBasePath });
+      }
+      ok(res, { user: updated, updatedProjectCount: publishedProjects.length });
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Profile update failed.");
     }

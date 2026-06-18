@@ -113,6 +113,14 @@ test("profile username controls public username share URLs", async () => {
     const userProjectRoot = sessionBody.user?.projectRoot;
     assert.ok(userProjectRoot);
 
+    const project = await createProject(userProjectRoot, {
+      title: "Username Share Project",
+      createdByClientId: "test-client"
+    });
+    await writeProjectFile(userProjectRoot, project.id, "index.html", "<!doctype html><html><head><title>Named</title></head><body>Named</body></html>");
+    const initiallyPublished = await publishProject(userProjectRoot, project.id, "https://example.test", "index.html");
+    assert.equal(initiallyPublished.publishedUrl, `https://example.test/share/${project.id}/index.html`);
+
     const invalidProfile = await fetch(`${baseUrl}/admin/api/profile`, {
       method: "POST",
       headers: { Cookie: cookie, "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
@@ -126,17 +134,15 @@ test("profile username controls public username share URLs", async () => {
       body: JSON.stringify({ username: "demo_user", publicShareUsernameEnabled: true })
     });
     assert.equal(profile.status, 200);
-    const profileBody = await profile.json() as { user: { username?: string; publicShareUsernameEnabled: boolean } };
+    const profileBody = await profile.json() as { user: { username?: string; publicShareUsernameEnabled: boolean }; updatedProjectCount: number };
     assert.equal(profileBody.user.username, "demo_user");
     assert.equal(profileBody.user.publicShareUsernameEnabled, true);
+    assert.equal(profileBody.updatedProjectCount, 1);
 
-    const project = await createProject(userProjectRoot, {
-      title: "Username Share Project",
-      createdByClientId: "test-client"
-    });
-    await writeProjectFile(userProjectRoot, project.id, "index.html", "<!doctype html><html><head><title>Named</title></head><body>Named</body></html>");
-    const published = await publishProject(userProjectRoot, project.id, "https://example.test", "index.html", { shareBasePath: "/@demo_user/share" });
-    assert.equal(published.publishedUrl, `https://example.test/@demo_user/share/${project.id}/index.html`);
+    const projectDetail = await fetch(`${baseUrl}/admin/api/projects/${project.id}`, { headers: { Cookie: cookie } });
+    assert.equal(projectDetail.status, 200);
+    const projectDetailBody = await projectDetail.json() as { project: { publishedUrl?: string } };
+    assert.equal(projectDetailBody.project.publishedUrl, `https://example.test/@demo_user/share/${project.id}/index.html`);
 
     const namedShare = await fetch(`${baseUrl}/@demo_user/share/${project.id}/index.html`);
     assert.equal(namedShare.status, 200);
