@@ -1,5 +1,6 @@
 import express from "express";
 import path from "node:path";
+import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { recordActivity } from "./activity.js";
 import { readArtifact } from "./artifacts/store.js";
@@ -264,6 +265,39 @@ app.get("/.well-known/oauth-authorization-server", (_req, res) => {
   });
 });
 
+function appOrigin(): string {
+  try {
+    return new URL(publicBaseUrl).origin;
+  } catch {
+    return "";
+  }
+}
+
+function isSameOriginRequest(req: express.Request): boolean {
+  const expected = appOrigin();
+  const origin = req.header("origin");
+  if (origin) return origin === expected;
+  // Fall back to Referer when Origin is absent (older clients/proxies).
+  const referer = req.header("referer");
+  if (referer) {
+    try {
+      return new URL(referer).origin === expected;
+    } catch {
+      return false;
+    }
+  }
+  // No Origin and no Referer: cannot prove same-origin; the CSRF token check still applies.
+  return true;
+}
+
+function isValidCsrfToken(supplied: string, expected: string): boolean {
+  if (!supplied || !expected) return false;
+  const a = Buffer.from(supplied);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
 app.get("/authorize", async (req, res) => {
   const params = parseAuthorizeParams(req);
   if (!params) {
@@ -278,7 +312,7 @@ app.get("/authorize", async (req, res) => {
 
   const validation = validateAuthorizeRequest(params);
   const switchAccountUrl = `/admin/login?next=${encodeURIComponent(req.originalUrl)}`;
-  res.type("html").send(renderConsentPage(params, validation, { email: session.user.email, role: session.user.role }, switchAccountUrl));
+  res.type("html").send(renderConsentPage(params, validation, { email: session.user.email, role: session.user.role }, switchAccountUrl, session.session.csrfToken));
 });
 
 app.post("/oauth/approve", async (req, res) => {
@@ -287,7 +321,19 @@ app.post("/oauth/approve", async (req, res) => {
     res.redirect(302, `/admin/login?next=${encodeURIComponent("/authorize")}`);
     return;
   }
+  // Defense-in-depth: reject cross-origin POSTs. The session cookie is SameSite=Lax,
+  // but published content is served from this same origin, so also require an explicit
+  // per-session CSRF token. (Full isolation requires serving shares from a separate origin.)
+  if (!isSameOriginRequest(req)) {
+    res.status(403).type("text/plain").send("Cross-origin authorization is not allowed.");
+    return;
+  }
   const body = req.body as Partial<Record<string, string>>;
+  const suppliedCsrf = body.csrf_token ?? "";
+  if (!isValidCsrfToken(suppliedCsrf, session.session.csrfToken)) {
+    res.status(403).type("text/plain").send("Invalid or missing CSRF token.");
+    return;
+  }
   const params: AuthorizeParams = {
     responseType: body.responseType ?? body.response_type ?? "",
     clientId: body.clientId ?? body.client_id ?? "",
@@ -303,7 +349,8 @@ app.post("/oauth/approve", async (req, res) => {
     res.redirect(302, redirectUrl);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Authorization failed.";
-    res.status(400).type("html").send(renderConsentPage(params, message, { email: session.user.email, role: session.user.role }));
+    const switchAccountUrl = `/admin/login?next=${encodeURIComponent("/authorize")}`;
+    res.status(400).type("html").send(renderConsentPage(params, message, { email: session.user.email, role: session.user.role }, switchAccountUrl, session.session.csrfToken));
   }
 });
 

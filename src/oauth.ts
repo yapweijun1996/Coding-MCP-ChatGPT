@@ -262,7 +262,7 @@ export function validateAuthorizeRequest(params: AuthorizeParams): string | unde
   return undefined;
 }
 
-export function renderConsentPage(params: AuthorizeParams, error?: string, user?: { email: string; role: string }, switchAccountUrl?: string): string {
+export function renderConsentPage(params: AuthorizeParams, error?: string, user?: { email: string; role: string }, switchAccountUrl?: string, csrfToken?: string): string {
   const safe = (value: string | undefined): string => (value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -296,6 +296,7 @@ export function renderConsentPage(params: AuthorizeParams, error?: string, user?
     ${user ? `<div class="account"><strong>Signed in as ${safe(user.email)}</strong><p>This connector will be bound to this ${safe(user.role)} account.</p>${switchAccountUrl ? `<a href="${safe(switchAccountUrl)}">Switch account</a>` : ""}</div>` : ""}
     ${error ? `<p class="error">${safe(error)}</p>` : ""}
     <form method="post" action="/oauth/approve">
+      <input type="hidden" name="csrf_token" value="${safe(csrfToken)}">
       <input type="hidden" name="response_type" value="${safe(params.responseType)}">
       <input type="hidden" name="client_id" value="${safe(params.clientId)}">
       <input type="hidden" name="redirect_uri" value="${safe(params.redirectUri)}">
