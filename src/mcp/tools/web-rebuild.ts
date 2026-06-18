@@ -53,7 +53,7 @@ const generateImprovedStaticPageSchema = z.object({
 });
 
 function analysisPath(captureRoot: string, analysisId: string): string {
-  if (!/^[a-f0-9-]{36}$/.test(analysisId)) throw new Error("Invalid analysisId.");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(analysisId)) throw new Error("Invalid analysisId.");
   return path.join(captureRoot, `${analysisId}.analysis.json`);
 }
 

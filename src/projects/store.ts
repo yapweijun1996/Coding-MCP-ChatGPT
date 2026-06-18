@@ -285,8 +285,17 @@ function normalizeProjectMetadata(metadata: ProjectMetadata): ProjectMetadata {
 
 async function readProjectMetadata(projectRoot: string, projectId: string): Promise<ProjectMetadata> {
   const raw = await readFile(getProjectMetadataPath(projectRoot, projectId), "utf8");
-  const parsed = JSON.parse(raw) as ProjectMetadata;
-  return normalizeProjectMetadata(parsed);
+  const parsed = JSON.parse(raw);
+  if (
+    !parsed || typeof parsed !== "object"
+    || typeof parsed.id !== "string"
+    || typeof parsed.title !== "string"
+    || typeof parsed.status !== "string"
+    || typeof parsed.entryFile !== "string"
+  ) {
+    throw new Error(`Project metadata for ${projectId} is invalid or corrupted.`);
+  }
+  return normalizeProjectMetadata(parsed as ProjectMetadata);
 }
 
 async function writeProjectMetadata(projectRoot: string, metadata: ProjectMetadata): Promise<void> {

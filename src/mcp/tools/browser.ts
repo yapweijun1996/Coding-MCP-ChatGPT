@@ -23,6 +23,7 @@ export interface BrowserSession {
 }
 
 const MAX_SESSION_CONSOLE_LOGS = 400;
+const MAX_BROWSER_SESSIONS = 10;
 
 function pushBounded<T>(array: T[], value: T, max: number): void {
   array.push(value);
@@ -208,6 +209,9 @@ export const browserTools: ToolModule[] = [
     schema: openBrowserSessionSchema,
   handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof openBrowserSessionSchema>;
+      if (browserSessions.size >= MAX_BROWSER_SESSIONS) {
+        return { ok: false, summary: "Browser session limit reached. Close an existing session before opening a new one.", artifacts: [], logs: [], errors: ["Too many open browser sessions."] };
+      }
       const id = randomUUID();
       const { chromium } = await import("playwright");
       const browser = await chromium.launch({

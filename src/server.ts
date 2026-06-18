@@ -512,6 +512,7 @@ app.get("/share/:shareId/:filename(*)", async (req, res) => {
     res.status(404).type("text/plain").send("Share not found.");
     return;
   }
+  res.setHeader("Content-Security-Policy", "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; base-uri 'none'; form-action 'self';");
   res.type("html").send(artifact.html);
 });
 

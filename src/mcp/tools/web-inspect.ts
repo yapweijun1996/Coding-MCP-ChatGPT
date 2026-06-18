@@ -276,6 +276,7 @@ function setupNetworkCapture(page: Page, slowRequestMs: number, maxIssues: numbe
   const summary: NetworkSummary = { failedRequests: [], slowRequests: [], statusGroups: {}, assetFailures: [] };
   page.on("request", (request) => started.set(request, Date.now()));
   page.on("requestfailed", (request) => {
+    started.delete(request);
     if (summary.failedRequests.length < maxIssues) summary.failedRequests.push({ url: request.url(), method: request.method(), failure: request.failure()?.errorText ?? "request failed" });
     const type = request.resourceType();
     if (["image", "stylesheet", "script", "font"].includes(type) && summary.assetFailures.length < maxIssues) summary.assetFailures.push({ url: request.url(), resourceType: type, failure: request.failure()?.errorText });
@@ -286,6 +287,7 @@ function setupNetworkCapture(page: Page, slowRequestMs: number, maxIssues: numbe
     summary.statusGroups[group] = (summary.statusGroups[group] ?? 0) + 1;
     const request = response.request();
     const durationMs = Date.now() - (started.get(request) ?? Date.now());
+    started.delete(request);
     if (durationMs >= slowRequestMs && summary.slowRequests.length < maxIssues) summary.slowRequests.push({ url: response.url(), method: request.method(), durationMs, status });
     const type = request.resourceType();
     if (status >= 400 && ["image", "stylesheet", "script", "font"].includes(type) && summary.assetFailures.length < maxIssues) {

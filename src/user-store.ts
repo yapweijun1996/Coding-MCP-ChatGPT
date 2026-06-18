@@ -437,7 +437,7 @@ export async function registerUser(email: string, password: string): Promise<Pub
   const settings = await getRegistrationSettings();
   if (!settings.allowRegistration) throw new Error("Registration is disabled.");
   const normalized = normalizeEmail(email);
-  if (!normalized || !normalized.includes("@")) throw new Error("A valid email is required.");
+  if (!normalized || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) throw new Error("A valid email is required.");
   if (password.length < 8) throw new Error("Password must be at least 8 characters.");
   if (settings.allowedEmailDomains.length > 0) {
     const domain = normalized.split("@")[1] ?? "";

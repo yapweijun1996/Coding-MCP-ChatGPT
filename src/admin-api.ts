@@ -701,7 +701,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     try {
       const user = res.locals.currentUser as PublicUser;
       if (!requireAdmin(user, res)) return;
-      const enabled = Boolean(readBody(req).enabled);
+      const enabled = readBody(req).enabled === true;
       setSkillEnabled(req.params.id, enabled);
       recordActivity({ userId: user.id, clientId: "admin", method: "admin/skills", toolName: req.params.id, ok: true, summary: `${enabled ? "Enabled" : "Disabled"} skill ${req.params.id}.` });
       ok(res, { skills: shapeSkills(listSkillStates()) });
@@ -720,7 +720,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     try {
       const user = res.locals.currentUser as PublicUser;
       if (!requireAdmin(user, res)) return;
-      const enabled = Boolean(readBody(req).enabled);
+      const enabled = readBody(req).enabled === true;
       if (isVisibleBrowserToolName(req.params.name)) throw new Error("Browser control tools are managed from Special Tools.");
       setToolEnabled(req.params.name, enabled);
       recordActivity({ userId: user.id, clientId: "admin", method: "admin/tools", toolName: req.params.name, ok: true, summary: `${enabled ? "Enabled" : "Disabled"} tool override ${req.params.name}.` });
