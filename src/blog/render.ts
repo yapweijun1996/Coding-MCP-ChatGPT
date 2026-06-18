@@ -39,6 +39,7 @@ function shell(theme: BlogTheme, bodyInner: string, pageTitle: string, metaDescr
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(pageTitle)}</title>
 ${metaDescription ? `<meta name="description" content="${escapeHtml(metaDescription)}">` : ""}
+<link rel="alternate" type="application/rss+xml" title="${title}" href="/blog/rss.xml">
 <style>${baseCss}\n${theme.css || ""}</style>
 </head>
 <body>
@@ -61,6 +62,40 @@ export function renderBlogIndex(posts: BlogPost[], theme: BlogTheme): string {
         ${post.excerpt ? `<p class="post-excerpt">${escapeHtml(post.excerpt)}</p>` : ""}
       </article>`).join("");
   return shell(theme, cards, theme.title || "Blog");
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+export function renderBlogRss(posts: BlogPost[], theme: BlogTheme, baseUrl: string): string {
+  const root = baseUrl.replace(/\/$/, "");
+  const title = escapeXml(theme.title || "Blog");
+  const items = posts.map((post) => {
+    const link = `${root}/blog/${encodeURIComponent(post.slug)}`;
+    const pubDate = new Date(post.publishedAt ?? post.createdAt).toUTCString();
+    return `    <item>
+      <title>${escapeXml(post.title)}</title>
+      <link>${escapeXml(link)}</link>
+      <guid isPermaLink="true">${escapeXml(link)}</guid>
+      <pubDate>${escapeXml(pubDate)}</pubDate>
+      ${post.excerpt ? `<description>${escapeXml(post.excerpt)}</description>` : ""}
+    </item>`;
+  }).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>${title}</title>
+    <link>${escapeXml(`${root}/blog/`)}</link>
+    <description>${title}</description>
+${items}
+  </channel>
+</rss>`;
 }
 
 export function renderBlogPost(post: BlogPost, theme: BlogTheme): string {

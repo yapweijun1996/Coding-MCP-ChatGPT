@@ -39,7 +39,7 @@ import {
 } from "./projects/store.js";
 import { readShareArtifact } from "./share/store.js";
 import { getBlogPostBySlug, getBlogTheme, initializeBlogStore, listBlogPosts } from "./blog/store.js";
-import { renderBlogIndex, renderBlogPost } from "./blog/render.js";
+import { renderBlogIndex, renderBlogPost, renderBlogRss } from "./blog/render.js";
 import { getHomepage, initializeSiteState } from "./site/store.js";
 import { initializeSkillState } from "./skills/state.js";
 import {
@@ -294,6 +294,7 @@ function renderDefaultLanding(): string {
     <h1>Coding MCP</h1>
     <p>No homepage has been published yet.</p>
     <a class="primary" href="/admin">Admin console</a>
+    <a class="ghost" href="/blog/">Blog</a>
     <a class="ghost" href="/share">Public projects</a>
   </main>
 </body>
@@ -653,6 +654,11 @@ app.get(["/blog", "/blog/"], asyncRoute(async (_req, res) => {
   const [posts, theme] = await Promise.all([listBlogPosts({ status: "published" }), getBlogTheme()]);
   res.setHeader("Content-Security-Policy", blogCsp);
   res.type("html").send(renderBlogIndex(posts, theme));
+}));
+
+app.get("/blog/rss.xml", asyncRoute(async (_req, res) => {
+  const [posts, theme] = await Promise.all([listBlogPosts({ status: "published" }), getBlogTheme()]);
+  res.type("application/rss+xml").send(renderBlogRss(posts, theme, publicBaseUrl));
 }));
 
 app.get("/blog/:slug", asyncRoute(async (req, res) => {

@@ -44,7 +44,7 @@ import type {
   ValidationStatus
 } from "./types";
 
-type Route = "overview" | "projects" | "project-detail" | "tools" | "connectors" | "activity" | "users" | "settings" | "login" | "register";
+type Route = "overview" | "projects" | "blog" | "project-detail" | "tools" | "connectors" | "activity" | "users" | "settings" | "login" | "register";
 type Toast = { id: number; tone: "success" | "error"; message: string };
 type MutableProjectStatus = Exclude<ProjectStatus, "deleted">;
 type ConfirmState = {
@@ -58,6 +58,7 @@ type ConfirmState = {
 const navItems: Array<{ route: Route; href: string; label: string; icon: ReactNode }> = [
   { route: "overview", href: "/admin", label: "Overview", icon: <Activity size={18} /> },
   { route: "projects", href: "/admin/projects", label: "Projects", icon: <Archive size={18} /> },
+  { route: "blog", href: "/admin/blog", label: "Blog", icon: <FileCode2 size={18} /> },
   { route: "tools", href: "/admin/tools", label: "Tools & Skills", icon: <Wrench size={18} /> },
   { route: "connectors", href: "/admin/connectors", label: "Connectors", icon: <KeyRound size={18} /> },
   { route: "activity", href: "/admin/activity", label: "Activity", icon: <ShieldAlert size={18} /> },
@@ -70,6 +71,7 @@ function currentRoute(): { route: Route; projectId?: string } {
   if (path === "/admin/login") return { route: "login" };
   if (path === "/admin/register") return { route: "register" };
   if (path === "/admin/projects") return { route: "projects" };
+  if (path === "/admin/blog") return { route: "blog" };
   const projectMatch = /^\/admin\/projects\/([^/]+)$/.exec(path);
   if (projectMatch) return { route: "project-detail", projectId: decodeURIComponent(projectMatch[1]) };
   if (path === "/admin/tools") return { route: "tools" };
@@ -316,6 +318,7 @@ export function App() {
         <div className="content">
           {route.route === "overview" && <OverviewPage />}
           {route.route === "projects" && <ProjectsPage setConfirm={setConfirm} toast={toast} publicIndexHref={publicIndexHref} isAdmin={currentUser?.role === "admin"} />}
+          {route.route === "blog" && <BlogPage setConfirm={setConfirm} toast={toast} isAdmin={currentUser?.role === "admin"} />}
           {route.route === "project-detail" && route.projectId && <ProjectDetailPage projectId={route.projectId} setConfirm={setConfirm} toast={toast} />}
           {route.route === "tools" && <ToolsPage setConfirm={setConfirm} toast={toast} />}
           {route.route === "connectors" && <ConnectorsPage setConfirm={setConfirm} toast={toast} />}
@@ -610,6 +613,67 @@ function ProjectDetailPage({ projectId, setConfirm, toast }: { projectId: string
       <section className="panel"><PanelTitle title="Files" />{files.length ? <div className="file-list">{files.map((file) => <div key={file.path}><FileCode2 size={16} /><span>{file.path}</span><small>{Math.round(file.size / 1024)} KB</small></div>)}</div> : <EmptyState title="No files" body="This project has no stored files." />}</section>
       <section className="panel wide"><PanelTitle title="Task history" /><HistoryList items={manifest?.taskHistory ?? []} /></section>
     </div>
+  );
+}
+
+type BlogPostRow = { slug: string; title: string; status: "draft" | "published"; tags: string[]; publishedAt: string | null; updatedAt: string };
+type BlogThemeForm = { title: string; css: string; headerHtml: string; footerHtml: string };
+
+function BlogPage({ setConfirm, toast, isAdmin }: { setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void; isAdmin: boolean }) {
+  const [posts, setPosts] = useState<BlogPostRow[]>();
+  const [theme, setTheme] = useState<BlogThemeForm>({ title: "", css: "", headerHtml: "", footerHtml: "" });
+  const [error, setError] = useState("");
+  const reload = useCallback(() => {
+    api<{ posts: BlogPostRow[] }>("/blog/posts").then((result) => setPosts(result.posts)).catch((err: unknown) => setError(err instanceof Error ? err.message : "Unable to load posts."));
+    api<{ theme: BlogThemeForm }>("/blog/theme").then((result) => setTheme(result.theme)).catch(() => undefined);
+  }, []);
+  useEffect(() => reload(), [reload]);
+
+  if (!isAdmin) return <EmptyState title="Admins only" body="Blog management is restricted to admin accounts." />;
+
+  const saveTheme = async () => {
+    try {
+      await api("/blog/theme", { method: "POST", body: JSON.stringify(theme) });
+      toast("success", "Blog theme saved.");
+    } catch (err) {
+      toast("error", err instanceof Error ? err.message : "Failed to save theme.");
+    }
+  };
+
+  return (
+    <>
+      <section className="panel">
+        <PanelTitle title="Blog posts" action={<a className="button subtle" href="/blog/" target="_blank" rel="noreferrer"><ExternalLink size={16} /> View blog</a>} />
+        {error && <EmptyState title="Blog unavailable" body={error} />}
+        {!error && !posts && <div className="table-loader">Loading posts...</div>}
+        {posts && posts.length === 0 && <EmptyState title="No posts yet" body="Ask the assistant to write a post with publish_blog_post, or it will appear here." />}
+        {posts && posts.length > 0 && (
+          <div className="table-wrap"><table><thead><tr><th>Title</th><th>Slug</th><th>Status</th><th>Tags</th><th>Updated</th><th>Actions</th></tr></thead><tbody>
+            {posts.map((post) => <tr key={post.slug}>
+              <td data-label="Title"><strong>{post.title}</strong></td>
+              <td data-label="Slug"><code>{post.slug}</code></td>
+              <td data-label="Status"><span className={badgeClass(post.status === "published" ? "published" : "draft")}>{post.status}</span></td>
+              <td data-label="Tags">{post.tags.join(", ") || "-"}</td>
+              <td data-label="Updated">{fmtDate(post.updatedAt)}</td>
+              <td data-label="Actions"><div className="row-actions">
+                {post.status === "published" && <IconButton label="Open post" href={`/blog/${encodeURIComponent(post.slug)}`} tone="primary" target="_blank" rel="noreferrer"><ExternalLink size={18} /></IconButton>}
+                <IconButton label="Delete post" tone="danger" onClick={() => setConfirm({ title: "Delete post", body: `Delete "${post.title}". This cannot be undone.`, confirmLabel: "Delete", tone: "danger", onConfirm: async () => { await api(`/blog/posts/${encodeURIComponent(post.slug)}`, { method: "DELETE" }); toast("success", "Post deleted."); reload(); } })}><Trash2 size={18} /></IconButton>
+              </div></td>
+            </tr>)}
+          </tbody></table></div>
+        )}
+      </section>
+      <section className="panel">
+        <PanelTitle title="Blog theme" />
+        <div className="settings-form">
+          <label>Blog title<input value={theme.title} onChange={(event) => setTheme((current) => ({ ...current, title: event.target.value }))} placeholder="Blog" /></label>
+          <label>Custom CSS<textarea rows={5} value={theme.css} onChange={(event) => setTheme((current) => ({ ...current, css: event.target.value }))} placeholder="/* appended to the base stylesheet */" /></label>
+          <label>Header HTML<textarea rows={3} value={theme.headerHtml} onChange={(event) => setTheme((current) => ({ ...current, headerHtml: event.target.value }))} placeholder="<h1>My Blog</h1>" /></label>
+          <label>Footer HTML<textarea rows={3} value={theme.footerHtml} onChange={(event) => setTheme((current) => ({ ...current, footerHtml: event.target.value }))} placeholder="<p>© 2026</p>" /></label>
+          <button className="button primary" type="button" onClick={saveTheme}>Save theme</button>
+        </div>
+      </section>
+    </>
   );
 }
 

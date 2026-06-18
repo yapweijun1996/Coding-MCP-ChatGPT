@@ -17,6 +17,7 @@ import {
   setProjectStatus
 } from "./projects/store.js";
 import { getResearchSummary } from "./research/store.js";
+import { deleteBlogPost, getBlogTheme, listBlogPosts, setBlogTheme } from "./blog/store.js";
 import { clearHomepage, getHomepage, setHomepage } from "./site/store.js";
 import type { SkillState } from "./skills/state.js";
 import { listSkillStates, setSkillEnabled } from "./skills/state.js";
@@ -638,6 +639,42 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     clearHomepage();
     recordActivity({ userId: user.id, clientId: "admin", method: "admin/site/home", ok: true, summary: "Cleared the homepage." });
     ok(res, { homepage: null });
+  }));
+
+  api.get("/blog/posts", asyncRoute(async (_req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    const posts = await listBlogPosts();
+    ok(res, { posts: posts.map((post) => ({ slug: post.slug, title: post.title, status: post.status, tags: post.tags, publishedAt: post.publishedAt, updatedAt: post.updatedAt })) });
+  }));
+
+  api.delete("/blog/posts/:slug", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    const removed = await deleteBlogPost(req.params.slug);
+    if (!removed) { fail(res, 404, "Blog post not found."); return; }
+    recordActivity({ userId: user.id, clientId: "admin", method: "admin/blog/delete", toolName: req.params.slug, ok: true, summary: `Deleted blog post ${req.params.slug}.` });
+    ok(res, { slug: req.params.slug });
+  }));
+
+  api.get("/blog/theme", asyncRoute(async (_req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    ok(res, { theme: await getBlogTheme() });
+  }));
+
+  api.post("/blog/theme", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    const body = readBody(req);
+    const input: { title?: string; css?: string; headerHtml?: string; footerHtml?: string } = {};
+    if (typeof body.title === "string") input.title = body.title;
+    if (typeof body.css === "string") input.css = body.css;
+    if (typeof body.headerHtml === "string") input.headerHtml = body.headerHtml;
+    if (typeof body.footerHtml === "string") input.footerHtml = body.footerHtml;
+    const theme = await setBlogTheme(input);
+    recordActivity({ userId: user.id, clientId: "admin", method: "admin/blog/theme", ok: true, summary: "Updated blog theme." });
+    ok(res, { theme });
   }));
 
   api.get("/connectors", (_req, res) => {

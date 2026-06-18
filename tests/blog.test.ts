@@ -125,5 +125,43 @@ test("blog routes render index and post, and gate writes to admins", async () =>
 
     const missing = await fetch(`${baseUrl}/blog/does-not-exist`);
     assert.equal(missing.status, 404);
+
+    // RSS feed lists the published post.
+    const rss = await fetch(`${baseUrl}/blog/rss.xml`);
+    assert.equal(rss.status, 200);
+    assert.match(rss.headers.get("content-type") ?? "", /rss\+xml/);
+    const rssBody = await rss.text();
+    assert.match(rssBody, /<rss version="2.0">/);
+    assert.match(rssBody, /<link>https:\/\/example\.test\/blog\/hello-blog<\/link>/);
+
+    // Default landing links to the blog.
+    assert.match(await (await fetch(`${baseUrl}/`)).text(), /href="\/blog\/"/);
+  });
+});
+
+test("admin API lists, deletes blog posts and saves the theme", async () => {
+  await initializeBlogStore({ statePath: process.env.BLOG_STATE_PATH! });
+  await upsertBlogPost({ title: "Admin Managed", content: "body", tags: ["ops"] });
+  await withServer(async (baseUrl) => {
+    const login = await fetch(`${baseUrl}/admin/api/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: "admin@example.test", password: "test-admin-password" }) });
+    const cookie = login.headers.get("set-cookie")!.split(";")[0];
+    const csrf = (await login.json() as { csrfToken: string }).csrfToken;
+    const headers = { Cookie: cookie, "Content-Type": "application/json", "X-CSRF-Token": csrf };
+
+    const list = await (await fetch(`${baseUrl}/admin/api/blog/posts`, { headers: { Cookie: cookie } })).json() as { posts: Array<{ slug: string }> };
+    assert.ok(list.posts.some((post) => post.slug === "admin-managed"));
+
+    // Saving the theme requires CSRF.
+    const noCsrf = await fetch(`${baseUrl}/admin/api/blog/theme`, { method: "POST", headers: { Cookie: cookie, "Content-Type": "application/json" }, body: JSON.stringify({ title: "X" }) });
+    assert.equal(noCsrf.status, 403);
+
+    const themeRes = await fetch(`${baseUrl}/admin/api/blog/theme`, { method: "POST", headers, body: JSON.stringify({ title: "Ops Blog" }) });
+    assert.equal(themeRes.status, 200);
+    assert.equal((await themeRes.json() as { theme: { title: string } }).theme.title, "Ops Blog");
+
+    const del = await fetch(`${baseUrl}/admin/api/blog/posts/admin-managed`, { method: "DELETE", headers });
+    assert.equal(del.status, 200);
+    const after = await (await fetch(`${baseUrl}/admin/api/blog/posts`, { headers: { Cookie: cookie } })).json() as { posts: Array<{ slug: string }> };
+    assert.ok(!after.posts.some((post) => post.slug === "admin-managed"));
   });
 });
