@@ -82,6 +82,15 @@ Use this skill to discover the available workspace/project context before taking
       "write_project_asset",
       "import_project_asset_from_url",
       "deliver_static_project",
+      "create_app_project",
+      "write_app_project_file",
+      "read_app_project_file",
+      "install_project_dependencies",
+      "run_project_dev",
+      "stop_project_dev",
+      "run_project_build",
+      "publish_project_dist",
+      "get_app_project_report",
       "read_project_file",
       "delete_project_file",
       "validate_project",
@@ -133,6 +142,7 @@ Use this skill to discover the available workspace/project context before taking
 Use this skill when the user asks the agent to build, edit, validate, or publish project files.
 
 - Prefer \`deliver_static_project\` for complete static HTML/CSS/JS deliverables.
+- Use the app project workflow for React/Vue/Vite idea-to-demo requests: create, edit source, install, build, then publish dist.
 - For incremental work, create or inspect a project, write files, validate, then publish.
 - Use \`refactor_hints\` before broad cleanup to identify oversized modules, mixed responsibilities, and reviewable refactor candidates.
 - Run typecheck/tests/build when the user asks for verification or when the change has shared behavior risk.

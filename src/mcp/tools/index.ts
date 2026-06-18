@@ -1,4 +1,5 @@
 import { commandTools } from "./command.js";
+import { appProjectTools } from "./app-project.js";
 import { gitTools } from "./git.js";
 import { presentationTools } from "./presentation.js";
 import { previewTools } from "./preview.js";
@@ -30,6 +31,7 @@ export const allToolModules: ToolModule[] = [
   ...webRebuildTools,
   ...presentationTools,
   ...gitTools,
+  ...appProjectTools,
   ...projectTools,
   ...researchTools,
   ...shareTools

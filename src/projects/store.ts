@@ -85,6 +85,7 @@ export const maxProjectPresentationAssetBytes = 25 * 1024 * 1024;
 
 const metadataFilename = "project.json";
 const filesDirectoryName = "files";
+const workspaceDirectoryName = "workspace";
 const maxTaskHistoryItems = 100;
 const allowedTextExtensions = new Set([".html", ".css", ".js", ".json", ".txt", ".md", ".svg"]);
 const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".pptx"]);
@@ -117,6 +118,10 @@ export function getProjectDirectory(projectRoot: string, projectId: string): str
 
 export function getProjectFilesDirectory(projectRoot: string, projectId: string): string {
   return path.join(getProjectDirectory(projectRoot, projectId), filesDirectoryName);
+}
+
+export function getProjectWorkspaceDirectory(projectRoot: string, projectId: string): string {
+  return path.join(getProjectDirectory(projectRoot, projectId), workspaceDirectoryName);
 }
 
 function getProjectMetadataPath(projectRoot: string, projectId: string): string {
@@ -333,8 +338,17 @@ export async function createProject(
     ]
   };
   await mkdir(getProjectFilesDirectory(projectRoot, id), { recursive: true });
+  await mkdir(getProjectWorkspaceDirectory(projectRoot, id), { recursive: true });
   await writeProjectMetadata(projectRoot, metadata);
   return metadata;
+}
+
+export async function clearProjectFiles(projectRoot: string, projectId: string): Promise<void> {
+  const metadata = await getProject(projectRoot, projectId);
+  if (metadata.status === "deleted") throw new Error("Cannot clear files from a deleted project.");
+  const filesRoot = getProjectFilesDirectory(projectRoot, projectId);
+  await rm(filesRoot, { recursive: true, force: true });
+  await mkdir(filesRoot, { recursive: true });
 }
 
 export async function listProjectFiles(projectRoot: string, projectId: string): Promise<ProjectFileInfo[]> {

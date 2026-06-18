@@ -32,6 +32,7 @@ import {
   getProject,
   getProjectFileContentType,
   getProjectFilesDirectory,
+  getProjectWorkspaceDirectory,
   getProjectManifest,
   getProjectStoredFilePath,
   getProjectWithFiles,
@@ -428,7 +429,11 @@ app.get("/admin/projects/:projectId/download.zip", async (req, res) => {
     res.setHeader("Content-Type", "application/zip");
     res.setHeader("Content-Disposition", `attachment; filename="${project.id}.zip"`);
     archive.pipe(res);
-    archive.directory(getProjectFilesDirectory(projectRoot, project.id), false);
+    archive.directory(getProjectFilesDirectory(projectRoot, project.id), "published");
+    archive.glob("**/*", {
+      cwd: getProjectWorkspaceDirectory(projectRoot, project.id),
+      ignore: ["node_modules/**", "dist/**"]
+    }, { prefix: "workspace" });
     await archive.finalize();
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to download project.";

@@ -37,6 +37,7 @@ Enabled by default:
 
 - Connectivity, preview, and skill protocol lookup: `ping`, `create_preview`, `list_agent_skills`, `get_agent_skill`.
 - Project delivery: `deliver_static_project`, `create_project`, `list_projects`, `get_project`, `get_project_manifest`, `get_project_activity`, `write_project_file`, `read_project_file`, `delete_project_file`, `validate_project`, `publish_project`, `publish_and_report`.
+- App project delivery: `create_app_project`, `write_app_project_file`, `read_app_project_file`, `install_project_dependencies`, `run_project_build`, `publish_project_dist`, `get_app_project_report`.
 - Research delivery: `create_research_project`, `add_research_source`, `list_research_sources`, `add_research_note`, `record_research_evidence`, `get_research_manifest`, `write_research_report`, `publish_research_report`.
 - Code intelligence: `refactor_hints` for advisory oversized-file and mixed-responsibility refactor signals.
 - Browser validation: `inspect_webpage`.
@@ -49,6 +50,8 @@ Disabled by default and available only when Admin toggles them on:
 - `delete_project`: destructive project operation.
 - `create_share`: legacy standalone share; use Project publish for deliverables.
 - `check_url`: network access / SSRF-sensitive diagnostic helper.
+- `run_project_dev`: starts a local Vite dev server for app project previews.
+- `stop_project_dev`: controls local dev servers started by MCP.
 - `open_local_server`: starts a local process.
 - `stop_local_server`: controls local processes started by MCP.
 - `open_local_server_and_check`: starts a local process and performs a network check.
@@ -82,6 +85,16 @@ ChatGPT and other coding agents should use the persistent Project workflow for d
 3. Use the lower-level `create_project` / `write_project_file` / `validate_project` / `publish_and_report` flow only for repair or incremental edits.
 
 `deliver_static_project` is the preferred delivery tool because it writes all files, validates local references, temporarily publishes, runs browser validation through Playwright, blocks on serious runtime/layout failures, and returns a structured report with the public `publishedUrl`.
+
+For idea-to-demo React, Vue, or Vite apps, use the App project workflow:
+
+1. `create_app_project` with `template` set to `vite-react`, `vite-vue`, or `vite-vanilla`.
+2. `write_app_project_file` for source edits in `workspace/`.
+3. `install_project_dependencies`.
+4. `run_project_dev` when a local preview is useful.
+5. `run_project_build`.
+6. `publish_project_dist` with `outputDir: "dist"` and `entryFile: "index.html"`.
+7. Return the `shareUrl` and Admin ZIP download link.
 
 ## Refactor hint workflow
 

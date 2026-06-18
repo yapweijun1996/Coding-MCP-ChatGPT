@@ -43,6 +43,13 @@ This MCP stores ChatGPT-created coding projects on disk under `.projects/`.
 - `publish_project`: publish the project entry file.
 - `publish_and_report`: validate, publish, and return a stable delivery report with `publishedUrl`.
 - `delete_project`: soft-delete a project with `confirm=true`; disabled by default in Admin tool access.
+- `create_app_project`: create a Vite app source workspace for React, Vue, or vanilla demos.
+- `write_app_project_file` / `read_app_project_file`: edit and inspect source files under the project `workspace/`.
+- `install_project_dependencies`: run controlled `npm install` in the app workspace.
+- `run_project_dev` / `stop_project_dev`: start or stop a local Vite dev preview.
+- `run_project_build`: run controlled `npm run build`.
+- `publish_project_dist`: publish built `dist/` output to the stable `/share/:projectId/index.html` URL.
+- `get_app_project_report`: return manifest plus app dev server state.
 
 Recommended ChatGPT workflow:
 
@@ -67,7 +74,7 @@ Recommended ChatGPT workflow:
 - Hidden path segments such as `.env` are rejected.
 - Single file content is limited to 1 MiB.
 - Only text-first static files are enabled in this version: `.html`, `.css`, `.js`, `.json`, `.txt`, `.md`, `.svg`.
-- ZIP download only includes the project `files/` directory.
+- ZIP download includes `published/` and app source `workspace/`, excluding `node_modules` and built `dist`.
 - Revoking a connector does not delete its projects.
 
 ## Current limitation
@@ -92,3 +99,13 @@ For project deliverables, ChatGPT must use the persistent Project workflow:
 6. Return the `publishedUrl`
 
 For normal new static deliverables, prefer `deliver_static_project` over the manual sequence above. Do not use `create_share` for project deliverables. It is a legacy standalone HTML tool, disabled by default, and should only be enabled temporarily from Admin for compatibility testing.
+
+For idea-to-demo Vite apps, use the app project workflow:
+
+1. `create_app_project`
+2. `write_app_project_file`
+3. `install_project_dependencies`
+4. `run_project_dev` when a local preview is useful
+5. `run_project_build`
+6. `publish_project_dist`
+7. Return the `shareUrl` and Admin ZIP download link

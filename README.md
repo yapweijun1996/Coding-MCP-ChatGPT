@@ -154,6 +154,9 @@
 - `run_tests`：执行测试并汇总
 - `build_project`：构建/打包
 - `create_preview`：构建产物映射成可预览链接
+- `create_app_project`：从模板创建 Vite React/Vue/Vanilla app 项目
+- `install_project_dependencies` / `run_project_build`：受控安装依赖与构建
+- `publish_project_dist`：发布 `dist/` 到 `/share/{projectId}/index.html`
 - `create_share`：发布单个独立 HTML 文件并返回分享链接
 - `get_preview_url`：返回 `https://gmb01.xyz/outcome/{jobId}`
 - `list_dir` / `read_file` / `search_files`：工作区读/检索能力
@@ -183,6 +186,8 @@ ChatGPT 或其他 AI agent 交付编码项目时，应优先使用持久化 Proj
 4. `validate_project` / `publish_and_report`：仅在修复或增量编辑时使用分步流程
 
 不要用 legacy `create_share` 交付项目。它默认关闭，仅保留给兼容测试；正式项目链接应来自 `deliver_static_project` 或 `publish_and_report`，格式为 `https://gmb01.xyz/share/{projectId}/index.html`。
+
+如果用户要把一个 idea 变成 React/Vue/Vite demo，应使用 app project 工具链：`create_app_project` -> `write_app_project_file` -> `install_project_dependencies` -> `run_project_dev`（需要临时预览时）-> `run_project_build` -> `publish_project_dist`。
 
 ## 运维与安全
 
