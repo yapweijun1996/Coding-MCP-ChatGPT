@@ -631,7 +631,10 @@ export const projectTools: ToolModule[] = [
         validation,
         browserInspection,
         inspectionReportUrl,
-        nextActions: [`Return this public URL to the user: ${published.publishedUrl}`]
+        nextActions: [
+          `Return this public URL to the user: ${published.publishedUrl}`,
+          `If the user wants this to be the site homepage at the root URL, call set_homepage with projectId "${project.id}" (admin only).`
+        ]
       };
       await appendProjectTaskHistory(ctx.projectRoot, project.id, {
         toolName: "deliver_static_project",

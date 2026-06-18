@@ -9,6 +9,7 @@ import {
   ExternalLink,
   Eye,
   FileCode2,
+  Home,
   KeyRound,
   LogOut,
   Menu,
@@ -314,7 +315,7 @@ export function App() {
         </header>
         <div className="content">
           {route.route === "overview" && <OverviewPage />}
-          {route.route === "projects" && <ProjectsPage setConfirm={setConfirm} toast={toast} publicIndexHref={publicIndexHref} />}
+          {route.route === "projects" && <ProjectsPage setConfirm={setConfirm} toast={toast} publicIndexHref={publicIndexHref} isAdmin={currentUser?.role === "admin"} />}
           {route.route === "project-detail" && route.projectId && <ProjectDetailPage projectId={route.projectId} setConfirm={setConfirm} toast={toast} />}
           {route.route === "tools" && <ToolsPage setConfirm={setConfirm} toast={toast} />}
           {route.route === "connectors" && <ConnectorsPage setConfirm={setConfirm} toast={toast} />}
@@ -441,18 +442,39 @@ function OverviewPage() {
   );
 }
 
-function ProjectsPage({ setConfirm, toast, publicIndexHref }: { setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void; publicIndexHref: string }) {
+type HomepageInfo = { projectId: string; title: string | null; status?: string } | null;
+
+function ProjectsPage({ setConfirm, toast, publicIndexHref, isAdmin }: { setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void; publicIndexHref: string; isAdmin: boolean }) {
   const [params, updateParams] = useQueryState({ page: "1", pageSize: "20", sort: "updated-desc" });
   const [data, setData] = useState<PageResult<ProjectSummary>>();
   const [error, setError] = useState("");
+  const [homepage, setHomepage] = useState<HomepageInfo>(null);
   const query = params.toString();
   const reload = useCallback(() => {
     api<PageResult<ProjectSummary>>(`/projects?${query}`).then(setData).catch((err: unknown) => setError(err instanceof Error ? err.message : "Unable to load projects."));
   }, [query]);
+  const reloadHome = useCallback(() => {
+    api<{ homepage: HomepageInfo }>("/site/home").then((result) => setHomepage(result.homepage)).catch(() => setHomepage(null));
+  }, []);
   useEffect(() => reload(), [reload]);
+  useEffect(() => reloadHome(), [reloadHome]);
+  const clearHome = () => setConfirm({
+    title: "Clear homepage",
+    body: "The site root (/) will show the default landing page.",
+    confirmLabel: "Clear homepage",
+    onConfirm: async () => { await api("/site/home", { method: "DELETE" }); toast("success", "Homepage cleared."); reloadHome(); }
+  });
   return (
     <section className="panel">
       <PanelTitle title="Projects" action={<a className="button subtle" href={publicIndexHref} target="_blank" rel="noreferrer"><ExternalLink size={16} /> Public index</a>} />
+      {isAdmin && (
+        <div className="form-alert" role="status" style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          <Home size={16} />
+          {homepage
+            ? <><span>Homepage: <strong>{homepage.title ?? homepage.projectId}</strong> <code>{homepage.projectId}</code></span><button className="button subtle mini" type="button" onClick={clearHome}>Clear</button><a className="button subtle mini" href="/" target="_blank" rel="noreferrer">Open</a></>
+            : <span>No homepage set — the site root shows the default landing page.</span>}
+        </div>
+      )}
       <Toolbar>
         <label className="search-field"><Search size={16} /><input placeholder="Search projects" value={params.get("q") ?? ""} onChange={(event) => updateParams({ q: event.target.value, page: "1" })} /></label>
         <select value={params.get("status") ?? ""} onChange={(event) => updateParams({ status: event.target.value, page: "1" })} aria-label="Filter by status">
@@ -467,13 +489,13 @@ function ProjectsPage({ setConfirm, toast, publicIndexHref }: { setConfirm: (sta
       </Toolbar>
       {error && <EmptyState title="Projects unavailable" body={error} />}
       {!error && !data && <div className="table-loader">Loading projects...</div>}
-      {data && <ProjectTable projects={data.items} onReload={reload} setConfirm={setConfirm} toast={toast} />}
+      {data && <ProjectTable projects={data.items} onReload={reload} setConfirm={setConfirm} toast={toast} isAdmin={isAdmin} homeProjectId={homepage?.projectId ?? null} onHomepageChange={reloadHome} />}
       {data && <Pagination page={data.page} pageCount={data.pageCount} total={data.total} onPage={(page) => updateParams({ page: String(page) })} />}
     </section>
   );
 }
 
-function ProjectTable({ projects, onReload, setConfirm, toast }: { projects: ProjectSummary[]; onReload: () => void; setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void }) {
+function ProjectTable({ projects, onReload, setConfirm, toast, isAdmin, homeProjectId, onHomepageChange }: { projects: ProjectSummary[]; onReload: () => void; setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void; isAdmin: boolean; homeProjectId: string | null; onHomepageChange: () => void }) {
   const [statusMenuProjectId, setStatusMenuProjectId] = useState<string | null>(null);
   if (projects.length === 0) return <EmptyState title="No projects found" body="Adjust search or filters to see more projects." />;
   const updateStatus = async (project: ProjectSummary, status: MutableProjectStatus) => {
@@ -540,6 +562,11 @@ function ProjectTable({ projects, onReload, setConfirm, toast }: { projects: Pro
         <td data-label="Created by"><code>{project.createdByClientId}</code></td>
         <td data-label="Actions"><div className="row-actions">
           {project.publishedUrl && <IconButton label="Open preview" href={project.publishedUrl} tone="primary" target="_blank" rel="noreferrer"><ExternalLink size={18} /></IconButton>}
+          {isAdmin && project.status === "published" && (
+            homeProjectId === project.id
+              ? <IconButton label="Current homepage" tone="primary" onClick={() => toast("success", "This project is the current homepage.")}><Home size={18} /></IconButton>
+              : <IconButton label="Set as homepage" onClick={() => setConfirm({ title: "Set as homepage", body: `Visitors to the site root (/) will see "${project.title}".`, confirmLabel: "Set as homepage", onConfirm: async () => { await api(`/projects/${encodeURIComponent(project.id)}/homepage`, { method: "POST" }); toast("success", "Homepage updated."); onHomepageChange(); } })}><Home size={18} /></IconButton>
+          )}
           <IconButton label="View project" onClick={() => navigate(`/admin/projects/${encodeURIComponent(project.id)}`)}><Eye size={18} /></IconButton>
           <IconButton label="Download ZIP" href={`/admin/api/projects/${encodeURIComponent(project.id)}/download.zip`}><Download size={18} /></IconButton>
           {project.status !== "deleted" && <IconButton label="Delete project" tone="danger" onClick={() => setConfirm({ title: "Delete project", body: `Soft-delete ${project.title}. Public access will be removed.`, confirmLabel: "Delete", tone: "danger", onConfirm: async () => { await api(`/projects/${encodeURIComponent(project.id)}/delete`, { method: "POST" }); toast("success", "Project deleted."); onReload(); } })}><Trash2 size={18} /></IconButton>}

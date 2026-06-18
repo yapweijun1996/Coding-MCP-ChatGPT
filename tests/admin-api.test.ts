@@ -220,6 +220,40 @@ test("site homepage serves at root and set_homepage is admin-gated", async () =>
   });
 });
 
+test("admin API sets and clears the homepage", async () => {
+  clearHomepage();
+  await withServer(async (baseUrl) => {
+    const { cookie, csrfToken } = await login(baseUrl);
+    const sessionBody = await (await fetch(`${baseUrl}/admin/api/session`, { headers: { Cookie: cookie } })).json() as { user?: { projectRoot?: string } };
+    const adminRoot = sessionBody.user?.projectRoot;
+    assert.ok(adminRoot);
+
+    const project = await createProject(adminRoot, { title: "Admin Set Home", createdByClientId: "test-client" });
+    await writeProjectFile(adminRoot, project.id, "index.html", "<!doctype html><title>AdminHome</title><h1>ADMIN_HOME_MARKER</h1>");
+    await publishProject(adminRoot, project.id, "https://example.test", "index.html");
+
+    const headers = { Cookie: cookie, "Content-Type": "application/json", "X-CSRF-Token": csrfToken };
+
+    // Setting the homepage requires the CSRF token.
+    const noCsrf = await fetch(`${baseUrl}/admin/api/projects/${project.id}/homepage`, { method: "POST", headers: { Cookie: cookie, "Content-Type": "application/json" } });
+    assert.equal(noCsrf.status, 403);
+
+    const setRes = await fetch(`${baseUrl}/admin/api/projects/${project.id}/homepage`, { method: "POST", headers });
+    assert.equal(setRes.status, 200);
+
+    const current = await (await fetch(`${baseUrl}/admin/api/site/home`, { headers: { Cookie: cookie } })).json() as { homepage?: { projectId?: string; title?: string } };
+    assert.equal(current.homepage?.projectId, project.id);
+    assert.equal(current.homepage?.title, "Admin Set Home");
+
+    assert.match(await (await fetch(`${baseUrl}/`)).text(), /ADMIN_HOME_MARKER/);
+
+    const clearRes = await fetch(`${baseUrl}/admin/api/site/home`, { method: "DELETE", headers });
+    assert.equal(clearRes.status, 200);
+    const afterClear = await (await fetch(`${baseUrl}/admin/api/site/home`, { headers: { Cookie: cookie } })).json() as { homepage: unknown };
+    assert.equal(afterClear.homepage, null);
+  });
+});
+
 test("admin session cookie Secure flag follows request and ADMIN_COOKIE_SECURE mode", async () => {
   await withServer(async (baseUrl) => {
     process.env.ADMIN_COOKIE_SECURE = "auto";

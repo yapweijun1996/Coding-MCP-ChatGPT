@@ -17,6 +17,7 @@ import {
   setProjectStatus
 } from "./projects/store.js";
 import { getResearchSummary } from "./research/store.js";
+import { clearHomepage, getHomepage, setHomepage } from "./site/store.js";
 import type { SkillState } from "./skills/state.js";
 import { listSkillStates, setSkillEnabled } from "./skills/state.js";
 import {
@@ -597,6 +598,46 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Project delete failed.");
     }
+  }));
+
+  api.get("/site/home", asyncRoute(async (_req, res) => {
+    const home = getHomepage();
+    if (!home.homeProjectId || !home.homeOwnerUserId) {
+      ok(res, { homepage: null });
+      return;
+    }
+    try {
+      const root = await getProjectRootForUser(home.homeOwnerUserId);
+      const project = await getProject(root, home.homeProjectId);
+      ok(res, { homepage: { projectId: home.homeProjectId, title: project.title, status: project.status, updatedAt: home.updatedAt } });
+    } catch {
+      ok(res, { homepage: { projectId: home.homeProjectId, title: null, status: "unknown", updatedAt: home.updatedAt } });
+    }
+  }));
+
+  api.post("/projects/:projectId/homepage", asyncRoute(async (req, res) => {
+    try {
+      const user = res.locals.currentUser as PublicUser;
+      if (!requireAdmin(user, res)) return;
+      const root = await findProjectRoot(req, user, req.params.projectId);
+      const project = await getProject(root, req.params.projectId);
+      if (project.status !== "published") throw new Error("Project must be published before it can be the homepage.");
+      const owner = await getUserByProjectRoot(root);
+      if (!owner) throw new Error("Could not resolve the project owner.");
+      setHomepage({ projectId: req.params.projectId, ownerUserId: owner.id });
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/site/home", toolName: req.params.projectId, ok: true, summary: `Set project ${req.params.projectId} as the homepage.` });
+      ok(res, { homepage: { projectId: req.params.projectId, title: project.title } });
+    } catch (error) {
+      fail(res, 400, error instanceof Error ? error.message : "Failed to set homepage.");
+    }
+  }));
+
+  api.delete("/site/home", asyncRoute(async (_req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    clearHomepage();
+    recordActivity({ userId: user.id, clientId: "admin", method: "admin/site/home", ok: true, summary: "Cleared the homepage." });
+    ok(res, { homepage: null });
   }));
 
   api.get("/connectors", (_req, res) => {
