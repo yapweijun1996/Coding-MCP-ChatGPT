@@ -44,6 +44,8 @@ export interface ToolContext {
   shareRoot: string;
   projectRoot: string;
   clientId: string;
+  userId?: string;
+  publicShareBasePath?: string;
 }
 
 export const toolDefinitions: ToolDefinition[] = [
@@ -4165,7 +4167,7 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
 
     if (name === "publish_project") {
       const input = publishProjectInputSchema.parse(rawInput);
-      const project = await publishProject(ctx.projectRoot, input.projectId, ctx.publicBaseUrl, input.entryFile);
+      const project = await publishProject(ctx.projectRoot, input.projectId, ctx.publicBaseUrl, input.entryFile, { shareBasePath: ctx.publicShareBasePath });
       return {
         ok: true,
         summary: `Published project ${input.projectId}.`,

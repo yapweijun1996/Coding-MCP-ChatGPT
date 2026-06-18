@@ -225,3 +225,13 @@ test("publishProject keeps stable preview URLs", async () => {
     assert.equal(published.publishedUrl, `https://example.test/share/${projectId}/index.html`);
   });
 });
+
+test("publishProject can use a username share base path", async () => {
+  await withProject(async (root, projectId) => {
+    await writeProjectFile(root, projectId, "index.html", "<!doctype html><html><body>Named</body></html>");
+
+    const published = await publishProject(root, projectId, "https://example.test", "index.html", { shareBasePath: "/@demo_user/share" });
+
+    assert.equal(published.publishedUrl, `https://example.test/@demo_user/share/${projectId}/index.html`);
+  });
+});

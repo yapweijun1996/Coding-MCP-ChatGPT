@@ -383,7 +383,7 @@ export const appProjectTools: ToolModule[] = [
       }
       const validation = await validateProject(ctx.projectRoot, parsed.projectId, parsed.entryFile);
       if (!validation.ok) throw new Error(`Published dist validation failed: ${validation.errors.join("; ")}`);
-      const project = await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile);
+      const project = await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile, { shareBasePath: ctx.publicShareBasePath });
       await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "publish_project_dist", ok: true, summary: `Published ${safeOutputDir} to ${project.publishedUrl}.`, details: { outputDir: safeOutputDir, entryFile: parsed.entryFile, files: publishedFiles } });
       return { ok: true, summary: `Published app dist at ${project.publishedUrl}.`, jobId: parsed.projectId, previewUrl: project.publishedUrl, shareUrl: project.publishedUrl, artifacts: [project.publishedUrl!, ...publishedFiles.map((file) => file.path)], structuredContent: { projectId: parsed.projectId, outputDir: safeOutputDir, entryFile: parsed.entryFile, publishedUrl: project.publishedUrl, files: publishedFiles, validation }, logs: [JSON.stringify({ publishedUrl: project.publishedUrl, files: publishedFiles, validation }, null, 2)], errors: [] };
     }

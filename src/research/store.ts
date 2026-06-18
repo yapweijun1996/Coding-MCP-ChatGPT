@@ -8,6 +8,7 @@ import {
   writeProjectFile,
   type ProjectFileInfo,
   type ProjectMetadata,
+  type PublishProjectOptions,
   type ProjectValidationResult
 } from "../projects/store.js";
 
@@ -504,7 +505,8 @@ export async function validateResearchManifest(projectRoot: string, projectId: s
 export async function publishResearchReport(
   projectRoot: string,
   projectId: string,
-  publicBaseUrl: string
+  publicBaseUrl: string,
+  options: PublishProjectOptions = {}
 ): Promise<PublishResearchReportResult> {
   const researchValidation = await validateResearchManifest(projectRoot, projectId);
   const filesBeforePublish = await listProjectFiles(projectRoot, projectId);
@@ -526,7 +528,7 @@ export async function publishResearchReport(
     };
   }
 
-  const projectReport = await publishProjectAndReport(projectRoot, projectId, publicBaseUrl, reportHtmlPath);
+  const projectReport = await publishProjectAndReport(projectRoot, projectId, publicBaseUrl, reportHtmlPath, options);
   await appendProjectTaskHistory(projectRoot, projectId, {
     toolName: "publish_research_report",
     ok: projectReport.ok,

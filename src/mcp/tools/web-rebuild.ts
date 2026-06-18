@@ -500,7 +500,7 @@ export const webRebuildTools: ToolModule[] = [
         };
       }
 
-      const published = await publishProject(ctx.projectRoot, project.id, ctx.publicBaseUrl, "index.html");
+      const published = await publishProject(ctx.projectRoot, project.id, ctx.publicBaseUrl, "index.html", { shareBasePath: ctx.publicShareBasePath });
       let inspectionReportUrl: string | undefined;
       let browserInspection: Record<string, unknown> | undefined;
       if (parsed.browserValidation) {

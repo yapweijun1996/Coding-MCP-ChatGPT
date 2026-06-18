@@ -249,7 +249,7 @@ async function maybePublish(ctx: ToolContext, projectId: string, publish: boolea
   if (!publish) return {};
   const validation = await validateProject(ctx.projectRoot, projectId, "index.html");
   if (!validation.ok) throw new Error(`Generated project did not validate: ${validation.errors.join("; ")}`);
-  const metadata = await publishProject(ctx.projectRoot, projectId, ctx.publicBaseUrl, "index.html");
+  const metadata = await publishProject(ctx.projectRoot, projectId, ctx.publicBaseUrl, "index.html", { shareBasePath: ctx.publicShareBasePath });
   return { metadata, previewUrl: metadata.publishedUrl, shareUrl: metadata.publishedUrl };
 }
 

@@ -26,6 +26,8 @@ export interface ToolContext {
   artifactRoot: string;
   projectRoot: string;
   clientId: string;
+  userId?: string;
+  publicShareBasePath?: string;
 }
 
 export interface ToolModule {

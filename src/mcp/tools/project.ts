@@ -559,7 +559,7 @@ export const projectTools: ToolModule[] = [
         };
       }
 
-      const published = await publishProject(ctx.projectRoot, project.id, ctx.publicBaseUrl, validation.entryFile);
+      const published = await publishProject(ctx.projectRoot, project.id, ctx.publicBaseUrl, validation.entryFile, { shareBasePath: ctx.publicShareBasePath });
       let browserInspection: Record<string, unknown> | undefined;
       let inspectionReportUrl: string | undefined;
       if (parsed.browserValidation) {
@@ -668,7 +668,7 @@ export const projectTools: ToolModule[] = [
     schema: screenshotProjectInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof screenshotProjectInputSchema>;
-      const published = await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile);
+      const published = await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile, { shareBasePath: ctx.publicShareBasePath });
       const results = await inspectWebpageUrl(published.publishedUrl!, {
         viewports: parsed.viewports,
         waitUntil: "networkidle",
@@ -789,7 +789,7 @@ export const projectTools: ToolModule[] = [
     schema: publishProjectInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof publishProjectInputSchema>;
-      const project = await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile);
+      const project = await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile, { shareBasePath: ctx.publicShareBasePath });
       return { ok: true, summary: `Published project ${parsed.projectId}.`, jobId: parsed.projectId, previewUrl: project.publishedUrl, shareUrl: project.publishedUrl, artifacts: [project.entryFile], logs: [JSON.stringify(project, null, 2)], errors: [] };
     }
   },
@@ -811,7 +811,7 @@ export const projectTools: ToolModule[] = [
     schema: validateProjectInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof validateProjectInputSchema>;
-      const report = await publishProjectAndReport(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile);
+      const report = await publishProjectAndReport(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile, { shareBasePath: ctx.publicShareBasePath });
       return {
         ok: report.ok,
         summary: report.summary,

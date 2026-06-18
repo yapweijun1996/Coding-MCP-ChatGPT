@@ -37,6 +37,8 @@ import {
   deleteSession as deleteUserSession,
   disableUser,
   getAllProjectRoots,
+  getPublicShareBasePathForUser,
+  getUserByProjectRoot,
   getProjectRootForUser,
   getRegistrationSettings,
   getSession as getUserSession,
@@ -46,6 +48,7 @@ import {
   loginUser,
   registerUser,
   updateRegistrationSettings,
+  updateUserProfile,
   updateUserRole
 } from "./user-store.js";
 
@@ -343,6 +346,8 @@ function toPublicSessionUser(user: {
     email: user.email,
     role: user.role,
     status: user.status,
+    username: "username" in user && typeof user.username === "string" ? user.username : undefined,
+    publicShareUsernameEnabled: "publicShareUsernameEnabled" in user ? Boolean(user.publicShareUsernameEnabled) : false,
     createdAt: user.createdAt,
     approvedAt: user.approvedAt,
     approvedBy: user.approvedBy,
@@ -560,7 +565,8 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       const status = readBodyString(req, "status");
       if (status !== "published" && status !== "private" && status !== "draft") throw new Error("Invalid project status.");
       const root = await findProjectRoot(req, user, req.params.projectId);
-      const project = await setProjectStatus(root, req.params.projectId, status, config.publicBaseUrl);
+      const owner = await getUserByProjectRoot(root);
+      const project = await setProjectStatus(root, req.params.projectId, status, config.publicBaseUrl, { shareBasePath: getPublicShareBasePathForUser(owner) });
       recordActivity({ userId: user.id, clientId: "admin", method: "admin/projects/status", toolName: req.params.projectId, ok: true, summary: `Set project ${req.params.projectId} to ${status}.` });
       ok(res, { project });
     } catch (error) {
@@ -723,6 +729,23 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     if (!requireAdmin(user, res)) return;
     const { page, pageSize } = readPageQuery(req);
     ok(res, paginate(await listUsers({ status: readStringQuery(req, "status"), q: readStringQuery(req, "q") }), page, pageSize));
+  }));
+
+  api.get("/profile", (_req, res) => {
+    ok(res, { user: res.locals.currentUser as PublicUser });
+  });
+
+  api.post("/profile", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    try {
+      const updated = await updateUserProfile(user.id, {
+        username: readBodyString(req, "username"),
+        publicShareUsernameEnabled: Boolean(readBody(req).publicShareUsernameEnabled)
+      });
+      ok(res, { user: updated });
+    } catch (error) {
+      fail(res, 400, error instanceof Error ? error.message : "Profile update failed.");
+    }
   }));
 
   api.post("/users/:userId/approve", asyncRoute(async (req, res) => {

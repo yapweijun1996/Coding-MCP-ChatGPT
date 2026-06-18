@@ -45,7 +45,17 @@ import {
   visibleBrowserToolNames
 } from "./special-tools.js";
 import { getToolAccess, isToolEffectivelyEnabled, listEffectiveToolStates } from "./tool-state.js";
-import { getAllProjectRoots, getProjectRootForUser, getSession as getUserSession, getUserByEmail, getUserById, initializeUserStore } from "./user-store.js";
+import {
+  getAllProjectRoots,
+  getProjectRootForUser,
+  getPublicShareBasePathForUser,
+  getSession as getUserSession,
+  getUserByEmail,
+  getUserById,
+  getUserByProjectRoot,
+  getUserByUsername,
+  initializeUserStore
+} from "./user-store.js";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
@@ -114,6 +124,7 @@ interface McpAuth {
   clientId: string;
   userId?: string;
   projectRoot: string;
+  publicShareBasePath?: string;
 }
 
 async function requireMcpAuth(req: express.Request, res: express.Response): Promise<McpAuth | undefined> {
@@ -131,12 +142,14 @@ async function requireMcpAuth(req: express.Request, res: express.Response): Prom
           .json({ ok: false, error: "Unauthorized" });
         return undefined;
       }
+      return {
+        clientId,
+        userId,
+        projectRoot: await getProjectRootForUser(userId),
+        publicShareBasePath: getPublicShareBasePathForUser(user)
+      };
     }
-    return {
-      clientId,
-      userId,
-      projectRoot: userId ? await getProjectRootForUser(userId) : projectRoot
-    };
+    return { clientId, projectRoot };
   }
   if (devToken && token === devToken) return { clientId: "dev-token", projectRoot };
 
@@ -190,6 +203,39 @@ function getPublicShareLocale(req: express.Request): PublicShareLocale {
   if (req.query.lang === "zh" || req.query.lang === "en") return req.query.lang;
   const preferredLanguage = req.acceptsLanguages("zh-CN", "zh", "en");
   return typeof preferredLanguage === "string" && preferredLanguage.startsWith("zh") ? "zh" : "en";
+}
+
+function injectCanonicalLink(html: string, canonicalUrl: string): string {
+  const link = `<link rel="canonical" href="${canonicalUrl.replaceAll("&", "&amp;").replaceAll('"', "&quot;")}">`;
+  if (/<link\s+[^>]*rel=["']canonical["'][^>]*>/i.test(html)) return html;
+  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${link}</head>`);
+  return `${link}\n${html}`;
+}
+
+async function sendPublishedProjectFile(res: express.Response, root: string, projectId: string, filename: string, canonicalUrl?: string): Promise<boolean> {
+  const project = await getProject(root, projectId);
+  if (project.status !== "published") return false;
+  const contentType = getProjectFileContentType(filename);
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  if (canonicalUrl && contentType === "text/html") res.setHeader("Link", `<${canonicalUrl}>; rel="canonical"`);
+  if (contentType === "text/html") {
+    res.setHeader("Clear-Site-Data", "\"cache\"");
+  }
+  if (isProjectTextFilePath(filename)) {
+    const content = await readProjectFile(root, project.id, filename, 1024 * 1024);
+    res.type(contentType).send(contentType === "text/html" && canonicalUrl ? injectCanonicalLink(content, canonicalUrl) : content);
+    return true;
+  }
+
+  const absolutePath = await getProjectStoredFilePath(root, project.id, filename);
+  res.type(contentType).sendFile(absolutePath, (error) => {
+    if (error && !res.headersSent) {
+      res.status(404).type("text/plain").send("Share not found.");
+    }
+  });
+  return true;
 }
 
 app.get("/health", (_req, res) => {
@@ -354,7 +400,9 @@ app.post("/mcp", async (req, res) => {
       shareRoot,
       artifactRoot,
       projectRoot: auth.projectRoot,
-      clientId
+      clientId,
+      userId,
+      publicShareBasePath: auth.publicShareBasePath
     });
     recordActivity({ userId, clientId, method: request.method, toolName: name, ok: result.ok, summary: result.summary });
     res.json(jsonRpcResult(request.id, resultToMcpContent(result)));
@@ -415,33 +463,47 @@ app.get("/outcome/:jobId", (req, res) => {
   res.type("html").send(renderPreviewPage(job));
 });
 
+app.get("/@:username", async (req, res) => {
+  try {
+    const user = await getUserByUsername(req.params.username);
+    if (!user?.username || !user.publicShareUsernameEnabled || !user.projectRoot) {
+      res.status(404).type("text/plain").send("Public profile not found.");
+      return;
+    }
+    const projects = (await listProjects(user.projectRoot, false)).filter((project) => project.status === "published");
+    res.type("html").send(renderPublicSharePage({
+      publicBaseUrl,
+      projects,
+      locale: getPublicShareLocale(req)
+    }));
+  } catch {
+    res.status(404).type("text/plain").send("Public profile not found.");
+  }
+});
+
+app.get("/@:username/share/:shareId/:filename(*)", async (req, res) => {
+  try {
+    const user = await getUserByUsername(req.params.username);
+    if (!user?.username || !user.publicShareUsernameEnabled || !user.projectRoot) {
+      res.status(404).type("text/plain").send("Share not found.");
+      return;
+    }
+    const canonicalUrl = `${publicBaseUrl.replace(/\/$/, "")}/@${user.username}/share/${req.params.shareId}/${req.params.filename}`;
+    if (await sendPublishedProjectFile(res, user.projectRoot, req.params.shareId, req.params.filename, canonicalUrl)) return;
+  } catch {
+    // Fall through to 404.
+  }
+  if (!res.headersSent) res.status(404).type("text/plain").send("Share not found.");
+});
+
 app.get("/share/:shareId/:filename(*)", async (req, res) => {
   try {
     for (const root of await getAllProjectRoots()) {
       try {
-        const project = await getProject(root, req.params.shareId);
-        if (project.status === "published") {
-          const contentType = getProjectFileContentType(req.params.filename);
-          res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-          res.setHeader("Pragma", "no-cache");
-          res.setHeader("Expires", "0");
-          if (contentType === "text/html") {
-            res.setHeader("Clear-Site-Data", "\"cache\"");
-          }
-          if (isProjectTextFilePath(req.params.filename)) {
-            const content = await readProjectFile(root, project.id, req.params.filename, 1024 * 1024);
-            res.type(contentType).send(content);
-            return;
-          }
-
-          const absolutePath = await getProjectStoredFilePath(root, project.id, req.params.filename);
-          res.type(contentType).sendFile(absolutePath, (error) => {
-            if (error && !res.headersSent) {
-              res.status(404).type("text/plain").send("Share not found.");
-            }
-          });
-          return;
-        }
+        const owner = await getUserByProjectRoot(root);
+        const canonicalBase = getPublicShareBasePathForUser(owner);
+        const canonicalUrl = `${publicBaseUrl.replace(/\/$/, "")}${canonicalBase}/${req.params.shareId}/${req.params.filename}`;
+        if (await sendPublishedProjectFile(res, root, req.params.shareId, req.params.filename, canonicalUrl)) return;
       } catch {
         continue;
       }

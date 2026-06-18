@@ -15,6 +15,8 @@ export interface UserRecord {
   passwordHash: string;
   role: UserRole;
   status: UserStatus;
+  username?: string;
+  publicShareUsernameEnabled: boolean;
   createdAt: string;
   approvedAt?: string;
   approvedBy?: string;
@@ -25,6 +27,8 @@ export interface PublicUser {
   email: string;
   role: UserRole;
   status: UserStatus;
+  username?: string;
+  publicShareUsernameEnabled: boolean;
   createdAt: string;
   approvedAt?: string;
   approvedBy?: string;
@@ -71,6 +75,7 @@ const defaultSettings: RegistrationSettings = {
   defaultRole: "developer",
   allowedEmailDomains: []
 };
+const reservedUsernames = new Set(["admin", "api", "share", "artifact", "mcp", "register", "login", "health", "oauth", "authorize", "token", "revoke", "users", "settings"]);
 
 let config: UserStoreConfig | undefined;
 let pool: pg.Pool | undefined;
@@ -90,6 +95,19 @@ function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+function normalizeUsername(username: string | undefined): string | undefined {
+  const normalized = username?.trim().toLowerCase();
+  return normalized || undefined;
+}
+
+function validateUsername(username: string | undefined): string | undefined {
+  const normalized = normalizeUsername(username);
+  if (!normalized) return undefined;
+  if (!/^[a-z0-9_-]{3,32}$/.test(normalized)) throw new Error("Username must be 3-32 characters using lowercase letters, numbers, hyphen, or underscore.");
+  if (reservedUsernames.has(normalized)) throw new Error("Username is reserved.");
+  return normalized;
+}
+
 function cloneSettings(settings: RegistrationSettings): RegistrationSettings {
   return {
     allowRegistration: Boolean(settings.allowRegistration),
@@ -105,6 +123,8 @@ function toPublicUser(user: UserRecord, projectRoot?: string): PublicUser {
     email: user.email,
     role: user.role,
     status: user.status,
+    username: user.username,
+    publicShareUsernameEnabled: user.publicShareUsernameEnabled,
     createdAt: user.createdAt,
     approvedAt: user.approvedAt,
     approvedBy: user.approvedBy,
@@ -123,7 +143,7 @@ async function loadFileState(): Promise<void> {
     const raw = await readFile(cfg.statePath, "utf8");
     const parsed = JSON.parse(raw) as Partial<PersistedState>;
     state = {
-      users: parsed.users ?? [],
+      users: (parsed.users ?? []).map((user) => ({ ...user, publicShareUsernameEnabled: Boolean(user.publicShareUsernameEnabled) })),
       sessions: parsed.sessions ?? [],
       registrationSettings: cloneSettings(parsed.registrationSettings ?? defaultSettings),
       projectRoots: parsed.projectRoots ?? {},
@@ -158,6 +178,8 @@ async function runMigrations(): Promise<void> {
       password_hash text not null,
       role text not null check (role in ('admin', 'developer', 'viewer')),
       status text not null check (status in ('pending', 'active', 'disabled')),
+      username text unique,
+      public_share_username_enabled boolean not null default false,
       created_at timestamptz not null,
       approved_at timestamptz,
       approved_by text
@@ -198,6 +220,9 @@ async function runMigrations(): Promise<void> {
     insert into registration_settings (id, allow_registration, require_approval, default_role, allowed_email_domains)
     values (1, false, true, 'developer', '{}')
     on conflict (id) do nothing;
+    alter table users add column if not exists username text;
+    alter table users add column if not exists public_share_username_enabled boolean not null default false;
+    create unique index if not exists users_username_unique on users(username) where username is not null;
   `);
 }
 
@@ -208,6 +233,8 @@ function mapUser(row: Record<string, unknown>): UserRecord {
     passwordHash: String(row.password_hash),
     role: row.role as UserRole,
     status: row.status as UserStatus,
+    username: row.username ? String(row.username) : undefined,
+    publicShareUsernameEnabled: Boolean(row.public_share_username_enabled),
     createdAt: new Date(String(row.created_at)).toISOString(),
     approvedAt: row.approved_at ? new Date(String(row.approved_at)).toISOString() : undefined,
     approvedBy: row.approved_by ? String(row.approved_by) : undefined
@@ -250,16 +277,18 @@ async function getUserRecordByEmail(email: string): Promise<UserRecord | undefin
 async function upsertUser(user: UserRecord): Promise<void> {
   if (pool) {
     await pool.query(`
-      insert into users (id, email, password_hash, role, status, created_at, approved_at, approved_by)
-      values ($1, $2, $3, $4, $5, $6, $7, $8)
+      insert into users (id, email, password_hash, role, status, username, public_share_username_enabled, created_at, approved_at, approved_by)
+      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       on conflict (id) do update set
         email = excluded.email,
         password_hash = excluded.password_hash,
         role = excluded.role,
         status = excluded.status,
+        username = excluded.username,
+        public_share_username_enabled = excluded.public_share_username_enabled,
         approved_at = excluded.approved_at,
         approved_by = excluded.approved_by
-    `, [user.id, user.email, user.passwordHash, user.role, user.status, user.createdAt, user.approvedAt, user.approvedBy]);
+    `, [user.id, user.email, user.passwordHash, user.role, user.status, user.username, user.publicShareUsernameEnabled, user.createdAt, user.approvedAt, user.approvedBy]);
     return;
   }
   const index = state.users.findIndex((item) => item.id === user.id);
@@ -283,6 +312,17 @@ export async function getUserByEmail(email: string): Promise<PublicUser | undefi
   return user ? toPublicUser(user, await getProjectRootForUser(user.id)) : undefined;
 }
 
+export async function getUserByUsername(username: string): Promise<PublicUser | undefined> {
+  const normalized = normalizeUsername(username);
+  if (!normalized) return undefined;
+  if (pool) {
+    const rows = await query<Record<string, unknown>>("select * from users where username = $1", [normalized]);
+    return rows[0] ? toPublicUser(mapUser(rows[0]), await getProjectRootForUser(String(rows[0].id))) : undefined;
+  }
+  const user = state.users.find((item) => item.username === normalized);
+  return user ? toPublicUser(user, await getProjectRootForUser(user.id)) : undefined;
+}
+
 async function getUserRecordById(userId: string): Promise<UserRecord | undefined> {
   if (pool) {
     const rows = await query<Record<string, unknown>>("select * from users where id = $1", [userId]);
@@ -299,9 +339,25 @@ export async function listUsers(options: { status?: string; q?: string } = {}): 
   const filtered = users.filter((user) => {
     if (options.status && user.status !== options.status) return false;
     if (!q) return true;
-    return user.email.includes(q) || user.id.toLowerCase().includes(q) || user.role.includes(q);
+    return user.email.includes(q) || user.id.toLowerCase().includes(q) || user.role.includes(q) || Boolean(user.username?.includes(q));
   });
   return Promise.all(filtered.map(async (user) => toPublicUser(user, await getProjectRootForUser(user.id))));
+}
+
+export async function getUserByProjectRoot(projectRoot: string): Promise<PublicUser | undefined> {
+  const normalizedRoot = path.resolve(projectRoot);
+  if (pool) {
+    const rows = await query<Record<string, unknown>>(`
+      select users.* from users
+      join user_project_roots on user_project_roots.user_id = users.id
+      where user_project_roots.project_root = $1
+    `, [normalizedRoot]);
+    return rows[0] ? toPublicUser(mapUser(rows[0]), normalizedRoot) : undefined;
+  }
+  const userId = Object.entries(state.projectRoots).find(([, root]) => path.resolve(root) === normalizedRoot)?.[0];
+  if (!userId) return undefined;
+  const user = state.users.find((item) => item.id === userId);
+  return user ? toPublicUser(user, normalizedRoot) : undefined;
 }
 
 async function setProjectRootForUser(userId: string, projectRoot: string): Promise<void> {
@@ -394,6 +450,7 @@ export async function registerUser(email: string, password: string): Promise<Pub
     passwordHash: await hashPassword(password),
     role: "developer",
     status: "pending",
+    publicShareUsernameEnabled: false,
     createdAt: nowIso()
   };
   await upsertUser(user);
@@ -470,6 +527,27 @@ export async function approveUser(userId: string, approvedBy: string): Promise<P
   return toPublicUser(user, await getProjectRootForUser(user.id));
 }
 
+export async function updateUserProfile(userId: string, input: { username?: string; publicShareUsernameEnabled?: boolean }): Promise<PublicUser> {
+  const user = await getUserRecordById(userId);
+  if (!user) throw new Error("User not found.");
+  const username = validateUsername(input.username);
+  if (username) {
+    const existing = pool
+      ? (await query<Record<string, unknown>>("select id from users where username = $1 and id <> $2", [username, userId]))[0]
+      : state.users.find((item) => item.username === username && item.id !== userId);
+    if (existing) throw new Error("Username is already taken.");
+  }
+  user.username = username;
+  user.publicShareUsernameEnabled = Boolean(input.publicShareUsernameEnabled && username);
+  await upsertUser(user);
+  return toPublicUser(user, await getProjectRootForUser(user.id));
+}
+
+export function getPublicShareBasePathForUser(user: PublicUser | undefined): string {
+  if (user?.username && user.publicShareUsernameEnabled) return `/@${user.username}/share`;
+  return "/share";
+}
+
 export async function disableUser(userId: string): Promise<PublicUser> {
   const user = await getUserRecordById(userId);
   if (!user) throw new Error("User not found.");
@@ -506,6 +584,7 @@ export async function loginBootstrapAdminWithPasscode(passcode: string): Promise
     passwordHash: await hashPassword(crypto.randomBytes(24).toString("base64url")),
     role: "admin",
     status: "active",
+    publicShareUsernameEnabled: false,
     createdAt: nowIso(),
     approvedAt: nowIso(),
     approvedBy: "bootstrap"
@@ -525,6 +604,7 @@ async function ensureBootstrapAdmin(): Promise<void> {
     passwordHash: await hashPassword(cfg.adminPassword),
     role: "admin",
     status: "active",
+    publicShareUsernameEnabled: false,
     createdAt: nowIso(),
     approvedAt: nowIso(),
     approvedBy: "bootstrap"
@@ -577,6 +657,7 @@ async function ensureLegacyUserMigration(): Promise<void> {
       passwordHash: await hashPassword(crypto.randomBytes(24).toString("base64url")),
       role: "developer",
       status: "active",
+      publicShareUsernameEnabled: false,
       createdAt: nowIso(),
       approvedAt: nowIso(),
       approvedBy: "migration"

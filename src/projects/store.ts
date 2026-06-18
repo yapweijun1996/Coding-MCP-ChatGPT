@@ -79,6 +79,10 @@ export interface ProjectActivity {
   taskHistory: ProjectTaskHistoryItem[];
 }
 
+export interface PublishProjectOptions {
+  shareBasePath?: string;
+}
+
 export const maxProjectFileBytes = 1024 * 1024;
 export const maxProjectImageAssetBytes = 10 * 1024 * 1024;
 export const maxProjectPresentationAssetBytes = 25 * 1024 * 1024;
@@ -299,6 +303,12 @@ function addHistory(metadata: ProjectMetadata, event: Omit<ProjectTaskHistoryIte
     updatedAt: item.time,
     taskHistory: [...(metadata.taskHistory ?? []), item].slice(-maxTaskHistoryItems)
   };
+}
+
+function makeProjectPublicUrl(publicBaseUrl: string, shareBasePath: string | undefined, projectId: string, entryFile: string): string {
+  const base = publicBaseUrl.replace(/\/$/, "");
+  const sharePath = shareBasePath?.startsWith("/") ? shareBasePath : `/${shareBasePath ?? "share"}`;
+  return `${base}${sharePath.replace(/\/$/, "")}/${projectId}/${entryFile}`;
 }
 
 export async function appendProjectTaskHistory(
@@ -714,13 +724,13 @@ export async function validateProject(projectRoot: string, projectId: string, en
   return result;
 }
 
-export async function publishProject(projectRoot: string, projectId: string, publicBaseUrl: string, entryFile?: string): Promise<ProjectMetadata> {
+export async function publishProject(projectRoot: string, projectId: string, publicBaseUrl: string, entryFile?: string, options: PublishProjectOptions = {}): Promise<ProjectMetadata> {
   const metadata = await getProject(projectRoot, projectId);
   if (metadata.status === "deleted") throw new Error("Cannot publish a deleted project.");
 
   const safeEntryFile = assertSafeProjectFilePath(entryFile ?? metadata.entryFile);
   await stat(resolveProjectFilePath(projectRoot, projectId, safeEntryFile));
-  const publishedUrl = `${publicBaseUrl.replace(/\/$/, "")}/share/${projectId}/${safeEntryFile}`;
+  const publishedUrl = makeProjectPublicUrl(publicBaseUrl, options.shareBasePath, projectId, safeEntryFile);
   const updated = addHistory({
     ...metadata,
     status: "published" as ProjectStatus,
@@ -774,9 +784,9 @@ export async function forkProject(
   return metadata;
 }
 
-export async function setProjectStatus(projectRoot: string, projectId: string, status: Exclude<ProjectStatus, "deleted">, publicBaseUrl: string): Promise<ProjectMetadata> {
+export async function setProjectStatus(projectRoot: string, projectId: string, status: Exclude<ProjectStatus, "deleted">, publicBaseUrl: string, options: PublishProjectOptions = {}): Promise<ProjectMetadata> {
   if (status === "published") {
-    return publishProject(projectRoot, projectId, publicBaseUrl);
+    return publishProject(projectRoot, projectId, publicBaseUrl, undefined, options);
   }
 
   const metadata = await getProject(projectRoot, projectId);
@@ -845,7 +855,7 @@ export async function recordProjectBrowserInspection(
   return updated;
 }
 
-export async function publishProjectAndReport(projectRoot: string, projectId: string, publicBaseUrl: string, entryFile?: string): Promise<{
+export async function publishProjectAndReport(projectRoot: string, projectId: string, publicBaseUrl: string, entryFile?: string, options: PublishProjectOptions = {}): Promise<{
   ok: boolean;
   projectId: string;
   publishedUrl?: string;
@@ -875,7 +885,7 @@ export async function publishProjectAndReport(projectRoot: string, projectId: st
     };
   }
 
-  const published = await publishProject(projectRoot, projectId, publicBaseUrl, validation.entryFile);
+  const published = await publishProject(projectRoot, projectId, publicBaseUrl, validation.entryFile, options);
   const manifest = await getProjectManifest(projectRoot, projectId);
   await appendProjectTaskHistory(projectRoot, projectId, {
     toolName: "publish_and_report",

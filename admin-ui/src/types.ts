@@ -21,6 +21,8 @@ export interface PublicUser {
   email: string;
   role: UserRole;
   status: UserStatus;
+  username?: string;
+  publicShareUsernameEnabled: boolean;
   createdAt: string;
   approvedAt?: string;
   approvedBy?: string;
