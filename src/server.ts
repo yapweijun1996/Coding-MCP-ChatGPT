@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { recordActivity } from "./activity.js";
 import { readArtifact } from "./artifacts/store.js";
-import { registerAdminApi } from "./admin-api.js";
+import { readSessionIdFromRequest, registerAdminApi } from "./admin-api.js";
 import { renderPublicSharePage, type PublicShareLocale } from "./admin.js";
 import { getJob } from "./jobs/store.js";
 import { toolDefinitions } from "./mcp/registry.js";
@@ -11,9 +11,11 @@ import { callTool } from "./mcp/router.js";
 import type { ToolResult } from "./mcp/types.js";
 import { closeAllBrowserSessions } from "./mcp/tools/browser.js";
 import {
-  createAuthorizationRedirect,
+  createAuthorizationRedirectForUser,
+  assignUnownedClientsToUser,
   exchangeToken,
   getClientIdForAccessToken,
+  getUserIdForAccessToken,
   initializeOAuthState,
   isValidAccessToken,
   parseAuthorizeParams,
@@ -43,6 +45,7 @@ import {
   visibleBrowserToolNames
 } from "./special-tools.js";
 import { getToolAccess, isToolEffectivelyEnabled, listEffectiveToolStates } from "./tool-state.js";
+import { getAllProjectRoots, getProjectRootForUser, getSession as getUserSession, getUserByEmail, getUserById, initializeUserStore } from "./user-store.js";
 
 type JsonRpcRequest = {
   jsonrpc: "2.0";
@@ -60,6 +63,8 @@ const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
 const shareRoot = process.env.SHARE_ROOT ?? `${workspaceRoot}/.shares`;
 const artifactRoot = process.env.ARTIFACT_ROOT ?? `${workspaceRoot}/.artifacts`;
 const projectRoot = process.env.PROJECT_ROOT ?? `${workspaceRoot}/.projects`;
+const usersRoot = process.env.USERS_ROOT ?? `${workspaceRoot}/.users`;
+const userStatePath = process.env.USER_STATE_PATH ?? `${workspaceRoot}/.state/users-state.json`;
 const skillStatePath = process.env.SKILL_STATE_PATH ?? `${workspaceRoot}/.state/skill-state.json`;
 const commandTimeoutMs = Number.parseInt(process.env.COMMAND_TIMEOUT_MS ?? "30000", 10);
 const devToken = process.env.MCP_DEV_TOKEN;
@@ -73,6 +78,18 @@ const oauthConfig: OAuthConfig = {
 };
 initializeOAuthState(oauthConfig.statePath);
 initializeSkillState(skillStatePath);
+await initializeUserStore({
+  databaseUrl: process.env.DATABASE_URL,
+  statePath: userStatePath,
+  projectRoot,
+  usersRoot,
+  adminEmail: process.env.ADMIN_EMAIL,
+  adminPassword: process.env.ADMIN_PASSWORD,
+  fallbackAdminPasscode: adminPasscode,
+  sessionTtlMs: 8 * 60 * 60 * 1000
+});
+const legacyUser = await getUserByEmail("legacy-user@local");
+if (legacyUser) assignUnownedClientsToUser(legacyUser.id);
 
 const adminDistPath = process.env.ADMIN_UI_DIST ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../admin-ui/dist");
 
@@ -93,31 +110,41 @@ function getBearerToken(header: string | undefined): string | undefined {
   return match?.[1];
 }
 
-function requireMcpAuth(req: express.Request, res: express.Response): string | undefined {
+interface McpAuth {
+  clientId: string;
+  userId?: string;
+  projectRoot: string;
+}
+
+async function requireMcpAuth(req: express.Request, res: express.Response): Promise<McpAuth | undefined> {
   const token = getBearerToken(req.header("authorization"));
   const clientId = getClientIdForAccessToken(token);
   if (token && isValidAccessToken(token) && clientId) {
     recordClientUse(clientId);
-    return clientId;
+    const userId = getUserIdForAccessToken(token);
+    if (userId) {
+      const user = await getUserById(userId);
+      if (!user || user.status !== "active") {
+        res
+          .status(401)
+          .setHeader("WWW-Authenticate", `Bearer resource_metadata="${publicBaseUrl}/.well-known/oauth-protected-resource/mcp"`)
+          .json({ ok: false, error: "Unauthorized" });
+        return undefined;
+      }
+    }
+    return {
+      clientId,
+      userId,
+      projectRoot: userId ? await getProjectRootForUser(userId) : projectRoot
+    };
   }
-  if (devToken && token === devToken) return "dev-token";
+  if (devToken && token === devToken) return { clientId: "dev-token", projectRoot };
 
   res
     .status(401)
     .setHeader("WWW-Authenticate", `Bearer resource_metadata="${publicBaseUrl}/.well-known/oauth-protected-resource/mcp"`)
     .json({ ok: false, error: "Unauthorized" });
   return undefined;
-}
-
-function requireAdmin(req: express.Request, res: express.Response): boolean {
-  const token = req.query.token;
-  if (adminPasscode && token === adminPasscode) return true;
-
-  res.status(401).type("html").send(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Admin Login</title>
-<style>body{font-family:ui-sans-serif,system-ui,sans-serif;background:#f4f5f1;margin:0;color:#17211b}main{width:min(420px,calc(100vw - 32px));margin:72px auto;background:white;border:1px solid #d5dbd2;border-radius:8px;padding:24px}input,button{width:100%;box-sizing:border-box;font:inherit;padding:11px;border-radius:6px}input{border:1px solid #bdc5b8}button{margin-top:14px;border:0;background:#12645d;color:white}</style></head>
-<body><main><h1>Admin Login</h1><form method="get" action="/admin"><input name="token" type="password" placeholder="Admin passcode" autofocus><button type="submit">Open admin</button></form></main></body></html>`);
-  return false;
 }
 
 function asJsonRpcRequest(value: unknown): JsonRpcRequest | undefined {
@@ -196,18 +223,29 @@ app.get("/.well-known/oauth-authorization-server", (_req, res) => {
   });
 });
 
-app.get("/authorize", (req, res) => {
+app.get("/authorize", async (req, res) => {
   const params = parseAuthorizeParams(req);
   if (!params) {
     res.status(400).send("Invalid authorization request.");
     return;
   }
+  const session = await getUserSession(readSessionIdFromRequest(req));
+  if (!session) {
+    res.redirect(302, `/admin/login?next=${encodeURIComponent(req.originalUrl)}`);
+    return;
+  }
 
   const validation = validateAuthorizeRequest(params);
-  res.type("html").send(renderConsentPage(params, validation));
+  const switchAccountUrl = `/admin/login?next=${encodeURIComponent(req.originalUrl)}`;
+  res.type("html").send(renderConsentPage(params, validation, { email: session.user.email, role: session.user.role }, switchAccountUrl));
 });
 
-app.post("/oauth/approve", (req, res) => {
+app.post("/oauth/approve", async (req, res) => {
+  const session = await getUserSession(readSessionIdFromRequest(req));
+  if (!session) {
+    res.redirect(302, `/admin/login?next=${encodeURIComponent("/authorize")}`);
+    return;
+  }
   const body = req.body as Partial<Record<string, string>>;
   const params: AuthorizeParams = {
     responseType: body.responseType ?? body.response_type ?? "",
@@ -220,11 +258,11 @@ app.post("/oauth/approve", (req, res) => {
   };
 
   try {
-    const redirectUrl = createAuthorizationRedirect(params, body.passcode ?? "", oauthConfig);
+    const redirectUrl = createAuthorizationRedirectForUser(params, session.user.id, oauthConfig);
     res.redirect(302, redirectUrl);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Authorization failed.";
-    res.status(400).type("html").send(renderConsentPage(params, message));
+    res.status(400).type("html").send(renderConsentPage(params, message, { email: session.user.email, role: session.user.role }));
   }
 });
 
@@ -252,13 +290,14 @@ app.post("/revoke", (req, res) => {
 });
 
 app.post("/mcp", async (req, res) => {
-  const clientId = requireMcpAuth(req, res);
-  if (!clientId) return;
+  const auth = await requireMcpAuth(req, res);
+  if (!auth) return;
+  const { clientId, userId } = auth;
   await cleanupExpiredVisibleBrowserControl();
 
   const request = asJsonRpcRequest(req.body);
   if (!request) {
-    recordActivity({ clientId, method: "invalid", ok: false, summary: "Invalid JSON-RPC request." });
+    recordActivity({ userId, clientId, method: "invalid", ok: false, summary: "Invalid JSON-RPC request." });
     res.status(400).json(jsonRpcError(null, -32600, "Invalid JSON-RPC request."));
     return;
   }
@@ -278,7 +317,7 @@ app.post("/mcp", async (req, res) => {
   }
 
   if (request.method === "tools/list") {
-    recordActivity({ clientId, method: request.method, ok: true, summary: "Listed tools." });
+    recordActivity({ userId, clientId, method: request.method, ok: true, summary: "Listed tools." });
     const enabledToolNames = new Set(listEffectiveToolStates().filter((tool) => tool.enabled && !isVisibleBrowserToolName(tool.name)).map((tool) => tool.name));
     if (isVisibleBrowserControlEnabled()) {
       for (const name of visibleBrowserToolNames) enabledToolNames.add(name);
@@ -291,19 +330,19 @@ app.post("/mcp", async (req, res) => {
     const params = request.params && typeof request.params === "object" ? request.params as Record<string, unknown> : {};
     const name = typeof params.name === "string" ? params.name : undefined;
     if (!name) {
-      recordActivity({ clientId, method: request.method, ok: false, summary: "Missing tool name." });
+      recordActivity({ userId, clientId, method: request.method, ok: false, summary: "Missing tool name." });
       res.json(jsonRpcError(request.id, -32602, "tools/call requires params.name."));
       return;
     }
     if (isVisibleBrowserToolName(name) && !isVisibleBrowserControlEnabled()) {
-      recordActivity({ clientId, method: request.method, toolName: name, ok: false, summary: "Visible browser control is off." });
+      recordActivity({ userId, clientId, method: request.method, toolName: name, ok: false, summary: "Visible browser control is off." });
       res.json(jsonRpcError(request.id, -32603, "Tool is disabled: visible browser control is off"));
       return;
     }
     if (!isVisibleBrowserToolName(name) && !isToolEffectivelyEnabled(name)) {
       const access = getToolAccess(name);
       const summary = access.access === "blocked_by_skill" ? "Tool is disabled by skill catalog." : "Tool is disabled.";
-      recordActivity({ clientId, method: request.method, toolName: name, ok: false, summary });
+      recordActivity({ userId, clientId, method: request.method, toolName: name, ok: false, summary });
       res.json(jsonRpcError(request.id, -32603, access.access === "blocked_by_skill" ? `Tool is disabled by skill catalog: ${name}` : `Tool is disabled: ${name}`));
       return;
     }
@@ -314,15 +353,15 @@ app.post("/mcp", async (req, res) => {
       commandTimeoutMs,
       shareRoot,
       artifactRoot,
-      projectRoot,
+      projectRoot: auth.projectRoot,
       clientId
     });
-    recordActivity({ clientId, method: request.method, toolName: name, ok: result.ok, summary: result.summary });
+    recordActivity({ userId, clientId, method: request.method, toolName: name, ok: result.ok, summary: result.summary });
     res.json(jsonRpcResult(request.id, resultToMcpContent(result)));
     return;
   }
 
-  recordActivity({ clientId, method: request.method, ok: false, summary: "Method not found." });
+  recordActivity({ userId, clientId, method: request.method, ok: false, summary: "Method not found." });
   res.json(jsonRpcError(request.id, -32601, `Method not found: ${request.method}`));
 });
 
@@ -354,7 +393,8 @@ app.get(/^\/admin(?:\/.*)?$/, (req, res, next) => {
 
 app.get(["/share", "/share/"], async (req, res) => {
   try {
-    const projects = (await listProjects(projectRoot, false)).filter((project) => project.status === "published");
+    const roots = await getAllProjectRoots();
+    const projects = (await Promise.all(roots.map((root) => listProjects(root, false).catch(() => [])))).flat().filter((project) => project.status === "published");
     res.type("html").send(renderPublicSharePage({
       publicBaseUrl,
       projects,
@@ -377,28 +417,34 @@ app.get("/outcome/:jobId", (req, res) => {
 
 app.get("/share/:shareId/:filename(*)", async (req, res) => {
   try {
-    const project = await getProject(projectRoot, req.params.shareId);
-    if (project.status === "published") {
-      const contentType = getProjectFileContentType(req.params.filename);
-      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-      res.setHeader("Pragma", "no-cache");
-      res.setHeader("Expires", "0");
-      if (contentType === "text/html") {
-        res.setHeader("Clear-Site-Data", "\"cache\"");
-      }
-      if (isProjectTextFilePath(req.params.filename)) {
-        const content = await readProjectFile(projectRoot, project.id, req.params.filename, 1024 * 1024);
-        res.type(contentType).send(content);
-        return;
-      }
+    for (const root of await getAllProjectRoots()) {
+      try {
+        const project = await getProject(root, req.params.shareId);
+        if (project.status === "published") {
+          const contentType = getProjectFileContentType(req.params.filename);
+          res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+          res.setHeader("Pragma", "no-cache");
+          res.setHeader("Expires", "0");
+          if (contentType === "text/html") {
+            res.setHeader("Clear-Site-Data", "\"cache\"");
+          }
+          if (isProjectTextFilePath(req.params.filename)) {
+            const content = await readProjectFile(root, project.id, req.params.filename, 1024 * 1024);
+            res.type(contentType).send(content);
+            return;
+          }
 
-      const absolutePath = await getProjectStoredFilePath(projectRoot, project.id, req.params.filename);
-      res.type(contentType).sendFile(absolutePath, (error) => {
-        if (error && !res.headersSent) {
-          res.status(404).type("text/plain").send("Share not found.");
+          const absolutePath = await getProjectStoredFilePath(root, project.id, req.params.filename);
+          res.type(contentType).sendFile(absolutePath, (error) => {
+            if (error && !res.headersSent) {
+              res.status(404).type("text/plain").send("Share not found.");
+            }
+          });
+          return;
         }
-      });
-      return;
+      } catch {
+        continue;
+      }
     }
   } catch {
     // Not a published project share; fall back to legacy standalone shares.

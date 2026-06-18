@@ -8,11 +8,15 @@ import { createProject, writeProjectFile } from "../src/projects/store.js";
 
 const root = await mkdtemp(path.join(os.tmpdir(), "coding-mcp-admin-api-"));
 process.env.ADMIN_PASSCODE = "test-admin-passcode";
+process.env.ADMIN_EMAIL = "admin@example.test";
+process.env.ADMIN_PASSWORD = "test-admin-password";
 process.env.PUBLIC_BASE_URL = "https://example.test";
 process.env.WORKSPACE_ROOT = path.join(root, "workspace");
 process.env.SHARE_ROOT = path.join(root, "shares");
 process.env.ARTIFACT_ROOT = path.join(root, "artifacts");
 process.env.PROJECT_ROOT = path.join(root, "projects");
+process.env.USERS_ROOT = path.join(root, "users");
+process.env.USER_STATE_PATH = path.join(root, "state", "users-state.json");
 process.env.SKILL_STATE_PATH = path.join(root, "state", "skill-state.json");
 process.env.OAUTH_STATE_PATH = path.join(root, "state", "oauth-state.json");
 process.env.ADMIN_UI_DIST = path.join(root, "missing-admin-dist");
@@ -41,11 +45,11 @@ async function login(baseUrl: string): Promise<{ cookie: string; csrfToken: stri
   return { cookie, csrfToken: body.csrfToken };
 }
 
-async function loginResponse(baseUrl: string, headers: Record<string, string> = {}, passcode = "test-admin-passcode"): Promise<Response> {
-  return fetch(`${baseUrl}/admin/api/session`, {
+async function loginResponse(baseUrl: string, headers: Record<string, string> = {}, password = "test-admin-password"): Promise<Response> {
+  return fetch(`${baseUrl}/admin/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...headers },
-    body: JSON.stringify({ passcode })
+    body: JSON.stringify({ email: "admin@example.test", password })
   });
 }
 
@@ -61,7 +65,7 @@ test("admin API protects session endpoints and enforces CSRF", async () => {
     const invalidLogin = await fetch(`${baseUrl}/admin/api/session`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ passcode: "wrong" })
+      body: JSON.stringify({ email: "admin@example.test", password: "wrong" })
     });
     assert.equal(invalidLogin.status, 401);
 
@@ -126,7 +130,7 @@ test("admin session cookie Secure flag follows request and ADMIN_COOKIE_SECURE m
   });
 });
 
-test("admin login rate limit locks repeated bad passcodes and success clears failures", async () => {
+test("admin login rate limit locks repeated bad passwords and success clears failures", async () => {
   await withServer(async (baseUrl) => {
     process.env.ADMIN_COOKIE_SECURE = "auto";
     for (let index = 0; index < 4; index += 1) {

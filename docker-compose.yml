@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: coding-mcp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: coding_mcp_chatgpt
+      POSTGRES_USER: coding_mcp
+      POSTGRES_PASSWORD: coding_mcp_password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coding_mcp -d coding_mcp_chatgpt"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   coding-mcp-chatgpt:
     build:
       context: .
@@ -10,8 +26,12 @@ services:
       - .env.docker
     ports:
       - "6859:6859"
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - ./.docker-data/projects:/data/projects
+      - ./.docker-data/users:/data/users
       - ./.docker-data/shares:/data/shares
       - ./.docker-data/artifacts:/data/artifacts
       - ./.docker-data/state:/data/state
@@ -28,3 +48,6 @@ services:
       timeout: 5s
       start_period: 10s
       retries: 3
+
+volumes:
+  postgres-data:

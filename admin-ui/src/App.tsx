@@ -15,6 +15,7 @@ import {
   RotateCcw,
   Search,
   Settings,
+  Users,
   ShieldAlert,
   SlidersHorizontal,
   Trash2,
@@ -22,12 +23,15 @@ import {
   X
 } from "lucide-react";
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
-import { api, ApiError, loadSession, login, setCsrfToken } from "./api";
+import { api, loadSession, login, register, setCsrfToken } from "./api";
 import type {
   ActivityEvent,
   ClientStatus,
+  ConnectorDetail,
   OverviewResult,
   PageResult,
+  PublicUser,
+  RegistrationSettings,
   ProjectFileInfo,
   ProjectManifest,
   ProjectStatus,
@@ -39,7 +43,7 @@ import type {
   ValidationStatus
 } from "./types";
 
-type Route = "overview" | "projects" | "project-detail" | "tools" | "connectors" | "activity" | "settings" | "login";
+type Route = "overview" | "projects" | "project-detail" | "tools" | "connectors" | "activity" | "users" | "settings" | "login" | "register";
 type Toast = { id: number; tone: "success" | "error"; message: string };
 type ConfirmState = {
   title: string;
@@ -55,18 +59,21 @@ const navItems: Array<{ route: Route; href: string; label: string; icon: ReactNo
   { route: "tools", href: "/admin/tools", label: "Tools & Skills", icon: <Wrench size={18} /> },
   { route: "connectors", href: "/admin/connectors", label: "Connectors", icon: <KeyRound size={18} /> },
   { route: "activity", href: "/admin/activity", label: "Activity", icon: <ShieldAlert size={18} /> },
+  { route: "users", href: "/admin/users", label: "Users", icon: <Users size={18} /> },
   { route: "settings", href: "/admin/settings", label: "Settings", icon: <Settings size={18} /> }
 ];
 
 function currentRoute(): { route: Route; projectId?: string } {
   const path = window.location.pathname.replace(/\/+$/, "") || "/admin";
   if (path === "/admin/login") return { route: "login" };
+  if (path === "/admin/register") return { route: "register" };
   if (path === "/admin/projects") return { route: "projects" };
   const projectMatch = /^\/admin\/projects\/([^/]+)$/.exec(path);
   if (projectMatch) return { route: "project-detail", projectId: decodeURIComponent(projectMatch[1]) };
   if (path === "/admin/tools") return { route: "tools" };
   if (path === "/admin/connectors") return { route: "connectors" };
   if (path === "/admin/activity") return { route: "activity" };
+  if (path === "/admin/users") return { route: "users" };
   if (path === "/admin/settings") return { route: "settings" };
   return { route: "overview" };
 }
@@ -165,6 +172,7 @@ function Pagination({ page, pageCount, total, onPage }: { page: number; pageCoun
 export function App() {
   const route = useRoute();
   const [authenticated, setAuthenticated] = useState(false);
+  const [currentUser, setCurrentUser] = useState<PublicUser | undefined>();
   const [sessionLoading, setSessionLoading] = useState(true);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -191,11 +199,12 @@ export function App() {
     loadSession()
       .then((session) => {
         setAuthenticated(session.authenticated);
-        if (!session.authenticated && route.route !== "login") navigate("/admin/login");
+        setCurrentUser(session.user);
+        if (!session.authenticated && route.route !== "login" && route.route !== "register") navigate(`/admin/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
       })
       .catch(() => {
         setAuthenticated(false);
-        if (route.route !== "login") navigate("/admin/login");
+        if (route.route !== "login" && route.route !== "register") navigate(`/admin/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
       })
       .finally(() => setSessionLoading(false));
   }, []);
@@ -224,8 +233,16 @@ export function App() {
   }, []);
 
   if (sessionLoading) return <div className="screen-loader">Loading admin console...</div>;
+  if (route.route === "register") {
+    return <RegisterPage toast={toast} />;
+  }
   if (route.route === "login" || !authenticated) {
-    return <LoginPage onLogin={() => { setAuthenticated(true); navigate("/admin"); }} toast={toast} />;
+    return <LoginPage onLogin={(user) => {
+      setAuthenticated(true);
+      setCurrentUser(user);
+      const next = new URLSearchParams(window.location.search).get("next");
+      window.location.href = next || "/admin";
+    }} toast={toast} />;
   }
 
   const title = route.route === "overview" ? "Overview"
@@ -272,11 +289,12 @@ export function App() {
           >
             <Menu size={20} />
           </button>
-          <div><p className="eyebrow">Admin</p><h1>{title}</h1></div>
+          <div><p className="eyebrow">{currentUser?.role ?? "Admin"}</p><h1>{title}</h1></div>
           <button className="button subtle" type="button" onClick={() => run(async () => {
             await api("/session", { method: "DELETE" });
             setCsrfToken(undefined);
             setAuthenticated(false);
+            setCurrentUser(undefined);
             navigate("/admin/login");
           })}><LogOut size={16} /> Sign out</button>
         </header>
@@ -287,6 +305,7 @@ export function App() {
           {route.route === "tools" && <ToolsPage setConfirm={setConfirm} toast={toast} />}
           {route.route === "connectors" && <ConnectorsPage setConfirm={setConfirm} toast={toast} />}
           {route.route === "activity" && <ActivityPage />}
+          {route.route === "users" && <UsersPage setConfirm={setConfirm} toast={toast} />}
           {route.route === "settings" && <SettingsPage />}
         </div>
       </main>
@@ -298,17 +317,22 @@ export function App() {
   );
 }
 
-function LoginPage({ onLogin, toast }: { onLogin: () => void; toast: (tone: Toast["tone"], message: string) => void }) {
-  const [passcode, setPasscode] = useState("");
+function LoginPage({ onLogin, toast }: { onLogin: (user?: PublicUser) => void; toast: (tone: Toast["tone"], message: string) => void }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    setError("");
     setBusy(true);
     try {
-      await login(passcode);
-      onLogin();
+      const session = await login(email, password);
+      onLogin(session.user);
     } catch (error) {
-      toast("error", error instanceof Error ? error.message : "Login failed.");
+      const message = error instanceof Error ? error.message : "Login failed.";
+      setError(message);
+      toast("error", message);
     } finally {
       setBusy(false);
     }
@@ -319,8 +343,58 @@ function LoginPage({ onLogin, toast }: { onLogin: () => void; toast: (tone: Toas
         <span className="brand-mark">CM</span>
         <h1>Coding MCP Admin</h1>
         <p>Sign in to manage project publishing, tools, connectors, and audit activity.</p>
-        <label>Admin passcode<input type="password" value={passcode} autoFocus onChange={(event) => setPasscode(event.target.value)} /></label>
+        {error && <div className="form-alert error" role="alert">{error}</div>}
+        <label>Email<input type="email" value={email} autoFocus autoComplete="email" onChange={(event) => setEmail(event.target.value)} /></label>
+        <label>Password<input type="password" value={password} autoComplete="current-password" onChange={(event) => setPassword(event.target.value)} /></label>
         <button className="button primary" type="submit" disabled={busy}>{busy ? "Signing in..." : "Sign in"}</button>
+        <button className="button subtle" type="button" onClick={() => navigate("/admin/register")}>Request access</button>
+      </form>
+    </main>
+  );
+}
+
+function RegisterPage({ toast }: { toast: (tone: Toast["tone"], message: string) => void }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setError("");
+    setBusy(true);
+    try {
+      await register(email, password);
+      setPending(true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Registration failed.";
+      setError(message);
+      toast("error", message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <main className="login-screen">
+      <form className="login-card" onSubmit={submit}>
+        <span className="brand-mark">CM</span>
+        <h1>Request access</h1>
+        {pending ? (
+          <>
+            <div className="form-alert success" role="status">Request sent. Your account is pending admin approval.</div>
+            <p>You can sign in after an admin approves your request.</p>
+            <button className="button primary" type="button" onClick={() => navigate("/admin/login")}>Back to sign in</button>
+          </>
+        ) : (
+          <>
+            <p>Create an account for Coding MCP. New accounts require admin approval.</p>
+            {error && <div className="form-alert error" role="alert">{error}</div>}
+            <label>Email<input type="email" value={email} autoComplete="email" onChange={(event) => setEmail(event.target.value)} /></label>
+            <label>Password<input type="password" value={password} autoComplete="new-password" onChange={(event) => setPassword(event.target.value)} /></label>
+            <button className="button primary" type="submit" disabled={busy}>{busy ? "Submitting..." : "Submit request"}</button>
+            <button className="button subtle" type="button" onClick={() => navigate("/admin/login")}>Back to sign in</button>
+          </>
+        )}
       </form>
     </main>
   );
@@ -477,9 +551,48 @@ function ToolsPage({ setConfirm, toast }: { setConfirm: (state: ConfirmState) =>
 
 function ConnectorsPage({ setConfirm, toast }: { setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void }) {
   const [clients, setClients] = useState<ClientStatus[]>([]);
+  const [detail, setDetail] = useState<ConnectorDetail>();
+  const [detailLoading, setDetailLoading] = useState("");
   const load = useCallback(() => api<{ clients: ClientStatus[] }>("/connectors").then((data) => setClients(data.clients)), []);
   useEffect(() => { load().catch((error: unknown) => toast("error", error instanceof Error ? error.message : "Unable to load connectors.")); }, [load, toast]);
-  return <section className="panel"><PanelTitle title="ChatGPT connectors" />{clients.length === 0 ? <EmptyState title="No connectors" body="No OAuth clients are registered yet." /> : <div className="table-wrap"><table><thead><tr><th>Client</th><th>Name</th><th>Redirect host</th><th>Tokens</th><th>Last used</th><th>Requests</th><th>Action</th></tr></thead><tbody>{clients.map((client) => <tr key={client.clientId}><td data-label="Client"><code>{client.clientId}</code></td><td data-label="Name">{client.clientName}</td><td data-label="Redirect">{client.redirectHost}</td><td data-label="Tokens">{client.activeAccessTokens} access, {client.refreshTokens} refresh</td><td data-label="Last used">{fmtDate(client.lastUsedAt)}</td><td data-label="Requests">{client.requestCount}</td><td data-label="Action"><button className="button danger" type="button" onClick={() => setConfirm({ title: "Revoke connector", body: `Revoke ${client.clientName}. Existing tokens for this client will no longer work.`, confirmLabel: "Revoke", tone: "danger", onConfirm: async () => { await api(`/connectors/${encodeURIComponent(client.clientId)}/revoke`, { method: "POST" }); await load(); toast("success", "Connector revoked."); } })}>Revoke</button></td></tr>)}</tbody></table></div>}</section>;
+  const openDetail = async (clientId: string) => {
+    setDetailLoading(clientId);
+    try {
+      setDetail(await api<ConnectorDetail>(`/connectors/${encodeURIComponent(clientId)}`));
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Unable to load connector activity.");
+    } finally {
+      setDetailLoading("");
+    }
+  };
+  return (
+    <>
+      <section className="panel"><PanelTitle title="ChatGPT connectors" />{clients.length === 0 ? <EmptyState title="No connectors" body="No OAuth clients are registered yet." /> : <div className="table-wrap"><table><thead><tr><th>Client</th><th>Name</th><th>Owner</th><th>Redirect host</th><th>Tokens</th><th>Last used</th><th>Requests</th><th>Action</th></tr></thead><tbody>{clients.map((client) => <tr key={client.clientId}><td data-label="Client"><code>{client.clientId}</code></td><td data-label="Name">{client.clientName}</td><td data-label="Owner"><code>{client.ownerUserId ?? "unbound"}</code></td><td data-label="Redirect">{client.redirectHost}</td><td data-label="Tokens">{client.activeAccessTokens} access, {client.refreshTokens} refresh</td><td data-label="Last used">{fmtDate(client.lastUsedAt)}</td><td data-label="Requests">{client.requestCount}</td><td data-label="Action"><div className="row-actions"><button className="button secondary" type="button" disabled={detailLoading === client.clientId} onClick={() => openDetail(client.clientId)}>{detailLoading === client.clientId ? "Loading..." : "View Activity"}</button><button className="button danger" type="button" onClick={() => setConfirm({ title: "Revoke connector", body: `Revoke ${client.clientName}. Existing tokens for this client will no longer work.`, confirmLabel: "Revoke", tone: "danger", onConfirm: async () => { await api(`/connectors/${encodeURIComponent(client.clientId)}/revoke`, { method: "POST" }); setDetail(undefined); await load(); toast("success", "Connector revoked."); } })}>Revoke</button></div></td></tr>)}</tbody></table></div>}</section>
+      {detail && <ConnectorDetailModal detail={detail} onClose={() => setDetail(undefined)} />}
+    </>
+  );
+}
+
+function ConnectorDetailModal({ detail, onClose }: { detail: ConnectorDetail; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section className="modal wide-modal" role="dialog" aria-modal="true" aria-labelledby="connector-title" onClick={(event) => event.stopPropagation()}>
+        <div className="modal-head"><h2 id="connector-title">Connector activity</h2><IconButton label="Close connector activity" onClick={onClose}><X size={18} /></IconButton></div>
+        <div className="settings-grid">
+          <div><span>Client ID</span><code>{detail.client.clientId}</code></div>
+          <div><span>Owner</span><code>{detail.owner ? `${detail.owner.email} · ${detail.owner.role}` : "Unbound legacy connector"}</code></div>
+          <div><span>Tokens</span><code>{detail.client.activeAccessTokens} access, {detail.client.refreshTokens} refresh</code></div>
+          <div><span>Requests</span><code>{detail.client.requestCount}</code></div>
+          <div><span>Last used</span><code>{fmtDate(detail.client.lastUsedAt)}</code></div>
+          <div><span>Failures</span><code>{detail.failures.length}</code></div>
+        </div>
+        <h3>Tools used</h3>
+        <div className="chip-row">{detail.toolsUsed.length ? detail.toolsUsed.map((tool) => <span className="badge neutral" key={tool}>{tool}</span>) : <span className="badge neutral">No tool calls</span>}</div>
+        <h3>Recent activity</h3>
+        <ActivityTable events={detail.activity} />
+      </section>
+    </div>
+  );
 }
 
 function ActivityPage() {
@@ -490,11 +603,47 @@ function ActivityPage() {
   return <section className="panel"><PanelTitle title="Activity audit" /><Toolbar><label className="search-field"><Search size={16} /><input placeholder="Search activity" value={params.get("q") ?? ""} onChange={(event) => updateParams({ q: event.target.value, page: "1" })} /></label><select value={params.get("status") ?? ""} onChange={(event) => updateParams({ status: event.target.value, page: "1" })} aria-label="Filter activity status"><option value="">All status</option><option value="ok">OK</option><option value="fail">Fail</option></select><input value={params.get("client") ?? ""} placeholder="Client" onChange={(event) => updateParams({ client: event.target.value, page: "1" })} /><input value={params.get("tool") ?? ""} placeholder="Tool" onChange={(event) => updateParams({ tool: event.target.value, page: "1" })} /></Toolbar>{data ? <><ActivityTable events={data.items} /><Pagination page={data.page} pageCount={data.pageCount} total={data.total} onPage={(page) => updateParams({ page: String(page) })} /></> : <div className="table-loader">Loading activity...</div>}</section>;
 }
 
+function UsersPage({ setConfirm, toast }: { setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void }) {
+  const [params, updateParams] = useQueryState({ page: "1", pageSize: "20" });
+  const [data, setData] = useState<PageResult<PublicUser>>();
+  const query = params.toString();
+  const load = useCallback(() => api<PageResult<PublicUser>>(`/users?${query}`).then(setData).catch((error: unknown) => toast("error", error instanceof Error ? error.message : "Unable to load users.")), [query, toast]);
+  useEffect(() => { load(); }, [load]);
+  return (
+    <section className="panel">
+      <PanelTitle title="Users" />
+      <Toolbar>
+        <label className="search-field"><Search size={16} /><input placeholder="Search users" value={params.get("q") ?? ""} onChange={(event) => updateParams({ q: event.target.value, page: "1" })} /></label>
+        <select value={params.get("status") ?? ""} onChange={(event) => updateParams({ status: event.target.value, page: "1" })} aria-label="Filter users by status">
+          <option value="">All status</option><option value="pending">Pending</option><option value="active">Active</option><option value="disabled">Disabled</option>
+        </select>
+      </Toolbar>
+      {!data ? <div className="table-loader">Loading users...</div> : data.items.length === 0 ? <EmptyState title="No users" body="No users match the current filters." /> : (
+        <div className="table-wrap"><table><thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Project root</th><th>Created</th><th>Actions</th></tr></thead><tbody>{data.items.map((user) => <tr key={user.id}><td data-label="Email"><strong>{user.email}</strong><code>{user.id}</code></td><td data-label="Role"><select value={user.role} onChange={(event) => setConfirm({ title: "Change role", body: `Change ${user.email} to ${event.target.value}.`, confirmLabel: "Change role", onConfirm: async () => { await api(`/users/${encodeURIComponent(user.id)}/role`, { method: "POST", body: JSON.stringify({ role: event.target.value }) }); await load(); toast("success", "Role updated."); } })}><option value="admin">admin</option><option value="developer">developer</option><option value="viewer">viewer</option></select></td><td data-label="Status"><span className={badgeClass(user.status === "active" ? "enabled" : user.status === "pending" ? "draft" : "disabled")}>{user.status}</span></td><td data-label="Project root"><code>{user.projectRoot ?? "-"}</code></td><td data-label="Created">{fmtDate(user.createdAt)}</td><td data-label="Actions"><div className="row-actions">{user.status === "pending" && <button className="button primary" type="button" onClick={() => setConfirm({ title: "Approve user", body: `Approve ${user.email} as developer.`, confirmLabel: "Approve", onConfirm: async () => { await api(`/users/${encodeURIComponent(user.id)}/approve`, { method: "POST" }); await load(); toast("success", "User approved."); } })}>Approve</button>}{user.status !== "disabled" && <button className="button danger" type="button" onClick={() => setConfirm({ title: "Disable user", body: `Disable ${user.email}. They cannot sign in or use MCP tokens after this.`, confirmLabel: "Disable", tone: "danger", onConfirm: async () => { await api(`/users/${encodeURIComponent(user.id)}/disable`, { method: "POST" }); await load(); toast("success", "User disabled."); } })}>Disable</button>}</div></td></tr>)}</tbody></table></div>
+      )}
+      {data && <Pagination page={data.page} pageCount={data.pageCount} total={data.total} onPage={(page) => updateParams({ page: String(page) })} />}
+    </section>
+  );
+}
+
 function SettingsPage() {
   const [settings, setSettings] = useState<SettingsResult>();
-  useEffect(() => { api<SettingsResult>("/settings").then(setSettings).catch(() => undefined); }, []);
+  const [registration, setRegistration] = useState<RegistrationSettings>();
+  const [domains, setDomains] = useState("");
+  const load = useCallback(async () => {
+    const next = await api<SettingsResult>("/settings");
+    setSettings(next);
+    setRegistration(next.registrationSettings);
+    setDomains(next.registrationSettings?.allowedEmailDomains.join(", ") ?? "");
+  }, []);
+  useEffect(() => { load().catch(() => undefined); }, [load]);
   if (!settings) return <div className="panel">Loading settings...</div>;
-  return <section className="panel"><PanelTitle title="System settings" /><div className="settings-grid">{Object.entries({ "Public base URL": settings.publicBaseUrl, "Workspace root": settings.workspaceRoot, "Project root": settings.projectRoot, "Share root": settings.shareRoot, "Artifact root": settings.artifactRoot, "Session TTL": `${settings.sessionTtlHours} hours` }).map(([label, value]) => <div key={label}><span>{label}</span><code>{value}</code></div>)}</div></section>;
+  return (
+    <div className="stack">
+      <section className="panel"><PanelTitle title="System settings" /><div className="settings-grid">{Object.entries({ "Public base URL": settings.publicBaseUrl, "Workspace root": settings.workspaceRoot, "Project root": settings.projectRoot, "Share root": settings.shareRoot, "Artifact root": settings.artifactRoot, "Session TTL": `${settings.sessionTtlHours} hours` }).map(([label, value]) => <div key={label}><span>{label}</span><code>{value}</code></div>)}</div></section>
+      {registration && <section className="panel"><PanelTitle title="Registration controls" /><div className="settings-form"><label><input type="checkbox" checked={registration.allowRegistration} onChange={(event) => setRegistration({ ...registration, allowRegistration: event.target.checked })} /> Allow registration</label><label>Allowed email domains<input value={domains} placeholder="example.com, company.com" onChange={(event) => setDomains(event.target.value)} /></label><div className="settings-grid"><div><span>Require approval</span><code>on</code></div><div><span>Default role</span><code>developer</code></div></div><button className="button primary" type="button" onClick={async () => { await api("/registration-settings", { method: "POST", body: JSON.stringify({ allowRegistration: registration.allowRegistration, allowedEmailDomains: domains.split(",").map((item) => item.trim()).filter(Boolean) }) }); await load(); }}>Save registration settings</button></div></section>}
+    </div>
+  );
 }
 
 function ConfirmModal({ state, onClose, toast }: { state: ConfirmState; onClose: () => void; toast: (tone: Toast["tone"], message: string) => void }) {

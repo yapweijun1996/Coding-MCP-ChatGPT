@@ -17,6 +17,7 @@ interface OAuthClient {
   clientName: string;
   redirectUris: string[];
   createdAt: number;
+  ownerUserId?: string;
 }
 
 interface AuthorizationCode {
@@ -46,6 +47,7 @@ export interface OAuthClientStatus {
   clientId: string;
   clientName: string;
   redirectHost: string;
+  ownerUserId?: string;
   activeAccessTokens: number;
   refreshTokens: number;
   lastUsedAt?: string;
@@ -92,7 +94,8 @@ const persistedStateSchema = z.object({
     clientId: z.string(),
     clientName: z.string(),
     redirectUris: z.array(z.string()),
-    createdAt: z.number()
+    createdAt: z.number(),
+    ownerUserId: z.string().optional()
   })).optional(),
   authCodes: z.array(z.object({
     code: z.string(),
@@ -178,12 +181,13 @@ function isRedirectAllowed(client: OAuthClient, redirectUri: string): boolean {
   return client.redirectUris.includes(redirectUri);
 }
 
-function adoptClientFromAuthorize(params: AuthorizeParams): OAuthClient {
+function adoptClientFromAuthorize(params: AuthorizeParams, ownerUserId?: string): OAuthClient {
   const client: OAuthClient = {
     clientId: params.clientId,
     clientName: "ChatGPT MCP Connector",
     redirectUris: [params.redirectUri],
-    createdAt: now()
+    createdAt: now(),
+    ownerUserId
   };
   clients.set(client.clientId, client);
   saveState();
@@ -258,7 +262,7 @@ export function validateAuthorizeRequest(params: AuthorizeParams): string | unde
   return undefined;
 }
 
-export function renderConsentPage(params: AuthorizeParams, error?: string): string {
+export function renderConsentPage(params: AuthorizeParams, error?: string, user?: { email: string; role: string }, switchAccountUrl?: string): string {
   const safe = (value: string | undefined): string => (value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -279,7 +283,9 @@ export function renderConsentPage(params: AuthorizeParams, error?: string): stri
     label { display: block; margin: 18px 0 6px; font-weight: 650; }
     input { width: 100%; box-sizing: border-box; font: inherit; padding: 11px; border: 1px solid #bdc5b8; border-radius: 6px; }
     button { margin-top: 18px; width: 100%; font: inherit; padding: 12px; border: 0; border-radius: 6px; background: #16615a; color: #fff; cursor: pointer; }
+    a { color: #16615a; font-weight: 700; }
     .error { color: #a11f1f; }
+    .account { margin: 16px 0; padding: 12px; border: 1px solid #d8ddd2; border-radius: 6px; background: #f7faf8; }
     code { background: #eef1eb; padding: 2px 5px; border-radius: 4px; }
   </style>
 </head>
@@ -287,6 +293,7 @@ export function renderConsentPage(params: AuthorizeParams, error?: string): stri
   <main>
     <h1>Authorize Coding MCP</h1>
     <p>Client <code>${safe(params.clientId)}</code> is requesting access to <code>${safe(params.scope || "mcp")}</code>.</p>
+    ${user ? `<div class="account"><strong>Signed in as ${safe(user.email)}</strong><p>This connector will be bound to this ${safe(user.role)} account.</p>${switchAccountUrl ? `<a href="${safe(switchAccountUrl)}">Switch account</a>` : ""}</div>` : ""}
     ${error ? `<p class="error">${safe(error)}</p>` : ""}
     <form method="post" action="/oauth/approve">
       <input type="hidden" name="response_type" value="${safe(params.responseType)}">
@@ -296,8 +303,6 @@ export function renderConsentPage(params: AuthorizeParams, error?: string): stri
       <input type="hidden" name="scope" value="${safe(params.scope)}">
       <input type="hidden" name="code_challenge" value="${safe(params.codeChallenge)}">
       <input type="hidden" name="code_challenge_method" value="${safe(params.codeChallengeMethod)}">
-      <label for="passcode">Owner passcode</label>
-      <input id="passcode" name="passcode" type="password" autocomplete="current-password" required>
       <button type="submit">Authorize</button>
     </form>
   </main>
@@ -307,8 +312,18 @@ export function renderConsentPage(params: AuthorizeParams, error?: string): stri
 
 export function createAuthorizationRedirect(params: AuthorizeParams, passcode: string, config: OAuthConfig): string {
   if (!constantTimeEqual(passcode, config.ownerPasscode)) throw new Error("Invalid owner passcode.");
+  return createAuthorizationRedirectForUser(params, undefined, config);
+}
+
+export function createAuthorizationRedirectForUser(params: AuthorizeParams, ownerUserId: string | undefined, config: OAuthConfig): string {
   if (!clients.has(params.clientId)) {
-    adoptClientFromAuthorize(params);
+    adoptClientFromAuthorize(params, ownerUserId);
+  } else if (ownerUserId) {
+    const client = clients.get(params.clientId);
+    if (client && !client.ownerUserId) {
+      client.ownerUserId = ownerUserId;
+      saveState();
+    }
   }
   const validation = validateAuthorizeRequest(params);
   if (validation) throw new Error(validation);
@@ -429,6 +444,32 @@ export function getClientIdForAccessToken(token: string | undefined): string | u
   return accessToken && accessToken.expiresAt > now() ? accessToken.clientId : undefined;
 }
 
+export function getUserIdForClient(clientId: string | undefined): string | undefined {
+  if (!clientId) return undefined;
+  return clients.get(clientId)?.ownerUserId;
+}
+
+export function getUserIdForAccessToken(token: string | undefined): string | undefined {
+  const clientId = getClientIdForAccessToken(token);
+  return getUserIdForClient(clientId);
+}
+
+export function getOAuthClientStatus(clientId: string): OAuthClientStatus | undefined {
+  return listOAuthClientStatus().find((client) => client.clientId === clientId);
+}
+
+export function assignUnownedClientsToUser(ownerUserId: string): number {
+  let changed = 0;
+  for (const client of clients.values()) {
+    if (!client.ownerUserId) {
+      client.ownerUserId = ownerUserId;
+      changed += 1;
+    }
+  }
+  if (changed > 0) saveState();
+  return changed;
+}
+
 export function recordClientUse(clientId: string): void {
   const current = clientStats.get(clientId);
   clientStats.set(clientId, {
@@ -455,6 +496,7 @@ export function listOAuthClientStatus(): OAuthClientStatus[] {
       clientId: client.clientId,
       clientName: client.clientName,
       redirectHost,
+      ownerUserId: client.ownerUserId,
       activeAccessTokens: activeAccessTokenCount,
       refreshTokens: refreshTokenCount,
       lastUsedAt: stats?.lastUsedAt,

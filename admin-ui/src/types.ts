@@ -10,11 +10,27 @@ export interface SessionResult extends ApiResult {
   authenticated: boolean;
   csrfToken?: string;
   expiresAt?: string;
+  user?: PublicUser;
+}
+
+export type UserRole = "admin" | "developer" | "viewer";
+export type UserStatus = "pending" | "active" | "disabled";
+
+export interface PublicUser {
+  id: string;
+  email: string;
+  role: UserRole;
+  status: UserStatus;
+  createdAt: string;
+  approvedAt?: string;
+  approvedBy?: string;
+  projectRoot?: string;
 }
 
 export interface ActivityEvent {
   id: number;
   time: string;
+  userId?: string;
   clientId: string;
   method: string;
   toolName?: string;
@@ -82,10 +98,20 @@ export interface ClientStatus {
   clientId: string;
   clientName: string;
   redirectHost: string;
+  ownerUserId?: string;
   activeAccessTokens: number;
   refreshTokens: number;
   lastUsedAt?: string;
   requestCount: number;
+}
+
+export interface ConnectorDetail {
+  ok: boolean;
+  client: ClientStatus;
+  owner?: PublicUser;
+  activity: ActivityEvent[];
+  failures: ActivityEvent[];
+  toolsUsed: string[];
 }
 
 export interface SpecialToolState {
@@ -151,4 +177,12 @@ export interface SettingsResult extends ApiResult {
   shareRoot: string;
   artifactRoot: string;
   sessionTtlHours: number;
+  registrationSettings?: RegistrationSettings;
+}
+
+export interface RegistrationSettings {
+  allowRegistration: boolean;
+  requireApproval: true;
+  defaultRole: "developer";
+  allowedEmailDomains: string[];
 }

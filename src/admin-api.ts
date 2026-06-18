@@ -4,7 +4,7 @@ import express from "express";
 import type { ActivityEvent } from "./activity.js";
 import { listActivity, recordActivity } from "./activity.js";
 import type { OAuthClientStatus } from "./oauth.js";
-import { listOAuthClientStatus, revokeClient } from "./oauth.js";
+import { getOAuthClientStatus, listOAuthClientStatus, revokeClient } from "./oauth.js";
 import type { ProjectStatus, ProjectSummary, ProjectValidationStatus } from "./projects/store.js";
 import {
   deleteProject,
@@ -30,6 +30,24 @@ import {
 import { closeAllBrowserSessions } from "./mcp/tools/browser.js";
 import type { EffectiveToolState } from "./tool-state.js";
 import { listEffectiveToolStates, setToolEnabled } from "./tool-state.js";
+import type { PublicUser, UserRole, UserSession } from "./user-store.js";
+import {
+  approveUser,
+  createUserSession,
+  deleteSession as deleteUserSession,
+  disableUser,
+  getAllProjectRoots,
+  getProjectRootForUser,
+  getRegistrationSettings,
+  getSession as getUserSession,
+  getUserById,
+  listUsers,
+  loginBootstrapAdminWithPasscode,
+  loginUser,
+  registerUser,
+  updateRegistrationSettings,
+  updateUserRole
+} from "./user-store.js";
 
 interface AdminApiConfig {
   adminPasscode: string;
@@ -40,19 +58,11 @@ interface AdminApiConfig {
   artifactRoot: string;
 }
 
-interface AdminSession {
-  id: string;
-  csrfToken: string;
-  createdAt: number;
-  expiresAt: number;
-}
-
 type SortDirection = "asc" | "desc";
 type AdminCookieSecureMode = "auto" | "true" | "false";
 
-const sessionCookieName = "coding_mcp_admin_session";
+const sessionCookieName = "coding_mcp_session";
 const sessionTtlMs = 8 * 60 * 60 * 1000;
-const sessions = new Map<string, AdminSession>();
 const loginFailureWindowMs = 5 * 60 * 1000;
 const loginLockoutMs = 15 * 60 * 1000;
 const maxLoginFailures = 5;
@@ -60,13 +70,6 @@ const loginAttempts = new Map<string, { failed: number; windowStartedAt: number;
 
 function now(): number {
   return Date.now();
-}
-
-function cleanupSessions(): void {
-  const current = now();
-  for (const [id, session] of sessions) {
-    if (session.expiresAt <= current) sessions.delete(id);
-  }
 }
 
 function parseCookies(header: string | undefined): Record<string, string> {
@@ -80,16 +83,8 @@ function parseCookies(header: string | undefined): Record<string, string> {
   return cookies;
 }
 
-function getSession(req: express.Request): AdminSession | undefined {
-  cleanupSessions();
-  const sessionId = parseCookies(req.header("cookie"))[sessionCookieName];
-  if (!sessionId) return undefined;
-  const session = sessions.get(sessionId);
-  if (!session || session.expiresAt <= now()) {
-    sessions.delete(sessionId);
-    return undefined;
-  }
-  return session;
+export function readSessionIdFromRequest(req: express.Request): string | undefined {
+  return parseCookies(req.header("cookie"))[sessionCookieName];
 }
 
 function adminCookieSecureMode(): AdminCookieSecureMode {
@@ -110,26 +105,14 @@ function secureCookie(req: express.Request): boolean {
   return req.secure || forwardedProto(req) === "https";
 }
 
-function setSessionCookie(req: express.Request, res: express.Response, session: AdminSession): void {
+function setSessionCookie(req: express.Request, res: express.Response, session: UserSession): void {
   const secure = secureCookie(req) ? "; Secure" : "";
-  res.setHeader("Set-Cookie", `${sessionCookieName}=${encodeURIComponent(session.id)}; Path=/admin; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(sessionTtlMs / 1000)}${secure}`);
+  res.setHeader("Set-Cookie", `${sessionCookieName}=${encodeURIComponent(session.id)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(sessionTtlMs / 1000)}${secure}`);
 }
 
 function clearSessionCookie(req: express.Request, res: express.Response): void {
   const secure = secureCookie(req) ? "; Secure" : "";
-  res.setHeader("Set-Cookie", `${sessionCookieName}=; Path=/admin; HttpOnly; SameSite=Lax; Max-Age=0${secure}`);
-}
-
-function createSession(): AdminSession {
-  const createdAt = now();
-  const session = {
-    id: crypto.randomBytes(32).toString("base64url"),
-    csrfToken: crypto.randomBytes(32).toString("base64url"),
-    createdAt,
-    expiresAt: createdAt + sessionTtlMs
-  };
-  sessions.set(session.id, session);
-  return session;
+  res.setHeader("Set-Cookie", `${sessionCookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`);
 }
 
 function ok(res: express.Response, data: Record<string, unknown> = {}): void {
@@ -153,16 +136,20 @@ function asyncRoute(handler: express.RequestHandler): express.RequestHandler {
   };
 }
 
-function requireSession(req: express.Request, res: express.Response): AdminSession | undefined {
-  const session = getSession(req);
-  if (!session) {
+async function readSession(req: express.Request): Promise<{ session: UserSession; user: PublicUser } | undefined> {
+  return getUserSession(readSessionIdFromRequest(req));
+}
+
+async function requireSession(req: express.Request, res: express.Response): Promise<{ session: UserSession; user: PublicUser } | undefined> {
+  const value = await readSession(req);
+  if (!value) {
     fail(res, 401, "Admin session required.");
     return undefined;
   }
-  return session;
+  return value;
 }
 
-function requireCsrf(req: express.Request, res: express.Response, session: AdminSession): boolean {
+function requireCsrf(req: express.Request, res: express.Response, session: UserSession): boolean {
   if (req.header("x-csrf-token") === session.csrfToken) return true;
   fail(res, 403, "Invalid CSRF token.");
   return false;
@@ -243,6 +230,62 @@ function filterActivity(req: express.Request, activity: ActivityEvent[]): Activi
   });
 }
 
+function filterActivityForUser(user: PublicUser, activity: ActivityEvent[]): ActivityEvent[] {
+  if (user.role === "admin") return activity;
+  return activity.filter((event) => event.userId === user.id);
+}
+
+function filterClientsForUser(user: PublicUser, clients: OAuthClientStatus[]): OAuthClientStatus[] {
+  if (user.role === "admin") return clients;
+  return clients.filter((client) => client.ownerUserId === user.id);
+}
+
+function requireAdmin(user: PublicUser, res: express.Response): boolean {
+  if (user.role === "admin") return true;
+  fail(res, 403, "Admin role required.");
+  return false;
+}
+
+function requireProjectMutation(user: PublicUser, res: express.Response): boolean {
+  if (user.role === "viewer") {
+    fail(res, 403, "Viewer role cannot mutate projects.");
+    return false;
+  }
+  return true;
+}
+
+async function listVisibleProjects(user: PublicUser, includeDeleted: boolean): Promise<ProjectSummary[]> {
+  if (user.role !== "admin") return listProjects(await getProjectRootForUser(user.id), includeDeleted);
+  const roots = await getAllProjectRoots();
+  const projects = await Promise.all(roots.map((root) => listProjects(root, includeDeleted).catch(() => [] as ProjectSummary[])));
+  return projects.flat();
+}
+
+async function requestedProjectRoot(req: express.Request, user: PublicUser): Promise<string> {
+  const requestedUserId = readStringQuery(req, "userId");
+  if (user.role === "admin" && requestedUserId) return getProjectRootForUser(requestedUserId);
+  return getProjectRootForUser(user.id);
+}
+
+async function findProjectRoot(req: express.Request, user: PublicUser, projectId: string): Promise<string> {
+  const firstRoot = await requestedProjectRoot(req, user);
+  try {
+    await getProject(firstRoot, projectId);
+    return firstRoot;
+  } catch {
+    if (user.role !== "admin") throw new Error("Project not found.");
+  }
+  for (const root of await getAllProjectRoots()) {
+    try {
+      await getProject(root, projectId);
+      return root;
+    } catch {
+      continue;
+    }
+  }
+  throw new Error("Project not found.");
+}
+
 function staleDraftCount(projects: ProjectSummary[]): number {
   const cutoff = now() - 7 * 24 * 60 * 60 * 1000;
   return projects.filter((project) => {
@@ -275,6 +318,36 @@ function shapeSkills(skills: SkillState[]): SkillState[] {
 
 function shapeClients(clients: OAuthClientStatus[]): OAuthClientStatus[] {
   return clients;
+}
+
+function sessionPayload(session: UserSession, user: PublicUser): Record<string, unknown> {
+  return {
+    authenticated: true,
+    csrfToken: session.csrfToken,
+    expiresAt: session.expiresAt,
+    user
+  };
+}
+
+function toPublicSessionUser(user: {
+  id: string;
+  email: string;
+  role: UserRole;
+  status: "pending" | "active" | "disabled";
+  createdAt: string;
+  approvedAt?: string;
+  approvedBy?: string;
+}, projectRoot?: string): PublicUser {
+  return {
+    id: user.id,
+    email: user.email,
+    role: user.role,
+    status: user.status,
+    createdAt: user.createdAt,
+    approvedAt: user.approvedAt,
+    approvedBy: user.approvedBy,
+    projectRoot
+  };
 }
 
 function readBody(req: express.Request): Partial<Record<string, unknown>> {
@@ -318,73 +391,101 @@ function recordLoginFailure(key: string, current: number): { locked: boolean; lo
 
 function requireApiSession(config: AdminApiConfig) {
   return (req: express.Request, res: express.Response, next: express.NextFunction): void => {
-    const session = requireSession(req, res);
-    if (!session) return;
-    res.locals.adminSession = session;
-    if (req.method !== "GET" && req.method !== "HEAD" && !requireCsrf(req, res, session)) return;
-    next();
+    requireSession(req, res).then((value) => {
+      if (!value) return;
+      res.locals.userSession = value.session;
+      res.locals.currentUser = value.user;
+      if (req.method !== "GET" && req.method !== "HEAD" && !requireCsrf(req, res, value.session)) return;
+      next();
+    }).catch(next);
   };
 }
 
 export function registerAdminApi(app: express.Express, config: AdminApiConfig): void {
   const api = express.Router();
 
-  api.post("/session", (req, res) => {
-    const passcode = readBodyString(req, "passcode");
+  api.post("/auth/login", asyncRoute(async (req, res) => {
+    const email = readBodyString(req, "email");
+    const password = readBodyString(req, "password");
     const attemptKey = loginAttemptKey(req);
     const current = now();
     const lockedAttempt = getLockedLoginAttempt(attemptKey, current);
     if (lockedAttempt?.lockedUntil) {
-      recordActivity({ clientId: "admin", method: "admin/session", ok: false, summary: "Rate-limited admin login attempt." });
+      recordActivity({ clientId: "admin", method: "admin/auth/login", ok: false, summary: "Rate-limited login attempt." });
       fail(res, 429, "Too many login attempts. Try again later.");
       return;
     }
-    if (!config.adminPasscode) {
-      fail(res, 503, "Admin passcode is not configured.");
-      return;
-    }
-    if (passcode !== config.adminPasscode) {
+    try {
+      const user = await loginUser(email, password);
+      loginAttempts.delete(attemptKey);
+      const session = await createUserSession(user.id);
+      setSessionCookie(req, res, session);
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/auth/login", ok: true, summary: `User ${user.email} logged in.` });
+      ok(res, sessionPayload(session, toPublicSessionUser(user, await getProjectRootForUser(user.id))));
+    } catch (error) {
       const failure = recordLoginFailure(attemptKey, current);
-      recordActivity({ clientId: "admin", method: "admin/session", ok: false, summary: "Rejected admin login attempt." });
-      fail(res, failure.locked ? 429 : 401, failure.locked ? "Too many login attempts. Try again later." : "Invalid passcode.");
+      recordActivity({ clientId: "admin", method: "admin/auth/login", ok: false, summary: "Rejected login attempt." });
+      fail(res, failure.locked ? 429 : 401, failure.locked ? "Too many login attempts. Try again later." : error instanceof Error ? error.message : "Login failed.");
       return;
     }
-    loginAttempts.delete(attemptKey);
-    const session = createSession();
-    setSessionCookie(req, res, session);
-    recordActivity({ clientId: "admin", method: "admin/session", ok: true, summary: "Admin session started." });
-    ok(res, { authenticated: true, csrfToken: session.csrfToken, expiresAt: new Date(session.expiresAt).toISOString() });
-  });
+  }));
 
-  api.get("/session", (req, res) => {
-    const session = getSession(req);
+  api.post("/auth/register", asyncRoute(async (req, res) => {
+    try {
+      const user = await registerUser(readBodyString(req, "email"), readBodyString(req, "password"));
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/auth/register", ok: true, summary: `Registered pending user ${user.email}.` });
+      ok(res, { user, pending: true });
+    } catch (error) {
+      fail(res, 400, error instanceof Error ? error.message : "Registration failed.");
+    }
+  }));
+
+  api.post("/session", asyncRoute(async (req, res) => {
+    const passcode = readBodyString(req, "passcode");
+    const email = readBodyString(req, "email");
+    const password = readBodyString(req, "password");
+    try {
+      const user = email && password ? await loginUser(email, password) : await loginBootstrapAdminWithPasscode(passcode);
+      const session = await createUserSession(user.id);
+      setSessionCookie(req, res, session);
+      ok(res, sessionPayload(session, toPublicSessionUser(user, await getProjectRootForUser(user.id))));
+    } catch (error) {
+      fail(res, 401, error instanceof Error ? error.message : "Login failed.");
+    }
+  }));
+
+  api.get("/session", asyncRoute(async (req, res) => {
+    const value = await readSession(req);
     ok(res, {
-      authenticated: Boolean(session),
-      csrfToken: session?.csrfToken,
-      expiresAt: session ? new Date(session.expiresAt).toISOString() : undefined
+      authenticated: Boolean(value),
+      csrfToken: value?.session.csrfToken,
+      expiresAt: value?.session.expiresAt,
+      user: value?.user
     });
-  });
+  }));
 
   api.use(requireApiSession(config));
 
-  api.delete("/session", (req, res) => {
-    const session = res.locals.adminSession as AdminSession;
-    sessions.delete(session.id);
+  api.delete("/session", asyncRoute(async (req, res) => {
+    const session = res.locals.userSession as UserSession;
+    const user = res.locals.currentUser as PublicUser;
+    await deleteUserSession(session.id);
     clearSessionCookie(req, res);
-    recordActivity({ clientId: "admin", method: "admin/session", ok: true, summary: "Admin session ended." });
+    recordActivity({ userId: user.id, clientId: "admin", method: "admin/session", ok: true, summary: "Admin session ended." });
     ok(res);
-  });
+  }));
 
   api.get("/overview", asyncRoute(async (_req, res) => {
-    const projects = await listProjects(config.projectRoot, true);
+    const user = res.locals.currentUser as PublicUser;
+    const projects = await listVisibleProjects(user, true);
     const activeProjects = projects.filter((project) => project.status !== "deleted");
-    const activity = listActivity(200);
+    const activity = filterActivityForUser(user, listActivity(200));
     const specialTools = getSpecialToolStates();
     const tools = listEffectiveToolStates().filter((tool) => !isVisibleBrowserToolName(tool.name));
     const counts = projectCounts(projects);
     ok(res, {
       metrics: {
-        connectedClients: listOAuthClientStatus().length,
+        connectedClients: filterClientsForUser(user, listOAuthClientStatus()).length,
         enabledTools: tools.filter((tool) => tool.enabled).length + (isVisibleBrowserControlEnabled() ? visibleBrowserToolNames.length : 0),
         projects: activeProjects.length,
         publishedProjects: counts.published,
@@ -402,17 +503,20 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
   }));
 
   api.get("/projects", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
     const { page, pageSize } = readPageQuery(req);
     const sort = readStringQuery(req, "sort") || "updated-desc";
-    const projects = sortProjects(filterProjects(req, await listProjects(config.projectRoot, true)), sort);
+    const projects = sortProjects(filterProjects(req, await listVisibleProjects(user, true)), sort);
     ok(res, { ...paginate(projects, page, pageSize), sort });
   }));
 
   api.get("/projects/:projectId", asyncRoute(async (req, res) => {
     try {
-      const project = await getProjectWithFiles(config.projectRoot, req.params.projectId);
-      const manifest = await getProjectManifest(config.projectRoot, req.params.projectId);
-      const researchSummary = await getResearchSummary(config.projectRoot, req.params.projectId);
+      const user = res.locals.currentUser as PublicUser;
+      const root = await findProjectRoot(req, user, req.params.projectId);
+      const project = await getProjectWithFiles(root, req.params.projectId);
+      const manifest = await getProjectManifest(root, req.params.projectId);
+      const researchSummary = await getResearchSummary(root, req.params.projectId);
       ok(res, { project: project.metadata, files: project.files, manifest, researchSummary });
     } catch (error) {
       fail(res, 404, error instanceof Error ? error.message : "Project not found.");
@@ -421,7 +525,9 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
 
   api.get("/projects/:projectId/download.zip", asyncRoute(async (req, res) => {
     try {
-      const project = await getProject(config.projectRoot, req.params.projectId);
+      const user = res.locals.currentUser as PublicUser;
+      const root = await findProjectRoot(req, user, req.params.projectId);
+      const project = await getProject(root, req.params.projectId);
       if (project.status === "deleted") {
         fail(res, 404, "Project is deleted.");
         return;
@@ -435,9 +541,9 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       res.setHeader("Content-Type", "application/zip");
       res.setHeader("Content-Disposition", `attachment; filename="${project.id}.zip"`);
       archive.pipe(res);
-      archive.directory(getProjectFilesDirectory(config.projectRoot, project.id), "published");
+      archive.directory(getProjectFilesDirectory(root, project.id), "published");
       archive.glob("**/*", {
-        cwd: getProjectWorkspaceDirectory(config.projectRoot, project.id),
+        cwd: getProjectWorkspaceDirectory(root, project.id),
         ignore: ["node_modules/**", "dist/**"]
       }, { prefix: "workspace" });
       await archive.finalize();
@@ -449,10 +555,13 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
 
   api.post("/projects/:projectId/status", async (req, res) => {
     try {
+      const user = res.locals.currentUser as PublicUser;
+      if (!requireProjectMutation(user, res)) return;
       const status = readBodyString(req, "status");
       if (status !== "published" && status !== "private" && status !== "draft") throw new Error("Invalid project status.");
-      const project = await setProjectStatus(config.projectRoot, req.params.projectId, status, config.publicBaseUrl);
-      recordActivity({ clientId: "admin", method: "admin/projects/status", toolName: req.params.projectId, ok: true, summary: `Set project ${req.params.projectId} to ${status}.` });
+      const root = await findProjectRoot(req, user, req.params.projectId);
+      const project = await setProjectStatus(root, req.params.projectId, status, config.publicBaseUrl);
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/projects/status", toolName: req.params.projectId, ok: true, summary: `Set project ${req.params.projectId} to ${status}.` });
       ok(res, { project });
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Project status update failed.");
@@ -461,8 +570,11 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
 
   api.post("/projects/:projectId/delete", async (req, res) => {
     try {
-      const project = await deleteProject(config.projectRoot, req.params.projectId);
-      recordActivity({ clientId: "admin", method: "admin/projects/delete", toolName: req.params.projectId, ok: true, summary: `Soft-deleted project ${req.params.projectId}.` });
+      const user = res.locals.currentUser as PublicUser;
+      if (!requireProjectMutation(user, res)) return;
+      const root = await findProjectRoot(req, user, req.params.projectId);
+      const project = await deleteProject(root, req.params.projectId);
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/projects/delete", toolName: req.params.projectId, ok: true, summary: `Soft-deleted project ${req.params.projectId}.` });
       ok(res, { project });
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Project delete failed.");
@@ -470,13 +582,46 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
   });
 
   api.get("/connectors", (_req, res) => {
-    ok(res, { clients: shapeClients(listOAuthClientStatus()) });
+    const user = res.locals.currentUser as PublicUser;
+    ok(res, { clients: shapeClients(filterClientsForUser(user, listOAuthClientStatus())) });
+  });
+
+  api.get("/connectors/:clientId", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    const client = getOAuthClientStatus(req.params.clientId);
+    if (!client || !filterClientsForUser(user, [client]).length) {
+      fail(res, 404, "Connector not found.");
+      return;
+    }
+    const owner = client.ownerUserId ? await getUserById(client.ownerUserId) : undefined;
+    const activity = listActivity(200).filter((event) => event.clientId === req.params.clientId).slice(0, 40);
+    const failures = activity.filter((event) => !event.ok);
+    const toolsUsed = [...new Set(activity.map((event) => event.toolName).filter((value): value is string => Boolean(value)))];
+    ok(res, { client, owner, activity, failures, toolsUsed });
+  }));
+
+  api.get("/connectors/:clientId/activity", (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    const client = getOAuthClientStatus(req.params.clientId);
+    if (!client || !filterClientsForUser(user, [client]).length) {
+      fail(res, 404, "Connector not found.");
+      return;
+    }
+    const { page, pageSize } = readPageQuery(req);
+    const scoped = listActivity(200).filter((event) => event.clientId === req.params.clientId);
+    ok(res, paginate(filterActivity(req, scoped), page, pageSize));
   });
 
   api.post("/connectors/:clientId/revoke", (req, res) => {
     try {
+      const user = res.locals.currentUser as PublicUser;
+      const client = getOAuthClientStatus(req.params.clientId);
+      if (!client || !filterClientsForUser(user, [client]).length) {
+        fail(res, 404, "Connector not found.");
+        return;
+      }
       revokeClient(req.params.clientId);
-      recordActivity({ clientId: "admin", method: "admin/connectors/revoke", toolName: req.params.clientId, ok: true, summary: `Revoked connector ${req.params.clientId}.` });
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/connectors/revoke", toolName: req.params.clientId, ok: true, summary: `Revoked connector ${req.params.clientId}.` });
       ok(res);
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Connector revoke failed.");
@@ -484,14 +629,18 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
   });
 
   api.get("/special-tools", (_req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
     ok(res, { tools: getSpecialToolStates() });
   });
 
   api.post("/special-tools/visible-browser/enable", (req, res) => {
     try {
+      const user = res.locals.currentUser as PublicUser;
+      if (!requireAdmin(user, res)) return;
       const durationMinutes = Number.parseInt(readBodyString(req, "durationMinutes") || "15", 10);
-      const state = enableVisibleBrowserControl(durationMinutes, "admin");
-      recordActivity({ clientId: "admin", method: "admin/special-tools", toolName: "visible_browser_control", ok: true, summary: `Enabled visible browser control until ${state.enabledUntil}.` });
+      const state = enableVisibleBrowserControl(durationMinutes, user.id);
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/special-tools", toolName: "visible_browser_control", ok: true, summary: `Enabled visible browser control until ${state.enabledUntil}.` });
       ok(res, { state });
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Special tool enable failed.");
@@ -500,9 +649,11 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
 
   api.post("/special-tools/visible-browser/disable", asyncRoute(async (_req, res) => {
     try {
+      const user = res.locals.currentUser as PublicUser;
+      if (!requireAdmin(user, res)) return;
       disableVisibleBrowserControl("admin-disabled");
       const closed = await closeAllBrowserSessions();
-      recordActivity({ clientId: "admin", method: "admin/special-tools", toolName: "visible_browser_control", ok: true, summary: `Disabled visible browser control. Closed ${closed.length} browser session(s).` });
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/special-tools", toolName: "visible_browser_control", ok: true, summary: `Disabled visible browser control. Closed ${closed.length} browser session(s).` });
       ok(res, { closed });
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Special tool disable failed.");
@@ -511,9 +662,11 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
 
   api.post("/special-tools/visible-browser/kill", asyncRoute(async (_req, res) => {
     try {
+      const user = res.locals.currentUser as PublicUser;
+      if (!requireAdmin(user, res)) return;
       disableVisibleBrowserControl("admin-kill");
       const closed = await closeAllBrowserSessions();
-      recordActivity({ clientId: "admin", method: "admin/special-tools", toolName: "visible_browser_control", ok: true, summary: `Killed visible browser control. Closed ${closed.length} browser session(s).` });
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/special-tools", toolName: "visible_browser_control", ok: true, summary: `Killed visible browser control. Closed ${closed.length} browser session(s).` });
       ok(res, { closed });
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Special tool kill failed.");
@@ -521,14 +674,18 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
   }));
 
   api.get("/skills", (_req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
     ok(res, { skills: shapeSkills(listSkillStates()) });
   });
 
   api.post("/skills/:id/toggle", (req, res) => {
     try {
+      const user = res.locals.currentUser as PublicUser;
+      if (!requireAdmin(user, res)) return;
       const enabled = Boolean(readBody(req).enabled);
       setSkillEnabled(req.params.id, enabled);
-      recordActivity({ clientId: "admin", method: "admin/skills", toolName: req.params.id, ok: true, summary: `${enabled ? "Enabled" : "Disabled"} skill ${req.params.id}.` });
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/skills", toolName: req.params.id, ok: true, summary: `${enabled ? "Enabled" : "Disabled"} skill ${req.params.id}.` });
       ok(res, { skills: shapeSkills(listSkillStates()) });
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Skill toggle failed.");
@@ -536,15 +693,19 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
   });
 
   api.get("/tools", (_req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
     ok(res, { tools: shapeTools(listEffectiveToolStates().filter((tool) => !isVisibleBrowserToolName(tool.name))) });
   });
 
   api.post("/tools/:name/toggle", (req, res) => {
     try {
+      const user = res.locals.currentUser as PublicUser;
+      if (!requireAdmin(user, res)) return;
       const enabled = Boolean(readBody(req).enabled);
       if (isVisibleBrowserToolName(req.params.name)) throw new Error("Browser control tools are managed from Special Tools.");
       setToolEnabled(req.params.name, enabled);
-      recordActivity({ clientId: "admin", method: "admin/tools", toolName: req.params.name, ok: true, summary: `${enabled ? "Enabled" : "Disabled"} tool override ${req.params.name}.` });
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/tools", toolName: req.params.name, ok: true, summary: `${enabled ? "Enabled" : "Disabled"} tool override ${req.params.name}.` });
       ok(res, { tools: shapeTools(listEffectiveToolStates().filter((tool) => !isVisibleBrowserToolName(tool.name))) });
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Tool toggle failed.");
@@ -552,20 +713,70 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
   });
 
   api.get("/activity", (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
     const { page, pageSize } = readPageQuery(req);
-    ok(res, paginate(filterActivity(req, listActivity(200)), page, pageSize));
+    ok(res, paginate(filterActivity(req, filterActivityForUser(user, listActivity(200))), page, pageSize));
   });
 
-  api.get("/settings", (_req, res) => {
+  api.get("/users", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    const { page, pageSize } = readPageQuery(req);
+    ok(res, paginate(await listUsers({ status: readStringQuery(req, "status"), q: readStringQuery(req, "q") }), page, pageSize));
+  }));
+
+  api.post("/users/:userId/approve", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    ok(res, { user: await approveUser(req.params.userId, user.id) });
+  }));
+
+  api.post("/users/:userId/disable", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    ok(res, { user: await disableUser(req.params.userId) });
+  }));
+
+  api.post("/users/:userId/role", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    const role = readBodyString(req, "role") as UserRole;
+    if (role !== "admin" && role !== "developer" && role !== "viewer") {
+      fail(res, 400, "Invalid role.");
+      return;
+    }
+    ok(res, { user: await updateUserRole(req.params.userId, role) });
+  }));
+
+  api.get("/registration-settings", asyncRoute(async (_req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    ok(res, { settings: await getRegistrationSettings() });
+  }));
+
+  api.post("/registration-settings", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    ok(res, { settings: await updateRegistrationSettings({
+      allowRegistration: Boolean(readBody(req).allowRegistration),
+      allowedEmailDomains: Array.isArray(readBody(req).allowedEmailDomains)
+        ? (readBody(req).allowedEmailDomains as unknown[]).map(String)
+        : readBodyString(req, "allowedEmailDomains").split(",").map((item) => item.trim()).filter(Boolean)
+    }) });
+  }));
+
+  api.get("/settings", asyncRoute(async (_req, res) => {
+    const user = res.locals.currentUser as PublicUser;
     ok(res, {
       publicBaseUrl: config.publicBaseUrl,
       workspaceRoot: config.workspaceRoot,
-      projectRoot: config.projectRoot,
+      projectRoot: user.role === "admin" ? config.projectRoot : await getProjectRootForUser(user.id),
       shareRoot: config.shareRoot,
       artifactRoot: config.artifactRoot,
-      sessionTtlHours: sessionTtlMs / (60 * 60 * 1000)
+      sessionTtlHours: sessionTtlMs / (60 * 60 * 1000),
+      registrationSettings: user.role === "admin" ? await getRegistrationSettings() : undefined
     });
-  });
+  }));
 
   app.use("/admin/api", api);
 }

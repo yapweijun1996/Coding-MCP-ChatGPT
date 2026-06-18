@@ -40,11 +40,18 @@ export async function loadSession(): Promise<SessionResult> {
   return session;
 }
 
-export async function login(passcode: string): Promise<SessionResult> {
-  const session = await api<SessionResult>("/session", {
+export async function login(email: string, password: string): Promise<SessionResult> {
+  const session = await api<SessionResult>("/auth/login", {
     method: "POST",
-    body: JSON.stringify({ passcode })
+    body: JSON.stringify({ email, password })
   });
   setCsrfToken(session.csrfToken);
   return session;
+}
+
+export async function register(email: string, password: string): Promise<{ ok: boolean; pending: boolean }> {
+  return api<{ ok: boolean; pending: boolean }>("/auth/register", {
+    method: "POST",
+    body: JSON.stringify({ email, password })
+  });
 }

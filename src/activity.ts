@@ -1,6 +1,7 @@
 export interface ActivityEvent {
   id: number;
   time: string;
+  userId?: string;
   clientId: string;
   method: string;
   toolName?: string;
@@ -26,4 +27,3 @@ export function recordActivity(input: Omit<ActivityEvent, "id" | "time">): Activ
 export function listActivity(limit = 80): ActivityEvent[] {
   return events.slice(0, limit);
 }
-

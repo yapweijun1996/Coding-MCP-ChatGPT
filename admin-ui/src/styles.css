@@ -106,14 +106,24 @@ td .badge + select { display: block; margin-top: 8px; width: 140px; }
 .login-card h1, .login-card p { margin: 0; }
 .login-card label { display: grid; gap: 7px; font-weight: 850; }
 .login-card input { border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; }
+.form-alert { border-radius: 8px; padding: 11px 12px; font-weight: 800; line-height: 1.35; }
+.form-alert.error { background: #f8d8d8; color: #8a1f1f; border: 1px solid #edb9b9; }
+.form-alert.success { background: #ddf3eb; color: #106042; border: 1px solid #b7e2d0; }
 .toast-stack { position: fixed; right: 18px; bottom: 18px; z-index: 70; display: grid; gap: 10px; width: min(360px, calc(100vw - 36px)); }
 .toast { border-radius: 8px; padding: 12px 14px; color: white; box-shadow: 0 10px 28px rgba(15,23,42,.18); font-weight: 800; }
 .toast.success { background: var(--accent); }
 .toast.error { background: var(--danger); }
 .modal-backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(8, 16, 14, .5); display: grid; place-items: center; padding: 18px; }
 .modal { width: min(520px, 100%); max-height: min(680px, 86dvh); overflow: auto; background: white; border-radius: 8px; border: 1px solid var(--line); padding: 18px; box-shadow: 0 16px 48px rgba(15,23,42,.22); }
+.wide-modal { width: min(980px, 100%); }
 .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .modal-head h2 { margin: 0; font-size: 19px; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 16px; }
+.settings-form { display: grid; gap: 14px; max-width: 760px; }
+.settings-form label { display: grid; gap: 7px; font-weight: 850; color: var(--ink); }
+.settings-form label:has(input[type="checkbox"]) { display: flex; align-items: center; }
+.settings-form input:not([type="checkbox"]) { border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; }
+.settings-form input[type="checkbox"] { width: 18px; min-height: 18px; }
 
 @media (max-width: 1180px) {
   .metric-grid { grid-template-columns: repeat(3, 1fr); }
