@@ -45,6 +45,7 @@ import type {
 
 type Route = "overview" | "projects" | "project-detail" | "tools" | "connectors" | "activity" | "users" | "settings" | "login" | "register";
 type Toast = { id: number; tone: "success" | "error"; message: string };
+type MutableProjectStatus = Exclude<ProjectStatus, "deleted">;
 type ConfirmState = {
   title: string;
   body: string;
@@ -100,6 +101,12 @@ function badgeClass(value: string): string {
   if (["failed", "deleted", "fail", "high", "disabled"].includes(value)) return "badge bad";
   return "badge neutral";
 }
+
+const projectStatusActions: Array<{ status: MutableProjectStatus; label: string; confirmLabel: string; body: (title: string) => string; tone?: "danger" | "primary" }> = [
+  { status: "published", label: "Publish", confirmLabel: "Publish", tone: "primary", body: (title) => `Publish ${title}. Public preview links can be opened by anyone with the URL.` },
+  { status: "private", label: "Make private", confirmLabel: "Make private", body: (title) => `Make ${title} private. Public preview access will be removed.` },
+  { status: "draft", label: "Move to draft", confirmLabel: "Move to draft", body: (title) => `Move ${title} back to draft. It will no longer appear as a published project.` }
+];
 
 function useRoute(): { route: Route; projectId?: string } {
   const [route, setRoute] = useState(currentRoute);
@@ -462,17 +469,66 @@ function ProjectsPage({ setConfirm, toast }: { setConfirm: (state: ConfirmState)
 }
 
 function ProjectTable({ projects, onReload, setConfirm, toast }: { projects: ProjectSummary[]; onReload: () => void; setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void }) {
+  const [statusMenuProjectId, setStatusMenuProjectId] = useState<string | null>(null);
   if (projects.length === 0) return <EmptyState title="No projects found" body="Adjust search or filters to see more projects." />;
-  const updateStatus = async (project: ProjectSummary, status: ProjectStatus) => {
+  const updateStatus = async (project: ProjectSummary, status: MutableProjectStatus) => {
     await api(`/projects/${encodeURIComponent(project.id)}/status`, { method: "POST", body: JSON.stringify({ status }) });
     toast("success", `Project set to ${status}.`);
     onReload();
+  };
+  const requestStatusChange = (project: ProjectSummary, status: MutableProjectStatus) => {
+    const action = projectStatusActions.find((item) => item.status === status);
+    if (!action || project.status === status) return;
+    setStatusMenuProjectId(null);
+    setConfirm({
+      title: action.label,
+      body: action.body(project.title),
+      confirmLabel: action.confirmLabel,
+      tone: action.tone,
+      onConfirm: () => updateStatus(project, status)
+    });
   };
   return (
     <div className="table-wrap"><table><thead><tr><th>Project</th><th>Status</th><th>Validation</th><th>Files</th><th>Updated</th><th>Created by</th><th>Actions</th></tr></thead><tbody>
       {projects.map((project) => <tr key={project.id}>
         <td data-label="Project"><button className="link-button" type="button" onClick={() => navigate(`/admin/projects/${encodeURIComponent(project.id)}`)}>{project.title}</button><code>{project.id}</code></td>
-        <td data-label="Status"><span className={badgeClass(project.status)}>{project.status}</span>{project.status !== "deleted" && <select value={project.status} onChange={(event) => updateStatus(project, event.target.value as ProjectStatus)} aria-label={`Project status for ${project.title}`}><option value="published">Published</option><option value="private">Private</option><option value="draft">Draft</option></select>}</td>
+        <td data-label="Status">
+          <div className="status-cell">
+            <span className={badgeClass(project.status)}>{project.status}</span>
+            {project.status !== "deleted" && (
+              <button
+                className="button subtle mini"
+                type="button"
+                aria-expanded={statusMenuProjectId === project.id}
+                aria-label={`Change status for ${project.title}`}
+                onClick={() => setStatusMenuProjectId((current) => current === project.id ? null : project.id)}
+              >
+                Change
+              </button>
+            )}
+          </div>
+          {statusMenuProjectId === project.id && project.status !== "deleted" && (
+            <div className="status-menu" role="menu" aria-label={`Status actions for ${project.title}`}>
+              {projectStatusActions.map((action) => {
+                const isCurrent = project.status === action.status;
+                return (
+                  <button
+                    key={action.status}
+                    className={isCurrent ? "current" : ""}
+                    type="button"
+                    role="menuitem"
+                    disabled={isCurrent}
+                    aria-current={isCurrent ? "true" : undefined}
+                    onClick={() => requestStatusChange(project, action.status)}
+                  >
+                    <span>{action.label}</span>
+                    {isCurrent && <small>Current</small>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </td>
         <td data-label="Validation"><span className={badgeClass(validationStatus(project))}>{validationStatus(project).replace("_", " ")}</span></td>
         <td data-label="Files">{project.filesCount}</td>
         <td data-label="Updated">{fmtDate(project.updatedAt)}</td>
