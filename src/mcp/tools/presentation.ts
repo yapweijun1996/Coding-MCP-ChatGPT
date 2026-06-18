@@ -120,7 +120,8 @@ const createVideoPresentationInputSchema = z.object({
     transition: z.enum(["cut", "fade", "slide", "zoom"]).optional().default("fade")
   })).min(1).max(30),
   audioPath: z.string().min(1).max(240).optional(),
-  outputPath: z.string().min(1).max(240).optional().default("video.mp4")
+  outputPath: z.string().min(1).max(240).optional().default("video.mp4"),
+  publish: z.boolean().optional().default(false)
 }).refine((value) => value.scenes.reduce((total, scene) => total + scene.durationSeconds, 0) <= 180, {
   message: "Video presentations are limited to 180 seconds."
 });
@@ -847,11 +848,13 @@ async function handleCreateVideoPresentation(input: VideoPresentationInput, ctx:
     await writeProjectFile(ctx.projectRoot, project.id, "video.js", videoPresentationScript())
   ];
   const vendor = await copyMp4MuxerVendor(ctx, project.id);
-  const published = await maybePublish(ctx, project.id, true);
+  const published = await maybePublish(ctx, project.id, input.publish);
   const manifest = await getProjectManifest(ctx.projectRoot, project.id);
   return {
     ok: true,
-    summary: `Created and published browser-rendered video presentation ${project.id}. MP4 export must be run in a browser via WebCodecs.`,
+    summary: input.publish
+      ? `Created and published browser-rendered video presentation ${project.id}. MP4 export must be run in a browser via WebCodecs.`
+      : `Created browser-rendered video presentation ${project.id}. MP4 export must be run in a browser via WebCodecs.`,
     jobId: project.id,
     previewUrl: published.previewUrl,
     shareUrl: published.shareUrl,
@@ -927,7 +930,7 @@ export const presentationTools: ToolModule[] = [
   {
     definition: {
       name: "create_video_presentation",
-      description: "Create and publish a browser-rendered video presentation with a WebCodecs MP4 export button.",
+      description: "Create a browser-rendered video presentation with a WebCodecs MP4 export button. Stays private unless publish=true.",
       inputSchema: {
         type: "object",
         properties: {
@@ -936,7 +939,8 @@ export const presentationTools: ToolModule[] = [
           fps: { type: "number", enum: [24, 30] },
           scenes: { type: "array", items: { type: "object" } },
           audioPath: { type: "string" },
-          outputPath: { type: "string" }
+          outputPath: { type: "string" },
+          publish: { type: "boolean" }
         },
         required: ["title", "scenes"],
         additionalProperties: false

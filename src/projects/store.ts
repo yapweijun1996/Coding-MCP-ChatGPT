@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { TextDecoder } from "node:util";
 import { withKeyedLock } from "../shared/keyed-lock.js";
+import { atomicWrite } from "../shared/atomic-write.js";
 
 // Serialization key for a single project's metadata + files. All read-modify-write
 // sequences for one project run under this key so concurrent tool calls can't clobber
@@ -308,12 +309,7 @@ async function readProjectMetadata(projectRoot: string, projectId: string): Prom
 
 async function writeProjectMetadata(projectRoot: string, metadata: ProjectMetadata): Promise<void> {
   await mkdir(getProjectDirectory(projectRoot, metadata.id), { recursive: true });
-  // Atomic write: a crash/full-disk mid-write must not leave a truncated metadata
-  // file that fails validation and makes the project vanish from listings.
-  const finalPath = getProjectMetadataPath(projectRoot, metadata.id);
-  const tempPath = `${finalPath}.tmp-${randomUUID()}`;
-  await writeFile(tempPath, `${JSON.stringify(normalizeProjectMetadata(metadata), null, 2)}\n`, "utf8");
-  await rename(tempPath, finalPath);
+  await atomicWrite(getProjectMetadataPath(projectRoot, metadata.id), `${JSON.stringify(normalizeProjectMetadata(metadata), null, 2)}\n`);
 }
 
 function addHistory(metadata: ProjectMetadata, event: Omit<ProjectTaskHistoryItem, "id" | "time">): ProjectMetadata {
@@ -501,7 +497,7 @@ export async function writeProjectFile(projectRoot: string, projectId: string, r
 
   const absolutePath = resolveProjectFilePath(projectRoot, projectId, relativePath);
   await mkdir(path.dirname(absolutePath), { recursive: true });
-  await writeFile(absolutePath, content, "utf8");
+  await atomicWrite(absolutePath, content);
 
   const fileStat = await stat(absolutePath);
   const file = {
@@ -556,7 +552,7 @@ export async function patchProjectFile(
     throw new Error("Patched project file content exceeds 1 MiB.");
   }
 
-  await writeFile(absolutePath, content, "utf8");
+  await atomicWrite(absolutePath, content);
   const fileStat = await stat(absolutePath);
   const file = {
     path: safeRelativePath,
@@ -585,7 +581,7 @@ export async function writeProjectAsset(projectRoot: string, projectId: string, 
 
   const absolutePath = resolveProjectAssetPath(projectRoot, projectId, safeRelativePath);
   await mkdir(path.dirname(absolutePath), { recursive: true });
-  await writeFile(absolutePath, content);
+  await atomicWrite(absolutePath, content);
 
   const fileStat = await stat(absolutePath);
   const file = {

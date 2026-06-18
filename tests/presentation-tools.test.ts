@@ -132,8 +132,9 @@ test("create_immersive_page creates a publishable HTML project with local Three.
   });
 });
 
-test("create_video_presentation creates and publishes a WebCodecs export page", async () => {
+test("create_video_presentation stays private by default and publishes only when asked", async () => {
   await withContext(async (ctx) => {
+    // Default: must NOT publish (privacy — videos can contain sensitive footage).
     const result = await callTool("create_video_presentation", {
       title: "Video pitch",
       aspectRatio: "16:9",
@@ -145,8 +146,19 @@ test("create_video_presentation creates and publishes a WebCodecs export page", 
 
     assert.equal(result.ok, true);
     assert.ok(result.jobId);
-    assert.equal(result.shareUrl, `https://example.test/share/${result.jobId}/index.html`);
+    assert.equal(result.shareUrl, undefined, "video must not be published by default");
+    assert.equal(result.previewUrl, undefined);
+    assert.doesNotMatch(result.summary, /published/i);
     assert.match(result.summary, /WebCodecs/);
+
+    // Opt-in: publish=true returns a share URL.
+    const publishedResult = await callTool("create_video_presentation", {
+      title: "Public video",
+      scenes: [{ title: "Open", body: "Intro", durationSeconds: 3, transition: "fade" }],
+      publish: true
+    }, ctx);
+    assert.equal(publishedResult.shareUrl, `https://example.test/share/${publishedResult.jobId}/index.html`);
+    assert.match(publishedResult.summary, /published/i);
     assert.doesNotMatch(`${result.summary}\n${result.errors.join("\n")}`, new RegExp(`Rem${"otion"}|VIDEO_RENDER_${"ENABLED"}`));
 
     const manifest = await getProjectManifest(ctx.projectRoot, result.jobId);

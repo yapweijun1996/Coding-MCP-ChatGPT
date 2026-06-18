@@ -1,8 +1,9 @@
 import crypto from "node:crypto";
-import { cp, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import pg from "pg";
+import { atomicWrite } from "./shared/atomic-write.js";
 
 const scrypt = promisify(crypto.scrypt);
 
@@ -160,7 +161,7 @@ async function saveFileState(): Promise<void> {
   const cfg = await ensureConfig();
   if (pool) return;
   await mkdir(path.dirname(cfg.statePath), { recursive: true });
-  await writeFile(cfg.statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  await atomicWrite(cfg.statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
 }
 
 async function query<T>(sql: string, values: unknown[] = []): Promise<T[]> {
@@ -695,6 +696,13 @@ export async function initializeUserStore(input: UserStoreConfig): Promise<void>
   config = input;
   if (input.databaseUrl) {
     pool = new pg.Pool({ connectionString: input.databaseUrl });
+    // node-pg emits 'error' on idle clients when the backend drops the connection
+    // (DB restart, network blip). Without a listener this is an unhandled emitter
+    // 'error' and crashes the process. Log and continue — the pool discards the dead
+    // client and opens a fresh one on the next query.
+    pool.on("error", (error) => {
+      console.error("Postgres pool error (idle client):", error);
+    });
     await runMigrations();
   } else {
     await loadFileState();

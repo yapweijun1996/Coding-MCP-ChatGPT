@@ -1,5 +1,6 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { atomicWriteSync } from "../shared/atomic-write.js";
 
 export interface SiteState {
   homeProjectId: string | null;
@@ -45,7 +46,7 @@ function persistState(): void {
     updatedAt: state.updatedAt ?? new Date().toISOString()
   };
   mkdirSync(path.dirname(statePath), { recursive: true });
-  writeFileSync(statePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  atomicWriteSync(statePath, `${JSON.stringify(payload, null, 2)}\n`);
 }
 
 export function initializeSiteState(pathname: string): void {

@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { atomicWriteSync } from "./shared/atomic-write.js";
 import type { Request } from "express";
 import { z } from "zod";
 
@@ -159,7 +160,7 @@ function saveState(): void {
     refreshTokens: Array.from(refreshTokens.values()),
     clientStats: Array.from(clientStats.entries()).map(([clientId, stats]) => ({ clientId, ...stats }))
   };
-  writeFileSync(persistedStatePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  atomicWriteSync(persistedStatePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
 }
 
 function randomToken(prefix: string): string {
@@ -196,13 +197,23 @@ function adoptClientFromAuthorize(params: AuthorizeParams, ownerUserId?: string)
 
 function cleanupExpired(): void {
   const ts = now();
+  // Runs on every authenticated request (via isValidAccessToken). Only persist when
+  // something actually expired — otherwise this did a synchronous disk write on the
+  // hot path on every call, growing more expensive as the state file grows.
+  let changed = false;
   for (const [code, record] of authCodes.entries()) {
-    if (record.expiresAt <= ts) authCodes.delete(code);
+    if (record.expiresAt <= ts) {
+      authCodes.delete(code);
+      changed = true;
+    }
   }
   for (const [token, record] of accessTokens.entries()) {
-    if (record.expiresAt <= ts) accessTokens.delete(token);
+    if (record.expiresAt <= ts) {
+      accessTokens.delete(token);
+      changed = true;
+    }
   }
-  saveState();
+  if (changed) saveState();
 }
 
 export function parseAuthorizeParams(req: Request): AuthorizeParams | undefined {

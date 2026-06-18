@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import { atomicWrite } from "../shared/atomic-write.js";
 
 export interface ShareRecord {
   id: string;
@@ -37,7 +38,7 @@ export async function createShareArtifact(input: {
   const dir = path.join(input.shareRoot, id);
   const filePath = path.join(dir, filename);
   await mkdir(dir, { recursive: true });
-  await writeFile(filePath, input.html, "utf8");
+  await atomicWrite(filePath, input.html);
 
   const record: ShareRecord = {
     id,
