@@ -163,7 +163,12 @@ function maxBytesForAssetPath(relativePath: string): number {
 }
 
 function resolveLocalSourcePath(workspaceRoot: string, sourcePath: string): string {
-  return path.isAbsolute(sourcePath) ? path.resolve(sourcePath) : path.resolve(workspaceRoot, sourcePath);
+  const resolved = path.isAbsolute(sourcePath) ? path.resolve(sourcePath) : path.resolve(workspaceRoot, sourcePath);
+  const normalizedRoot = path.resolve(workspaceRoot);
+  if (resolved !== normalizedRoot && !resolved.startsWith(`${normalizedRoot}${path.sep}`)) {
+    throw new Error("Source path must be inside the workspace directory.");
+  }
+  return resolved;
 }
 
 async function fetchProjectAsset(url: string, relativePath: string): Promise<{ buffer: Buffer; contentType: string; finalUrl: string }> {

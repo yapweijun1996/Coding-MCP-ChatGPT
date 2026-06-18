@@ -446,16 +446,25 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
   }));
 
   api.post("/session", asyncRoute(async (req, res) => {
+    const attemptKey = loginAttemptKey(req);
+    const current = now();
+    const lockedAttempt = getLockedLoginAttempt(attemptKey, current);
+    if (lockedAttempt?.lockedUntil) {
+      fail(res, 429, "Too many login attempts. Try again later.");
+      return;
+    }
     const passcode = readBodyString(req, "passcode");
     const email = readBodyString(req, "email");
     const password = readBodyString(req, "password");
     try {
       const user = email && password ? await loginUser(email, password) : await loginBootstrapAdminWithPasscode(passcode);
+      loginAttempts.delete(attemptKey);
       const session = await createUserSession(user.id);
       setSessionCookie(req, res, session);
       ok(res, sessionPayload(session, toPublicSessionUser(user, await getProjectRootForUser(user.id))));
     } catch (error) {
-      fail(res, 401, error instanceof Error ? error.message : "Login failed.");
+      const failure = recordLoginFailure(attemptKey, current);
+      fail(res, failure.locked ? 429 : 401, failure.locked ? "Too many login attempts. Try again later." : error instanceof Error ? error.message : "Login failed.");
     }
   }));
 

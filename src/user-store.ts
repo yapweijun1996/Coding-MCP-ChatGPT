@@ -574,7 +574,10 @@ async function hasAnyAdmin(): Promise<boolean> {
 
 export async function loginBootstrapAdminWithPasscode(passcode: string): Promise<UserRecord> {
   const cfg = await ensureConfig();
-  if (!cfg.fallbackAdminPasscode || passcode !== cfg.fallbackAdminPasscode) throw new Error("Invalid passcode.");
+  if (!cfg.fallbackAdminPasscode) throw new Error("Invalid passcode.");
+  const a = crypto.createHmac("sha256", "passcode-compare").update(passcode).digest();
+  const b = crypto.createHmac("sha256", "passcode-compare").update(cfg.fallbackAdminPasscode).digest();
+  if (!crypto.timingSafeEqual(a, b)) throw new Error("Invalid passcode.");
   if (await hasAnyAdmin()) throw new Error("Passcode bootstrap is disabled after an admin account exists.");
   const existing = await getUserRecordByEmail("bootstrap-admin@local");
   if (existing) return existing;

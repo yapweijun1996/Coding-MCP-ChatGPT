@@ -126,12 +126,12 @@ function resolveWorkspaceFile(projectRoot: string, projectId: string, relativePa
 }
 
 function templateFiles(template: AppTemplate, title: string): Array<{ path: string; content: string }> {
-  const safeTitle = title.replace(/"/g, '\\"');
+  const quotedTitle = JSON.stringify(title);
   if (template === "vite-vue") {
     return [
       { path: "package.json", content: `${JSON.stringify({ scripts: { dev: "vite", build: "vite build", preview: "vite preview" }, dependencies: { "@vitejs/plugin-vue": "^6.0.0", vite: "^7.0.0", vue: "^3.5.0" }, devDependencies: {} }, null, 2)}\n` },
       { path: "index.html", content: `<div id="app"></div><script type="module" src="/src/main.js"></script>\n` },
-      { path: "src/main.js", content: `import { createApp } from "vue";\nimport "./style.css";\n\ncreateApp({\n  template: '<main><h1>${safeTitle}</h1><p>Your Vue demo is ready.</p></main>'\n}).mount("#app");\n` },
+      { path: "src/main.js", content: `import { createApp } from "vue";\nimport "./style.css";\n\nconst appTitle = ${quotedTitle};\ncreateApp({\n  template: \`<main><h1>\${appTitle}</h1><p>Your Vue demo is ready.</p></main>\`\n}).mount("#app");\n` },
       { path: "src/style.css", content: baseCss() }
     ];
   }
@@ -139,14 +139,14 @@ function templateFiles(template: AppTemplate, title: string): Array<{ path: stri
     return [
       { path: "package.json", content: `${JSON.stringify({ scripts: { dev: "vite", build: "vite build", preview: "vite preview" }, dependencies: { vite: "^7.0.0" }, devDependencies: {} }, null, 2)}\n` },
       { path: "index.html", content: `<div id="app"></div><script type="module" src="/src/main.js"></script>\n` },
-      { path: "src/main.js", content: `import "./style.css";\n\ndocument.querySelector("#app").innerHTML = '<main><h1>${safeTitle}</h1><p>Your Vite demo is ready.</p></main>';\n` },
+      { path: "src/main.js", content: `import "./style.css";\n\nconst appTitle = ${quotedTitle};\ndocument.querySelector("#app").innerHTML = \`<main><h1>\${appTitle}</h1><p>Your Vite demo is ready.</p></main>\`;\n` },
       { path: "src/style.css", content: baseCss() }
     ];
   }
   return [
     { path: "package.json", content: `${JSON.stringify({ scripts: { dev: "vite", build: "vite build", preview: "vite preview" }, dependencies: { "@vitejs/plugin-react": "^5.0.0", vite: "^7.0.0", react: "^19.0.0", "react-dom": "^19.0.0" }, devDependencies: {} }, null, 2)}\n` },
     { path: "index.html", content: `<div id="root"></div><script type="module" src="/src/main.jsx"></script>\n` },
-    { path: "src/main.jsx", content: `import React from "react";\nimport { createRoot } from "react-dom/client";\nimport "./style.css";\n\nfunction App() {\n  return <main><h1>${safeTitle}</h1><p>Your React demo is ready.</p></main>;\n}\n\ncreateRoot(document.getElementById("root")).render(<App />);\n` },
+    { path: "src/main.jsx", content: `import React from "react";\nimport { createRoot } from "react-dom/client";\nimport "./style.css";\n\nconst appTitle = ${quotedTitle};\n\nfunction App() {\n  return <main><h1>{appTitle}</h1><p>Your React demo is ready.</p></main>;\n}\n\ncreateRoot(document.getElementById("root")).render(<App />);\n` },
     { path: "src/style.css", content: baseCss() }
   ];
 }

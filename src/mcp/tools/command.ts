@@ -6,6 +6,7 @@ import { z } from "zod";
 import { createJobResult } from "../result.js";
 import type { ToolModule } from "../types.js";
 import { legacyDelegatedTools } from "./legacy-delegate.js";
+import { assertSafePublicUrl } from "../../security/url.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -226,6 +227,7 @@ const checkUrlTool: ToolModule = {
   handler: async (input, ctx) => {
     const parsed = input as z.infer<typeof checkUrlSchema>;
     const target = parseUrl(parsed.url);
+    await assertSafePublicUrl(target, { protocols: ["http:", "https:"] });
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), parsed.timeoutMs);
     const startedAt = Date.now();

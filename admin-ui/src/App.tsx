@@ -249,8 +249,9 @@ export function App() {
     return <LoginPage onLogin={(user) => {
       setAuthenticated(true);
       setCurrentUser(user);
-      const next = new URLSearchParams(window.location.search).get("next");
-      window.location.href = next || "/admin";
+      const rawNext = new URLSearchParams(window.location.search).get("next");
+      const next = rawNext && /^\/(?!\/)/.test(rawNext) ? rawNext : "/admin";
+      window.location.href = next;
     }} toast={toast} />;
   }
 

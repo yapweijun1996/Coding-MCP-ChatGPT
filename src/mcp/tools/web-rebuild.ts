@@ -77,6 +77,15 @@ function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
+function safeHref(href: string): string {
+  try {
+    const url = new URL(href);
+    return url.protocol === "https:" || url.protocol === "http:" ? href : "#";
+  } catch {
+    return /^javascript:/i.test(href.trim()) ? "#" : href;
+  }
+}
+
 function firstUsefulPage(capture: WebpageCapture): CapturedPage {
   const page = capture.pages.find((candidate) => candidate.viewport === "desktop") ?? capture.pages[0];
   if (!page) throw new Error(`Capture has no pages: ${capture.captureId}`);
@@ -173,7 +182,7 @@ function generateIndexHtml(capture: WebpageCapture, analysis: WebpageAnalysis, t
 <body>
   <header class="topbar">
     <a class="brand" href="#">${escapeHtml(title)}</a>
-    <nav>${navLinks.map((link) => `<a href="${escapeHtml(link.href)}">${escapeHtml(link.text)}</a>`).join("")}</nav>
+    <nav>${navLinks.map((link) => `<a href="${escapeHtml(safeHref(link.href))}">${escapeHtml(link.text)}</a>`).join("")}</nav>
   </header>
   <main>
     <section class="hero">
