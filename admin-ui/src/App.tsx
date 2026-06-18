@@ -259,6 +259,10 @@ export function App() {
     : route.route === "project-detail" ? "Project Detail"
       : navItems.find((item) => item.route === route.route)?.label ?? "Admin";
 
+  const publicIndexHref = currentUser?.username && currentUser.publicShareUsernameEnabled
+    ? `/@${currentUser.username}`
+    : "/share";
+
   return (
     <div className={`app-shell${drawerOpen ? " drawer-open" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
       <button className="drawer-backdrop" type="button" aria-label="Close navigation" onClick={() => setDrawerOpen(false)} />
@@ -283,7 +287,7 @@ export function App() {
             </a>
           ))}
         </nav>
-        <a className="public-link" href="/share" target="_blank" rel="noreferrer"><ExternalLink size={16} /> Public Index</a>
+        <a className="public-link" href={publicIndexHref} target="_blank" rel="noreferrer"><ExternalLink size={16} /> Public Index</a>
       </aside>
       <main className="workspace">
         <header className="topbar">
@@ -310,7 +314,7 @@ export function App() {
         </header>
         <div className="content">
           {route.route === "overview" && <OverviewPage />}
-          {route.route === "projects" && <ProjectsPage setConfirm={setConfirm} toast={toast} />}
+          {route.route === "projects" && <ProjectsPage setConfirm={setConfirm} toast={toast} publicIndexHref={publicIndexHref} />}
           {route.route === "project-detail" && route.projectId && <ProjectDetailPage projectId={route.projectId} setConfirm={setConfirm} toast={toast} />}
           {route.route === "tools" && <ToolsPage setConfirm={setConfirm} toast={toast} />}
           {route.route === "connectors" && <ConnectorsPage setConfirm={setConfirm} toast={toast} />}
@@ -437,7 +441,7 @@ function OverviewPage() {
   );
 }
 
-function ProjectsPage({ setConfirm, toast }: { setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void }) {
+function ProjectsPage({ setConfirm, toast, publicIndexHref }: { setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void; publicIndexHref: string }) {
   const [params, updateParams] = useQueryState({ page: "1", pageSize: "20", sort: "updated-desc" });
   const [data, setData] = useState<PageResult<ProjectSummary>>();
   const [error, setError] = useState("");
@@ -448,7 +452,7 @@ function ProjectsPage({ setConfirm, toast }: { setConfirm: (state: ConfirmState)
   useEffect(() => reload(), [reload]);
   return (
     <section className="panel">
-      <PanelTitle title="Projects" action={<a className="button subtle" href="/share" target="_blank" rel="noreferrer"><ExternalLink size={16} /> Public index</a>} />
+      <PanelTitle title="Projects" action={<a className="button subtle" href={publicIndexHref} target="_blank" rel="noreferrer"><ExternalLink size={16} /> Public index</a>} />
       <Toolbar>
         <label className="search-field"><Search size={16} /><input placeholder="Search projects" value={params.get("q") ?? ""} onChange={(event) => updateParams({ q: event.target.value, page: "1" })} /></label>
         <select value={params.get("status") ?? ""} onChange={(event) => updateParams({ status: event.target.value, page: "1" })} aria-label="Filter by status">
