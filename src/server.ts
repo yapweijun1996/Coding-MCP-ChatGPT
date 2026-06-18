@@ -216,13 +216,8 @@ async function sendPublishedProjectFile(res: express.Response, root: string, pro
   const project = await getProject(root, projectId);
   if (project.status !== "published") return false;
   const contentType = getProjectFileContentType(filename);
-  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Expires", "0");
+  res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=86400");
   if (canonicalUrl && contentType === "text/html") res.setHeader("Link", `<${canonicalUrl}>; rel="canonical"`);
-  if (contentType === "text/html") {
-    res.setHeader("Clear-Site-Data", "\"cache\"");
-  }
   if (isProjectTextFilePath(filename)) {
     const content = await readProjectFile(root, project.id, filename, 1024 * 1024);
     res.type(contentType).send(contentType === "text/html" && canonicalUrl ? injectCanonicalLink(content, canonicalUrl) : content);

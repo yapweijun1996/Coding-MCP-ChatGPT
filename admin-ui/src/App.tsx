@@ -138,16 +138,18 @@ function useQueryState(defaults: Record<string, string>): [URLSearchParams, (upd
   return [params, update];
 }
 
-function IconButton({ label, children, onClick, href, tone = "secondary" }: {
+function IconButton({ label, children, onClick, href, tone = "secondary", target, rel }: {
   label: string;
   children: ReactNode;
   onClick?: () => void;
   href?: string;
   tone?: "primary" | "secondary" | "danger";
+  target?: string;
+  rel?: string;
 }) {
   const className = `icon-action ${tone}`;
   if (href) {
-    return <a className={className} href={href} aria-label={label} title={label}>{children}</a>;
+    return <a className={className} href={href} target={target} rel={rel} aria-label={label} title={label}>{children}</a>;
   }
   return <button className={className} type="button" onClick={onClick} aria-label={label} title={label}>{children}</button>;
 }
@@ -476,7 +478,7 @@ function ProjectTable({ projects, onReload, setConfirm, toast }: { projects: Pro
         <td data-label="Updated">{fmtDate(project.updatedAt)}</td>
         <td data-label="Created by"><code>{project.createdByClientId}</code></td>
         <td data-label="Actions"><div className="row-actions">
-          {project.publishedUrl && <IconButton label="Open preview" href={project.publishedUrl} tone="primary"><ExternalLink size={18} /></IconButton>}
+          {project.publishedUrl && <IconButton label="Open preview" href={project.publishedUrl} tone="primary" target="_blank" rel="noreferrer"><ExternalLink size={18} /></IconButton>}
           <IconButton label="View project" onClick={() => navigate(`/admin/projects/${encodeURIComponent(project.id)}`)}><Eye size={18} /></IconButton>
           <IconButton label="Download ZIP" href={`/admin/api/projects/${encodeURIComponent(project.id)}/download.zip`}><Download size={18} /></IconButton>
           {project.status !== "deleted" && <IconButton label="Delete project" tone="danger" onClick={() => setConfirm({ title: "Delete project", body: `Soft-delete ${project.title}. Public access will be removed.`, confirmLabel: "Delete", tone: "danger", onConfirm: async () => { await api(`/projects/${encodeURIComponent(project.id)}/delete`, { method: "POST" }); toast("success", "Project deleted."); onReload(); } })}><Trash2 size={18} /></IconButton>}
