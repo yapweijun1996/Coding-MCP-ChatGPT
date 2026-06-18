@@ -23,6 +23,7 @@ ENV NODE_ENV=production \
     ARTIFACT_ROOT=/data/artifacts \
     PROJECT_ROOT=/data/projects \
     SKILL_STATE_PATH=/data/state/skill-state.json \
+    SITE_STATE_PATH=/data/state/site-state.json \
     OAUTH_STATE_PATH=/data/state/oauth-state.json \
     COMMAND_TIMEOUT_MS=30000
 

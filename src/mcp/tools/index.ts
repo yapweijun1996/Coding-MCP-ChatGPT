@@ -12,6 +12,7 @@ import { codeIntelligenceTools } from "./code-intelligence.js";
 import { docsKnowledgeTools } from "./docs-knowledge.js";
 import { integrationReadonlyTools } from "./integration-readonly.js";
 import { shareTools } from "./share.js";
+import { siteTools } from "./site.js";
 import { webInspectTools } from "./web-inspect.js";
 import { webRebuildTools } from "./web-rebuild.js";
 import { workspaceTools } from "./workspace.js";
@@ -34,5 +35,6 @@ export const allToolModules: ToolModule[] = [
   ...appProjectTools,
   ...projectTools,
   ...researchTools,
-  ...shareTools
+  ...shareTools,
+  ...siteTools
 ];

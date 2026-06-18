@@ -135,7 +135,10 @@ Use this skill to discover the available workspace/project context before taking
       "create_html_deck",
       "create_pptx_deck",
       "create_immersive_page",
-      "create_video_presentation"
+      "create_video_presentation",
+      "set_homepage",
+      "clear_homepage",
+      "get_homepage"
     ],
     protocolMarkdown: `# Coding Delivery
 

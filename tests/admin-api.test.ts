@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createProject, publishProject, writeProjectFile } from "../src/projects/store.js";
+import { clearHomepage, getHomepage, setHomepage } from "../src/site/store.js";
+import { siteTools } from "../src/mcp/tools/site.js";
 
 const root = await mkdtemp(path.join(os.tmpdir(), "coding-mcp-admin-api-"));
 process.env.ADMIN_PASSCODE = "test-admin-passcode";
@@ -18,6 +20,7 @@ process.env.PROJECT_ROOT = path.join(root, "projects");
 process.env.USERS_ROOT = path.join(root, "users");
 process.env.USER_STATE_PATH = path.join(root, "state", "users-state.json");
 process.env.SKILL_STATE_PATH = path.join(root, "state", "skill-state.json");
+process.env.SITE_STATE_PATH = path.join(root, "state", "site-state.json");
 process.env.OAUTH_STATE_PATH = path.join(root, "state", "oauth-state.json");
 process.env.ADMIN_UI_DIST = path.join(root, "missing-admin-dist");
 
@@ -164,6 +167,56 @@ test("profile username controls public username share URLs", async () => {
 
     const wrongUserShare = await fetch(`${baseUrl}/@other_user/share/${project.id}/index.html`);
     assert.equal(wrongUserShare.status, 404);
+  });
+});
+
+test("site homepage serves at root and set_homepage is admin-gated", async () => {
+  clearHomepage();
+  await withServer(async (baseUrl) => {
+    // No homepage yet -> default landing (not "Cannot GET /").
+    const empty = await fetch(`${baseUrl}/`);
+    assert.equal(empty.status, 200);
+    assert.match(await empty.text(), /No homepage has been published yet/);
+
+    const { cookie } = await login(baseUrl);
+    const sessionBody = await (await fetch(`${baseUrl}/admin/api/session`, { headers: { Cookie: cookie } })).json() as { user?: { id?: string; projectRoot?: string; role?: string } };
+    const adminId = sessionBody.user?.id;
+    const adminRoot = sessionBody.user?.projectRoot;
+    assert.ok(adminId && adminRoot);
+    assert.equal(sessionBody.user?.role, "admin");
+
+    const project = await createProject(adminRoot, { title: "Landing", createdByClientId: "test-client" });
+    await writeProjectFile(adminRoot, project.id, "index.html", "<!doctype html><title>Home</title><link rel=stylesheet href=./styles.css><h1>HOMEPAGE_MARKER</h1>");
+    await writeProjectFile(adminRoot, project.id, "styles.css", "h1{color:rebeccapurple}");
+    await publishProject(adminRoot, project.id, "https://example.test", "index.html");
+
+    // set_homepage must reject a non-admin caller (no userId).
+    const setHomepageTool = siteTools.find((tool) => tool.definition.name === "set_homepage");
+    assert.ok(setHomepageTool);
+    const ctxBase = { publicBaseUrl: "https://example.test", workspaceRoot: root, commandTimeoutMs: 1000, shareRoot: root, artifactRoot: root, projectRoot: adminRoot, clientId: "test-client" };
+    const denied = await setHomepageTool.handler({ projectId: project.id }, { ...ctxBase, userId: undefined });
+    assert.equal(denied.ok, false);
+    assert.equal(getHomepage().homeProjectId, null);
+
+    // set_homepage succeeds for an admin caller.
+    const allowed = await setHomepageTool.handler({ projectId: project.id }, { ...ctxBase, userId: adminId });
+    assert.equal(allowed.ok, true);
+    assert.equal(getHomepage().homeProjectId, project.id);
+
+    // Root now serves the homepage entry file and its sibling asset.
+    const home = await fetch(`${baseUrl}/`);
+    assert.equal(home.status, 200);
+    assert.match(await home.text(), /HOMEPAGE_MARKER/);
+    assert.ok((home.headers.get("content-security-policy") ?? "").includes("form-action 'self'"));
+
+    const css = await fetch(`${baseUrl}/styles.css`);
+    assert.equal(css.status, 200);
+    assert.match(await css.text(), /rebeccapurple/);
+
+    clearHomepage();
+    const clearedHome = await fetch(`${baseUrl}/`);
+    assert.equal(clearedHome.status, 200);
+    assert.match(await clearedHome.text(), /No homepage has been published yet/);
   });
 });
 

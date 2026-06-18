@@ -38,6 +38,7 @@ import {
   readProjectFile,
 } from "./projects/store.js";
 import { readShareArtifact } from "./share/store.js";
+import { getHomepage, initializeSiteState } from "./site/store.js";
 import { initializeSkillState } from "./skills/state.js";
 import {
   consumeVisibleBrowserExpiredCleanup,
@@ -77,6 +78,7 @@ const projectRoot = process.env.PROJECT_ROOT ?? `${workspaceRoot}/.projects`;
 const usersRoot = process.env.USERS_ROOT ?? `${workspaceRoot}/.users`;
 const userStatePath = process.env.USER_STATE_PATH ?? `${workspaceRoot}/.state/users-state.json`;
 const skillStatePath = process.env.SKILL_STATE_PATH ?? `${workspaceRoot}/.state/skill-state.json`;
+const siteStatePath = process.env.SITE_STATE_PATH ?? `${workspaceRoot}/.state/site-state.json`;
 const commandTimeoutMs = Number.parseInt(process.env.COMMAND_TIMEOUT_MS ?? "30000", 10);
 const devToken = process.env.MCP_DEV_TOKEN;
 const adminPasscode = process.env.ADMIN_PASSCODE ?? process.env.KB_MCP_OAUTH_PASSCODE ?? "";
@@ -89,6 +91,7 @@ const oauthConfig: OAuthConfig = {
 };
 initializeOAuthState(oauthConfig.statePath);
 initializeSkillState(skillStatePath);
+initializeSiteState(siteStatePath);
 await initializeUserStore({
   databaseUrl: process.env.DATABASE_URL,
   statePath: userStatePath,
@@ -233,6 +236,56 @@ async function sendPublishedProjectFile(res: express.Response, root: string, pro
   });
   return true;
 }
+
+const homepageCsp = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https:; base-uri 'none'; form-action 'self';";
+
+async function serveHomepageFile(res: express.Response, relativePath?: string): Promise<boolean> {
+  const home = getHomepage();
+  if (!home.homeProjectId || !home.homeOwnerUserId) return false;
+  try {
+    const root = await getProjectRootForUser(home.homeOwnerUserId);
+    const project = await getProject(root, home.homeProjectId);
+    if (project.status !== "published") return false;
+    const filename = relativePath && relativePath !== "/" ? relativePath.replace(/^\/+/, "") : project.entryFile;
+    res.setHeader("Content-Security-Policy", homepageCsp);
+    return await sendPublishedProjectFile(res, root, home.homeProjectId, filename, `${publicBaseUrl.replace(/\/$/, "")}/`);
+  } catch {
+    return false;
+  }
+}
+
+function renderDefaultLanding(): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coding MCP</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: ui-sans-serif, system-ui, sans-serif; background: #0f1511; color: #e8efe9; }
+  main { text-align: center; padding: 32px; }
+  h1 { font-size: clamp(28px, 5vw, 44px); margin: 0 0 12px; }
+  p { color: #9fb0a4; margin: 0 0 24px; }
+  a { display: inline-block; margin: 6px; padding: 11px 18px; border-radius: 8px; text-decoration: none; font-weight: 650; }
+  .primary { background: #16615a; color: #fff; }
+  .ghost { border: 1px solid #2c3a31; color: #cfe0d4; }
+</style>
+</head>
+<body>
+  <main>
+    <h1>Coding MCP</h1>
+    <p>No homepage has been published yet.</p>
+    <a class="primary" href="/admin">Admin console</a>
+    <a class="ghost" href="/share">Public projects</a>
+  </main>
+</body>
+</html>`;
+}
+
+app.get("/", async (_req, res) => {
+  if (await serveHomepageFile(res)) return;
+  res.type("html").send(renderDefaultLanding());
+});
 
 app.get("/health", (_req, res) => {
   res.json({
@@ -574,6 +627,13 @@ app.get("/artifact/:artifactId/:filename(*)", async (req, res) => {
   } catch {
     res.status(404).type("text/plain").send("Artifact not found.");
   }
+});
+
+// Fallback: serve root-level assets of the homepage project (e.g. /styles.css, /assets/app.js).
+// Registered last so it never shadows a named route; falls through to 404 when no homepage is set.
+app.get("/:asset(*)", async (req, res) => {
+  if (await serveHomepageFile(res, req.params.asset)) return;
+  res.status(404).type("text/plain").send("Not found.");
 });
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
