@@ -5,6 +5,7 @@ import path from "node:path";
 import { z } from "zod";
 import type { ToolModule } from "../types.js";
 import { ensureUnderWorkspace, sanitizeSecretLikeValue, trimLogLines, trimStructuredContent } from "./agent-tool-utils.js";
+import { childEnv, gitChildEnv } from "../child-env.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -359,7 +360,7 @@ export const codeIntelligenceTools: ToolModule[] = [
       let exitCode = 0;
       const startAt = Date.now();
       try {
-        const result = await execFileAsync(allowed.file, args, { cwd: root, timeout: parsed.timeoutMs });
+        const result = await execFileAsync(allowed.file, args, { cwd: root, timeout: parsed.timeoutMs, env: childEnv() });
         stdout = result.stdout?.toString() ?? "";
         stderr = result.stderr?.toString() ?? "";
         logLines.push(`command=success`);
@@ -471,7 +472,7 @@ export const codeIntelligenceTools: ToolModule[] = [
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof changedFilesSchema>;
       const root = ensureUnderWorkspace(ctx.workspaceRoot, ".");
-      const outputStatus = await execFileAsync("git", ["status", "--short"], { cwd: root })
+      const outputStatus = await execFileAsync("git", ["status", "--short"], { cwd: root, env: gitChildEnv() })
         .then((result) => result.stdout.toString())
         .catch((error) => (error as Error & { stdout?: unknown }).stdout?.toString?.() ?? "");
       const changedStatus = parseGitStatus(outputStatus);
@@ -480,7 +481,7 @@ export const codeIntelligenceTools: ToolModule[] = [
       const target = parsed.targetRef?.trim() || "";
       const diffArgs = includeDiff ? ["diff", `${base}..${target}`, "--name-status"] : ["diff", "--name-status"];
       const outputDiff = includeDiff
-        ? await execFileAsync("git", diffArgs, { cwd: root }).then((result) => result.stdout.toString()).catch(() => "")
+        ? await execFileAsync("git", diffArgs, { cwd: root, env: gitChildEnv() }).then((result) => result.stdout.toString()).catch(() => "")
         : "";
       const diffItems = outputDiff
         ? outputDiff

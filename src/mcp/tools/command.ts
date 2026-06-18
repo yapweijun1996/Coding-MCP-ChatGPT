@@ -8,6 +8,7 @@ import { createJobResult } from "../result.js";
 import type { ToolModule } from "../types.js";
 import { legacyDelegatedTools } from "./legacy-delegate.js";
 import { assertSafePublicUrl } from "../../security/url.js";
+import { childEnv } from "../child-env.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -165,7 +166,8 @@ async function runNpmCommand(ctxCommandRoot: string, command: NpmCommand, timeou
   const { stdout, stderr } = await execFileAsync(file, args, {
     cwd: ctxCommandRoot,
     timeout: timeoutMs,
-    maxBuffer: 1024 * 1024
+    maxBuffer: 1024 * 1024,
+    env: childEnv()
   });
   return { stdout, stderr };
 }
@@ -303,7 +305,8 @@ const openLocalServerTool: ToolModule = {
 
     const proc = spawn(process.platform === "win32" ? "npm.cmd" : "npm", args, {
       cwd: workingDir,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      env: childEnv()
     });
 
     const url = `http://${parsed.host}:${parsed.port}`;

@@ -8,6 +8,7 @@ import { createArtifact, makeArtifactUrl } from "../../artifacts/store.js";
 import { createShareArtifact } from "../../share/store.js";
 import { makeShareUrl } from "../result.js";
 import type { ToolContext, ToolModule, ToolResult } from "../types.js";
+import { childEnv } from "../child-env.js";
 import type { Page, Request, Response } from "playwright";
 
 export type ViewportName = "desktop" | "tablet" | "mobile";
@@ -535,7 +536,7 @@ function startLocalServer(ctx: ToolContext, input: z.infer<typeof inspectLocalPr
   if (input.script === "dev") args.push("--", "--host", input.host, "--port", String(input.port));
   const proc = spawn(process.platform === "win32" ? "npm.cmd" : "npm", args, {
     cwd: ctx.workspaceRoot,
-    env: { ...process.env, PORT: String(input.port), HOST: input.host },
+    env: childEnv({ PORT: String(input.port), HOST: input.host }),
     stdio: ["ignore", "pipe", "pipe"]
   });
   const logs = [`Started npm run ${input.script} on ${input.host}:${input.port}`];

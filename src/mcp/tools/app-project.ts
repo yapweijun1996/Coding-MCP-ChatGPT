@@ -16,6 +16,7 @@ import {
   writeProjectFile
 } from "../../projects/store.js";
 import type { ToolModule } from "../types.js";
+import { childEnv } from "../child-env.js";
 
 const execFileAsync = promisify(execFile);
 const maxLogBytes = 40000;
@@ -168,7 +169,7 @@ async function writeWorkspaceFile(projectRoot: string, projectId: string, relati
 
 async function runNpm(projectRoot: string, projectId: string, args: string[], timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
   const cwd = getProjectWorkspaceDirectory(projectRoot, projectId);
-  return execFileAsync(npmExecutable(), args, { cwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 });
+  return execFileAsync(npmExecutable(), args, { cwd, timeout: timeoutMs, maxBuffer: 1024 * 1024, env: childEnv() });
 }
 
 async function listDistFiles(root: string): Promise<string[]> {
@@ -314,7 +315,7 @@ export const appProjectTools: ToolModule[] = [
         return { ok: true, summary: `Dev server already running at ${existing.url}.`, jobId: parsed.projectId, previewUrl: existing.url, artifacts: [existing.url], logs: existing.logs, errors: [] };
       }
       const cwd = getProjectWorkspaceDirectory(ctx.projectRoot, parsed.projectId);
-      const child = spawn(npmExecutable(), ["run", "dev", "--", "--host", parsed.host, "--port", String(parsed.port)], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(npmExecutable(), ["run", "dev", "--", "--host", parsed.host, "--port", String(parsed.port)], { cwd, stdio: ["ignore", "pipe", "pipe"], env: childEnv() });
       const url = `http://${parsed.host}:${parsed.port}`;
       const session: DevSession = { process: child, projectId: parsed.projectId, url, startedAt: new Date().toISOString(), logs: [`Started npm run dev at ${url}.`], exited: false, exitCode: null };
       devSessions.set(parsed.projectId, session);

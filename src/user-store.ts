@@ -387,6 +387,16 @@ export async function getProjectRootForUser(userId: string): Promise<string> {
   return projectRoot;
 }
 
+export async function getWorkspaceRootForUser(userId: string): Promise<string> {
+  const cfg = await ensureConfig();
+  // Deterministic per-user workspace dir. Unlike project roots there is no legacy
+  // single-root to migrate, so no persistence/lookup table is needed — the path is
+  // derived purely from userId, which guarantees tenant isolation for workspace tools.
+  const workspaceRoot = path.join(cfg.usersRoot, userId, "workspace");
+  await mkdir(workspaceRoot, { recursive: true });
+  return workspaceRoot;
+}
+
 export async function getAllProjectRoots(): Promise<string[]> {
   const cfg = await ensureConfig();
   const roots = new Set<string>([cfg.projectRoot]);

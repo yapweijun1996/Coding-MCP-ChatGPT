@@ -17,8 +17,55 @@ import {
   writeProjectFile
 } from "../projects/store.js";
 import { createShareArtifact } from "../share/store.js";
+import { childEnv, gitChildEnv } from "./child-env.js";
 
 const execFileAsync = promisify(execFile);
+
+// Files that control script execution. Writing/replacing them turns a benign
+// "write a file" capability into code execution via run_tests/run_build, so they
+// are not writable through the workspace tools. NOTE: this only blocks the trivial
+// write_file path — a cloned repo can still carry a poisoned package.json, so the
+// real isolation guarantee comes from the scrubbed child env (no secrets), with
+// full sandboxing (container/nsjail) as the complete fix.
+const PROTECTED_WORKSPACE_BASENAMES = new Set([
+  "package.json",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  ".npmrc",
+]);
+
+function assertWritableWorkspacePath(relativePath: string): void {
+  const base = relativePath.split(/[\\/]+/).filter(Boolean).pop()?.toLowerCase() ?? "";
+  if (PROTECTED_WORKSPACE_BASENAMES.has(base)) {
+    throw new Error(`Refusing to modify protected file '${base}': it controls script execution and is not writable through workspace tools.`);
+  }
+}
+
+// git config keys that may be written via git_config. Anything outside this set
+// (core.pager, core.sshCommand, core.hooksPath, alias.*, credential.helper, …) can
+// be coerced into command execution on the next git invocation, so writes are
+// restricted to this safe allowlist. Reads (get/list) are unrestricted but forced
+// to --local scope.
+const WRITABLE_GIT_CONFIG_KEYS = new Set([
+  "user.name",
+  "user.email",
+  "user.username",
+  "init.defaultbranch",
+  "commit.gpgsign",
+  "tag.gpgsign",
+  "pull.rebase",
+  "push.default",
+  "push.autosetupremote",
+  "fetch.prune",
+  "merge.ff",
+  "rebase.autostash",
+  "core.autocrlf",
+  "core.safecrlf",
+  "core.ignorecase",
+  "core.filemode",
+]);
 
 export interface ToolResult {
   ok: boolean;
@@ -1961,7 +2008,8 @@ function gitCommand(workspaceRoot: string, timeoutMs: number, args: string[]): P
   return execFileAsync("git", args, {
     cwd: workspaceRoot,
     timeout: timeoutMs,
-    maxBuffer: 1024 * 1024
+    maxBuffer: 1024 * 1024,
+    env: gitChildEnv()
   });
 }
 
@@ -2091,6 +2139,7 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
 
     if (name === "write_file") {
       const input = writeFileInputSchema.parse(rawInput);
+      assertWritableWorkspacePath(input.relativePath);
       const target = resolveSafeWorkspacePath(ctx.workspaceRoot, input.relativePath);
       await mkdir(path.dirname(target), { recursive: true });
       await writeFile(target, input.content, "utf8");
@@ -2185,7 +2234,8 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
       const { stdout, stderr } = await execFileAsync(file, args, {
         cwd: ctx.workspaceRoot,
         timeout: ctx.commandTimeoutMs,
-        maxBuffer: 1024 * 1024
+        maxBuffer: 1024 * 1024,
+        env: childEnv()
       });
       return createJobResult(ctx, `Ran ${input.command}`, `${input.command} completed successfully.`, [stdout.trim(), stderr.trim()].filter(Boolean), []);
     }
@@ -2279,6 +2329,7 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
 
     if (name === "rename_file") {
       const input = renameFileInputSchema.parse(rawInput);
+      assertWritableWorkspacePath(input.to);
       const source = resolveSafeWorkspacePath(ctx.workspaceRoot, input.from);
       const destination = resolveSafeWorkspacePath(ctx.workspaceRoot, input.to);
       if (source === destination) {
@@ -2955,10 +3006,17 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
 
     if (name === "git_config") {
       const input = gitConfigInputSchema.parse(rawInput);
-      const args = ["config"];
-      if (input.scope === "global") args.push("--global");
-      else if (input.scope === "system") args.push("--system");
-      else if (input.scope === "local") args.push("--local");
+      if (input.scope === "global" || input.scope === "system") {
+        throw new Error("Only the repository-local git config scope is permitted.");
+      }
+      // Force --local for every operation: global/system config can execute commands
+      // (core.pager, core.sshCommand, …) on any later git run.
+      const args = ["config", "--local"];
+      const assertWritableConfigKey = (key: string) => {
+        if (!WRITABLE_GIT_CONFIG_KEYS.has(key.toLowerCase())) {
+          throw new Error(`Setting git config key '${key}' is not permitted. Allowed keys: ${[...WRITABLE_GIT_CONFIG_KEYS].join(", ")}.`);
+        }
+      };
 
       if (input.action === "list") {
         args.push("--list");
@@ -2971,16 +3029,19 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
         if (!input.key || input.value === undefined) {
           throw new Error("key and value are required for action=set.");
         }
+        assertWritableConfigKey(input.key);
         args.push(input.key, input.value);
       } else if (input.action === "add") {
         if (!input.key || input.value === undefined) {
           throw new Error("key and value are required for action=add.");
         }
+        assertWritableConfigKey(input.key);
         args.push("--add", input.key, input.value);
       } else {
         if (!input.key) {
           throw new Error("key is required for action=unset.");
         }
+        assertWritableConfigKey(input.key);
         args.push("--unset", input.key);
       }
 
@@ -3718,7 +3779,8 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
       if (input.bare) args.push("--bare");
       if (input.singleBranch) args.push("--single-branch");
       if (input.noCheckout) args.push("--no-checkout");
-      args.push(input.repo);
+      // `--` stops a repo/outputDir beginning with `-` from being parsed as an option.
+      args.push("--", input.repo);
       if (input.outputDir) args.push(input.outputDir);
 
       const { stdout, stderr } = await gitCommand(ctx.workspaceRoot, ctx.commandTimeoutMs, args);
