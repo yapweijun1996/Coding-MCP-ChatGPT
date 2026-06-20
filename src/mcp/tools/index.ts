@@ -11,7 +11,9 @@ import { skillTools } from "./skills.js";
 import { browserObservabilityTools } from "./browser-observability.js";
 import { browserTools } from "./browser.js";
 import { codeIntelligenceTools } from "./code-intelligence.js";
+import { asyncJobTools } from "./async-jobs.js";
 import { docsKnowledgeTools } from "./docs-knowledge.js";
+import { feedbackTools } from "./feedback.js";
 import { integrationReadonlyTools } from "./integration-readonly.js";
 import { shareTools } from "./share.js";
 import { siteTools } from "./site.js";
@@ -29,6 +31,8 @@ export const allToolModules: ToolModule[] = [
   ...browserObservabilityTools,
   ...codeIntelligenceTools,
   ...docsKnowledgeTools,
+  ...feedbackTools,
+  ...asyncJobTools,
   ...integrationReadonlyTools,
   ...webInspectTools,
   ...webRebuildTools,

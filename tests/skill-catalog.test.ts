@@ -32,6 +32,7 @@ function toolContext(root: string): ToolContext {
     commandTimeoutMs: 1000,
     shareRoot: path.join(root, "shares"),
     artifactRoot: path.join(root, "artifacts"),
+    feedbackRoot: path.join(root, "feedback"),
     projectRoot: path.join(root, "projects"),
     clientId: "test-client"
   };

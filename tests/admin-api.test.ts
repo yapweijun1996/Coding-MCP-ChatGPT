@@ -193,7 +193,7 @@ test("site homepage serves at root and set_homepage is admin-gated", async () =>
     // set_homepage must reject a non-admin caller (no userId).
     const setHomepageTool = siteTools.find((tool) => tool.definition.name === "set_homepage");
     assert.ok(setHomepageTool);
-    const ctxBase = { publicBaseUrl: "https://example.test", workspaceRoot: root, commandTimeoutMs: 1000, shareRoot: root, artifactRoot: root, projectRoot: adminRoot, clientId: "test-client" };
+    const ctxBase = { publicBaseUrl: "https://example.test", workspaceRoot: root, commandTimeoutMs: 1000, shareRoot: root, artifactRoot: root, feedbackRoot: root, projectRoot: adminRoot, clientId: "test-client" };
     const denied = await setHomepageTool.handler({ projectId: project.id }, { ...ctxBase, userId: undefined });
     assert.equal(denied.ok, false);
     assert.equal(getHomepage().homeProjectId, null);

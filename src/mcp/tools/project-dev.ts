@@ -209,6 +209,26 @@ async function safeResolveInside(root: string, relativePath = ""): Promise<strin
   return resolved;
 }
 
+async function assertInsideRoot(root: string, target: string, label: string): Promise<{ root: string; target: string; relativePath: string }> {
+  const resolvedRoot = await realpath(root);
+  const resolvedTarget = await realpath(target);
+  if (resolvedTarget !== resolvedRoot && !resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`)) {
+    throw new Error(`${label} must be inside the configured workspace root.`);
+  }
+  return {
+    root: resolvedRoot,
+    target: resolvedTarget,
+    relativePath: path.relative(resolvedRoot, resolvedTarget).replaceAll("\\", "/")
+  };
+}
+
+function assertNoHiddenPathSegments(relativePath: string, label: string): void {
+  const parts = relativePath.replaceAll("\\", "/").split("/").filter(Boolean);
+  if (parts.some((part) => part.startsWith("."))) {
+    throw new Error(`${label} must not include hidden path segments.`);
+  }
+}
+
 async function findGitRoot(workspacePath: string): Promise<string | undefined> {
   try {
     const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
@@ -226,19 +246,26 @@ async function findGitRoot(workspacePath: string): Promise<string | undefined> {
 export async function resolveProjectWorkspace(ctx: ToolContext, projectId: string): Promise<string> {
   const project = await getProject(ctx.projectRoot, projectId);
   if (project.status === "deleted") throw new Error("Cannot access a deleted project.");
-  const workspace = project.workspaceBinding?.path ?? getProjectWorkspaceDirectory(ctx.projectRoot, projectId);
+  if (project.workspaceBinding?.path) {
+    const workspace = await assertInsideRoot(ctx.workspaceRoot, project.workspaceBinding.path, "workspaceBinding.path");
+    return workspace.target;
+  }
+  const workspace = getProjectWorkspaceDirectory(ctx.projectRoot, projectId);
   return realpath(workspace).catch(() => workspace);
 }
 
 async function resolveProjectGitWorkspace(ctx: ToolContext, projectId: string): Promise<string> {
   const project = await getProject(ctx.projectRoot, projectId);
   if (project.status === "deleted") throw new Error("Cannot access a deleted project.");
-  const workspace = project.workspaceBinding?.gitRoot ?? project.workspaceBinding?.path ?? getProjectWorkspaceDirectory(ctx.projectRoot, projectId);
-  const resolved = await realpath(workspace).catch(() => workspace);
+  const workspace = project.workspaceBinding?.gitRoot ?? project.workspaceBinding?.path;
+  const resolved = workspace
+    ? (await assertInsideRoot(ctx.workspaceRoot, workspace, workspace === project.workspaceBinding?.gitRoot ? "workspaceBinding.gitRoot" : "workspaceBinding.path")).target
+    : await realpath(getProjectWorkspaceDirectory(ctx.projectRoot, projectId)).catch(() => getProjectWorkspaceDirectory(ctx.projectRoot, projectId));
   const gitRoot = await findGitRoot(resolved);
   if (!gitRoot) {
     throw new Error(`Project ${projectId} is not bound to a Git repository. Call bind_project_workspace with a real repo path first.`);
   }
+  if (workspace) return (await assertInsideRoot(ctx.workspaceRoot, gitRoot, "workspaceBinding.gitRoot")).target;
   return gitRoot;
 }
 
@@ -348,6 +375,16 @@ async function runNpmCommand(workspace: string, command: NpmProjectCommand, time
   return execFileAsync(npmExecutable(), args, { cwd: workspace, timeout: timeoutMs, maxBuffer: 1024 * 1024, env: childEnv() });
 }
 
+function outputFromExecutionError(error: unknown): { stdout: string; stderr: string; code?: string | number | null; message: string } {
+  const err = error as { stdout?: unknown; stderr?: unknown; code?: unknown; signal?: unknown; message?: unknown };
+  return {
+    stdout: typeof err.stdout === "string" ? trimOutput(err.stdout) : "",
+    stderr: typeof err.stderr === "string" ? trimOutput(err.stderr) : "",
+    code: typeof err.code === "string" || typeof err.code === "number" || err.code === null ? err.code : undefined,
+    message: typeof err.message === "string" ? trimOutput(err.message, 4000) : "Command failed."
+  };
+}
+
 async function waitForHttp(url: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -386,7 +423,7 @@ function viewportSize(viewport: z.infer<typeof recordProjectWorkspaceVideoSchema
 }
 
 async function maybeConvertWebmToMp4(webmPath: string, mp4Path: string, timeoutMs: number): Promise<void> {
-  await execFileAsync("ffmpeg", ["-y", "-i", webmPath, "-movflags", "faststart", mp4Path], {
+  await execFileAsync(process.env.FFMPEG_PATH || "ffmpeg", ["-y", "-i", webmPath, "-movflags", "faststart", mp4Path], {
     timeout: timeoutMs,
     maxBuffer: 1024 * 1024,
     env: childEnv()
@@ -451,10 +488,12 @@ export const projectDevTools: ToolModule[] = [
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof bindProjectWorkspaceSchema>;
       const workspacePath = await realpath(parsed.workspacePath);
+      await assertInsideRoot(ctx.workspaceRoot, workspacePath, "workspacePath");
       const workspaceStat = await stat(workspacePath);
       if (!workspaceStat.isDirectory()) throw new Error("workspacePath must be a directory.");
       const gitRoot = await findGitRoot(workspacePath);
-      if (parsed.requireGit && !gitRoot) throw new Error("workspacePath is not inside a Git work tree.");
+      if (!gitRoot) throw new Error("workspacePath must be inside a Git work tree.");
+      await assertInsideRoot(ctx.workspaceRoot, gitRoot, "gitRoot");
       const metadata = await bindProjectWorkspace(ctx.projectRoot, parsed.projectId, { path: workspacePath, gitRoot });
       return { ok: true, summary: `Bound ${parsed.projectId} to ${workspacePath}.`, jobId: parsed.projectId, artifacts: [workspacePath], structuredContent: { workspaceBinding: metadata.workspaceBinding }, logs: [JSON.stringify(metadata.workspaceBinding, null, 2)], errors: [] };
     }
@@ -551,10 +590,18 @@ export const projectDevTools: ToolModule[] = [
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof npmCommandSchema>;
       const workspace = await resolveProjectWorkspace(ctx, parsed.projectId);
-      const { stdout, stderr } = await runNpmCommand(workspace, parsed.command, parsed.timeoutMs);
-      const logs = [trimOutput(stdout), trimOutput(stderr)].filter(Boolean);
-      await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "run_project_npm_command", ok: true, summary: `${parsed.command} finished.`, details: { command: parsed.command, logs } });
-      return { ok: true, summary: `${parsed.command} finished.`, jobId: parsed.projectId, artifacts: [], logs, errors: [] };
+      try {
+        const { stdout, stderr } = await runNpmCommand(workspace, parsed.command, parsed.timeoutMs);
+        const logs = [trimOutput(stdout), trimOutput(stderr)].filter(Boolean);
+        await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "run_project_npm_command", ok: true, summary: `${parsed.command} finished.`, details: { command: parsed.command, cwd: workspace, logs } });
+        return { ok: true, summary: `${parsed.command} finished.`, jobId: parsed.projectId, artifacts: [], structuredContent: { command: parsed.command, cwd: workspace, exitCode: 0 }, logs, errors: [] };
+      } catch (error) {
+        const failure = outputFromExecutionError(error);
+        const logs = [failure.stdout, failure.stderr].filter(Boolean);
+        const report = { command: parsed.command, cwd: workspace, exitCode: failure.code, message: failure.message, stdout: failure.stdout, stderr: failure.stderr };
+        await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "run_project_npm_command", ok: false, summary: `${parsed.command} failed.`, details: report });
+        return { ok: false, summary: `${parsed.command} failed.`, jobId: parsed.projectId, artifacts: [], structuredContent: report, logs, errors: [failure.message] };
+      }
     }
   },
   {
@@ -591,15 +638,17 @@ export const projectDevTools: ToolModule[] = [
       const parsed = input as z.infer<typeof importProjectWorkspaceAssetSchema>;
       const workspace = await resolveProjectWorkspace(ctx, parsed.projectId);
       const safePath = assertSafeWorkspaceAssetPath(parsed.relativePath);
-      const sourcePath = path.isAbsolute(parsed.sourcePath) ? path.resolve(parsed.sourcePath) : path.resolve(ctx.workspaceRoot, parsed.sourcePath);
-      const sourceStat = await stat(sourcePath);
+      const sourceCandidate = path.isAbsolute(parsed.sourcePath) ? path.resolve(parsed.sourcePath) : path.resolve(ctx.workspaceRoot, parsed.sourcePath);
+      const source = await assertInsideRoot(ctx.workspaceRoot, sourceCandidate, "sourcePath");
+      assertNoHiddenPathSegments(source.relativePath, "sourcePath");
+      const sourceStat = await stat(source.target);
       if (!sourceStat.isFile()) throw new Error("sourcePath must point to a file.");
       if (sourceStat.size > maxWorkspaceAssetBytes) throw new Error("Workspace asset exceeds 100 MiB.");
       const absolutePath = await safeResolveInside(workspace, safePath);
       await mkdir(path.dirname(absolutePath), { recursive: true });
-      await copyFile(sourcePath, absolutePath);
+      await copyFile(source.target, absolutePath);
       const fileStat = await stat(absolutePath);
-      const file = { path: safePath, size: fileStat.size, contentType: contentTypeForWorkspaceAsset(safePath), sourcePath, modifiedAt: fileStat.mtime.toISOString() };
+      const file = { path: safePath, size: fileStat.size, contentType: contentTypeForWorkspaceAsset(safePath), sourcePath: source.relativePath, modifiedAt: fileStat.mtime.toISOString() };
       await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "import_project_workspace_asset_from_local_file", ok: true, summary: `Imported workspace asset ${safePath}.`, details: file });
       return { ok: true, summary: `Imported workspace asset ${safePath}.`, jobId: parsed.projectId, artifacts: [safePath], structuredContent: file, logs: [JSON.stringify(file, null, 2)], errors: [] };
     }
@@ -692,20 +741,30 @@ export const projectDevTools: ToolModule[] = [
           await browser.close();
         }
         if (!videoPath) throw new Error("Playwright did not produce a video file.");
-        let outputPath = videoPath;
-        let contentType = "video/webm";
-        let filename = `${parsed.projectId}-recording.webm`;
+        const webmArtifact = await createArtifact({ artifactRoot: ctx.artifactRoot, filename: `${parsed.projectId}-recording.webm`, contentType: "video/webm", content: await readFile(videoPath) });
+        const webmArtifactUrl = makeArtifactUrl(ctx.publicBaseUrl, webmArtifact.id, webmArtifact.filename);
+        let artifactUrl = webmArtifactUrl;
+        let format = "webm";
+        const artifacts = [webmArtifactUrl];
+        const warnings: string[] = [];
         if (parsed.format === "mp4") {
-          outputPath = path.join(videoDir, `${parsed.projectId}-recording.mp4`);
-          await maybeConvertWebmToMp4(videoPath, outputPath, Math.max(30000, parsed.durationMs * 3));
-          contentType = "video/mp4";
-          filename = `${parsed.projectId}-recording.mp4`;
+          try {
+            const mp4Path = path.join(videoDir, `${parsed.projectId}-recording.mp4`);
+            await maybeConvertWebmToMp4(videoPath, mp4Path, Math.max(30000, parsed.durationMs * 3));
+            const mp4Artifact = await createArtifact({ artifactRoot: ctx.artifactRoot, filename: `${parsed.projectId}-recording.mp4`, contentType: "video/mp4", content: await readFile(mp4Path) });
+            artifactUrl = makeArtifactUrl(ctx.publicBaseUrl, mp4Artifact.id, mp4Artifact.filename);
+            artifacts.unshift(artifactUrl);
+            format = "mp4";
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "MP4 conversion failed.";
+            warnings.push(`MP4 conversion failed; WebM artifact is available. ${message}`);
+          }
         }
-        const artifact = await createArtifact({ artifactRoot: ctx.artifactRoot, filename, contentType, content: await readFile(outputPath) });
-        const artifactUrl = makeArtifactUrl(ctx.publicBaseUrl, artifact.id, artifact.filename);
-        const report = { projectId: parsed.projectId, url: server.url, artifactUrl, format: parsed.format, viewport: { name: parsed.viewport, width: size.width, height: size.height }, durationMs: parsed.durationMs, consoleErrors, pageErrors, serverLogs: server.logs.slice(-40) };
-        await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "record_project_workspace_video", ok: consoleErrors.length === 0 && pageErrors.length === 0, summary: `Recorded browser output to ${parsed.format}.`, details: report });
-        return { ok: consoleErrors.length === 0 && pageErrors.length === 0, summary: `Recorded browser output to ${parsed.format}.`, jobId: parsed.projectId, previewUrl: artifactUrl, artifacts: [artifactUrl], structuredContent: report, logs: [JSON.stringify(report, null, 2)], errors: [...consoleErrors, ...pageErrors] };
+        const errors = [...consoleErrors, ...pageErrors, ...warnings];
+        const ok = errors.length === 0;
+        const report = { projectId: parsed.projectId, url: server.url, artifactUrl, webmArtifactUrl, requestedFormat: parsed.format, format, viewport: { name: parsed.viewport, width: size.width, height: size.height }, durationMs: parsed.durationMs, consoleErrors, pageErrors, warnings, serverLogs: server.logs.slice(-40) };
+        await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "record_project_workspace_video", ok, summary: ok ? `Recorded browser output to ${format}.` : `Recorded browser output with issues.`, details: report });
+        return { ok, summary: ok ? `Recorded browser output to ${format}.` : "Recorded browser output with issues.", jobId: parsed.projectId, previewUrl: artifactUrl, artifacts, structuredContent: report, logs: [JSON.stringify(report, null, 2)], errors };
       } finally {
         if (parsed.closeAfterRecord && !server.process.killed) server.process.kill("SIGTERM");
         await rm(videoDir, { recursive: true, force: true });

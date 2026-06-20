@@ -96,6 +96,7 @@ test("write_project_asset tool accepts raw base64 and rejects data URLs", async 
       commandTimeoutMs: 1000,
       shareRoot: path.join(root, "shares"),
       artifactRoot: path.join(root, "artifacts"),
+      feedbackRoot: path.join(root, "feedback"),
       projectRoot: root,
       clientId: "test-client"
     };
@@ -129,6 +130,7 @@ test("import_project_asset_from_url rejects private-network URLs before fetch", 
       commandTimeoutMs: 1000,
       shareRoot: path.join(root, "shares"),
       artifactRoot: path.join(root, "artifacts"),
+      feedbackRoot: path.join(root, "feedback"),
       projectRoot: root,
       clientId: "test-client"
     };
@@ -167,6 +169,7 @@ test("import_project_asset_from_local_file tool resolves workspace-relative sour
       commandTimeoutMs: 1000,
       shareRoot: path.join(root, "shares"),
       artifactRoot: path.join(root, "artifacts"),
+      feedbackRoot: path.join(root, "feedback"),
       projectRoot: root,
       clientId: "test-client"
     };

@@ -186,3 +186,10 @@ tbody tr:hover { background: #fbfcfb; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: .001ms !important; animation-duration: .001ms !important; scroll-behavior: auto !important; }
 }
+
+.muted { color: var(--muted); font-size: 13px; }
+.feedback-detail { display: grid; gap: 6px; padding: 6px 2px; }
+.feedback-detail p { margin: 0; }
+.feedback-detail pre { margin: 4px 0 0; padding: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; overflow: auto; font-size: 12px; }
+.feedback-detail small { color: var(--muted); }
+tr.detail-row > td { background: var(--bg); }

@@ -17,6 +17,8 @@ import {
   setProjectStatus
 } from "./projects/store.js";
 import { getResearchSummary } from "./research/store.js";
+import { getIssueStats, listIssues, updateIssueStatus, type IssueStatus } from "./feedback/store.js";
+import { summarizeTelemetry } from "./telemetry/aggregate.js";
 import { deleteBlogPost, getBlogPostBySlug, getBlogTheme, listBlogPosts, setBlogTheme, upsertBlogPost } from "./blog/store.js";
 import { clearHomepage, getHomepage, setHomepage } from "./site/store.js";
 import type { SkillState } from "./skills/state.js";
@@ -61,6 +63,7 @@ interface AdminApiConfig {
   workspaceRoot: string;
   shareRoot: string;
   artifactRoot: string;
+  feedbackRoot: string;
 }
 
 type SortDirection = "asc" | "desc";
@@ -936,6 +939,43 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       sessionTtlHours: sessionTtlMs / (60 * 60 * 1000),
       registrationSettings: user.role === "admin" ? await getRegistrationSettings() : undefined
     });
+  }));
+
+  api.get("/feedback", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    const statusFilter = typeof req.query.status === "string" ? req.query.status : undefined;
+    const allowedStatus: IssueStatus[] = ["open", "investigating", "resolved", "wontfix"];
+    const status = allowedStatus.includes(statusFilter as IssueStatus) ? (statusFilter as IssueStatus) : undefined;
+    const [issues, stats] = await Promise.all([
+      listIssues(config.feedbackRoot, { status, limit: 500 }),
+      getIssueStats(config.feedbackRoot)
+    ]);
+    ok(res, { issues, stats });
+  }));
+
+  api.post("/feedback/:id/status", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    const status = readBodyString(req, "status") as IssueStatus;
+    if (!["open", "investigating", "resolved", "wontfix"].includes(status)) {
+      fail(res, 400, "Invalid status.");
+      return;
+    }
+    const resolutionNote = readBodyString(req, "resolutionNote") || undefined;
+    try {
+      const issue = await updateIssueStatus(config.feedbackRoot, { id: req.params.id, status, resolutionNote });
+      ok(res, { issue });
+    } catch (error) {
+      fail(res, 404, error instanceof Error ? error.message : "Issue not found.");
+    }
+  }));
+
+  api.get("/telemetry", asyncRoute(async (req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    if (!requireAdmin(user, res)) return;
+    const windowDays = Math.min(90, Math.max(1, Number.parseInt(readStringQuery(req, "days") || "7", 10) || 7));
+    ok(res, { telemetry: await summarizeTelemetry(windowDays) });
   }));
 
   app.use("/admin/api", api);

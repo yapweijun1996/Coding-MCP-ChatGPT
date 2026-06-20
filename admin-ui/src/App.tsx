@@ -9,7 +9,9 @@ import {
   ExternalLink,
   Eye,
   FileCode2,
+  Gauge,
   Home,
+  Inbox,
   KeyRound,
   LogOut,
   Menu,
@@ -23,12 +25,17 @@ import {
   Wrench,
   X
 } from "lucide-react";
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { api, loadSession, login, register, setCsrfToken } from "./api";
 import type {
   ActivityEvent,
   ClientStatus,
   ConnectorDetail,
+  FeedbackIssue,
+  FeedbackResult,
+  IssueStatus,
+  TelemetryResult,
+  TelemetrySummary,
   OverviewResult,
   PageResult,
   PublicUser,
@@ -44,7 +51,7 @@ import type {
   ValidationStatus
 } from "./types";
 
-type Route = "overview" | "projects" | "blog" | "project-detail" | "tools" | "connectors" | "activity" | "users" | "settings" | "login" | "register";
+type Route = "overview" | "projects" | "blog" | "project-detail" | "tools" | "connectors" | "activity" | "observability" | "feedback" | "users" | "settings" | "login" | "register";
 type Toast = { id: number; tone: "success" | "error"; message: string };
 type MutableProjectStatus = Exclude<ProjectStatus, "deleted">;
 type ConfirmState = {
@@ -62,6 +69,8 @@ const navItems: Array<{ route: Route; href: string; label: string; icon: ReactNo
   { route: "tools", href: "/admin/tools", label: "Tools & Skills", icon: <Wrench size={18} /> },
   { route: "connectors", href: "/admin/connectors", label: "Connectors", icon: <KeyRound size={18} /> },
   { route: "activity", href: "/admin/activity", label: "Activity", icon: <ShieldAlert size={18} /> },
+  { route: "observability", href: "/admin/observability", label: "Observability", icon: <Gauge size={18} /> },
+  { route: "feedback", href: "/admin/feedback", label: "Agent Feedback", icon: <Inbox size={18} /> },
   { route: "users", href: "/admin/users", label: "Users", icon: <Users size={18} /> },
   { route: "settings", href: "/admin/settings", label: "Settings", icon: <Settings size={18} /> }
 ];
@@ -77,6 +86,8 @@ function currentRoute(): { route: Route; projectId?: string } {
   if (path === "/admin/tools") return { route: "tools" };
   if (path === "/admin/connectors") return { route: "connectors" };
   if (path === "/admin/activity") return { route: "activity" };
+  if (path === "/admin/observability") return { route: "observability" };
+  if (path === "/admin/feedback") return { route: "feedback" };
   if (path === "/admin/users") return { route: "users" };
   if (path === "/admin/settings") return { route: "settings" };
   return { route: "overview" };
@@ -323,6 +334,8 @@ export function App() {
           {route.route === "tools" && <ToolsPage setConfirm={setConfirm} toast={toast} />}
           {route.route === "connectors" && <ConnectorsPage setConfirm={setConfirm} toast={toast} />}
           {route.route === "activity" && <ActivityPage />}
+          {route.route === "observability" && <ObservabilityPage toast={toast} />}
+          {route.route === "feedback" && <FeedbackPage setConfirm={setConfirm} toast={toast} />}
           {route.route === "users" && <UsersPage setConfirm={setConfirm} toast={toast} />}
           {route.route === "settings" && <SettingsPage />}
         </div>
@@ -809,6 +822,158 @@ function ActivityPage() {
   const query = params.toString();
   useEffect(() => { api<PageResult<ActivityEvent>>(`/activity?${query}`).then(setData).catch(() => undefined); }, [query]);
   return <section className="panel"><PanelTitle title="Activity audit" /><Toolbar><label className="search-field"><Search size={16} /><input placeholder="Search activity" value={params.get("q") ?? ""} onChange={(event) => updateParams({ q: event.target.value, page: "1" })} /></label><select value={params.get("status") ?? ""} onChange={(event) => updateParams({ status: event.target.value, page: "1" })} aria-label="Filter activity status"><option value="">All status</option><option value="ok">OK</option><option value="fail">Fail</option></select><input value={params.get("client") ?? ""} placeholder="Client" onChange={(event) => updateParams({ client: event.target.value, page: "1" })} /><input value={params.get("tool") ?? ""} placeholder="Tool" onChange={(event) => updateParams({ tool: event.target.value, page: "1" })} /></Toolbar>{data ? <><ActivityTable events={data.items} /><Pagination page={data.page} pageCount={data.pageCount} total={data.total} onPage={(page) => updateParams({ page: String(page) })} /></> : <div className="table-loader">Loading activity...</div>}</section>;
+}
+
+const telemetryWindows = [1, 7, 30, 90];
+// Cloudflare proxies time out around 100s; flag tools whose p95 approaches it.
+const slowP95ThresholdMs = 90000;
+
+function fmtMs(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "-";
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}s`;
+  return `${value}ms`;
+}
+
+function errorRateLevel(rate: number): string {
+  if (rate >= 0.2) return "high";
+  if (rate >= 0.05) return "medium";
+  return "low";
+}
+
+function ObservabilityPage({ toast }: { toast: (tone: Toast["tone"], message: string) => void }) {
+  const [days, setDays] = useState(7);
+  const [data, setData] = useState<TelemetrySummary>();
+  const load = useCallback(
+    () => api<TelemetryResult>(`/telemetry?days=${days}`).then((result) => setData(result.telemetry)).catch((error: unknown) => toast("error", error instanceof Error ? error.message : "Unable to load telemetry.")),
+    [days, toast]
+  );
+  useEffect(() => { load(); }, [load]);
+
+  const metricRow = (metric: TelemetryResult["telemetry"]["byTool"][number]) => (
+    <tr key={metric.key}>
+      <td data-label="Name"><code>{metric.key}</code></td>
+      <td data-label="Calls">{metric.calls}</td>
+      <td data-label="Errors">{metric.errors}</td>
+      <td data-label="Error rate"><span className={badgeClass(errorRateLevel(metric.errorRate))}>{(metric.errorRate * 100).toFixed(0)}%</span></td>
+      <td data-label="p50">{fmtMs(metric.p50Ms)}</td>
+      <td data-label="p95">{metric.p95Ms !== null && metric.p95Ms >= slowP95ThresholdMs ? <span className={badgeClass("high")}>{fmtMs(metric.p95Ms)}</span> : fmtMs(metric.p95Ms)}</td>
+      <td data-label="Max">{fmtMs(metric.maxMs)}</td>
+    </tr>
+  );
+
+  return (
+    <div className="stack">
+      <section className="panel">
+        <PanelTitle title="Observability" />
+        <Toolbar>
+          <select value={days} onChange={(event) => setDays(Number(event.target.value))} aria-label="Telemetry window in days">
+            {telemetryWindows.map((window) => <option key={window} value={window}>Last {window} day{window > 1 ? "s" : ""}</option>)}
+          </select>
+          {data && <span className="muted">{data.totalCalls} calls · {data.totalErrors} errors · {(data.errorRate * 100).toFixed(1)}% error rate · {data.from} → {data.to}</span>}
+        </Toolbar>
+        {!data ? <div className="table-loader">Loading telemetry...</div> : data.totalCalls === 0 ? (
+          <EmptyState title="No telemetry yet" body="No MCP tool calls have been recorded in this window. Telemetry is captured automatically on every tools/call." />
+        ) : null}
+      </section>
+
+      {data && data.totalCalls > 0 && (
+        <section className="panel">
+          <PanelTitle title="By tool (most problematic first)" />
+          <div className="table-wrap"><table><thead><tr><th>Tool</th><th>Calls</th><th>Errors</th><th>Error rate</th><th>p50</th><th>p95</th><th>Max</th></tr></thead><tbody>{data.byTool.map(metricRow)}</tbody></table></div>
+        </section>
+      )}
+
+      {data && data.byClient.length > 0 && (
+        <section className="panel">
+          <PanelTitle title="By client" />
+          <div className="table-wrap"><table><thead><tr><th>Client</th><th>Calls</th><th>Errors</th><th>Error rate</th><th>p50</th><th>p95</th><th>Max</th></tr></thead><tbody>{data.byClient.map(metricRow)}</tbody></table></div>
+        </section>
+      )}
+
+      {data && data.recentErrors.length > 0 && (
+        <section className="panel">
+          <PanelTitle title="Recent errors" />
+          <div className="activity-list">{data.recentErrors.map((error, index) => (
+            <div key={`${error.time}-${index}`}>
+              <span className={badgeClass("fail")}>Fail</span>
+              <strong>{error.toolName ?? "-"}</strong>
+              <p>{error.errorMessage ?? "(no message)"}</p>
+              <small>{fmtDate(error.time)} · {error.clientType ?? "unknown"} · {fmtMs(error.durationMs)}</small>
+            </div>
+          ))}</div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+const feedbackStatusOptions: IssueStatus[] = ["open", "investigating", "resolved", "wontfix"];
+
+function FeedbackPage({ setConfirm, toast }: { setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void }) {
+  const [data, setData] = useState<FeedbackResult>();
+  const [statusFilter, setStatusFilter] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const query = statusFilter ? `?status=${encodeURIComponent(statusFilter)}` : "";
+  const load = useCallback(
+    () => api<FeedbackResult>(`/feedback${query}`).then(setData).catch((error: unknown) => toast("error", error instanceof Error ? error.message : "Unable to load feedback.")),
+    [query, toast]
+  );
+  useEffect(() => { load(); }, [load]);
+
+  const changeStatus = (issue: FeedbackIssue, next: IssueStatus) => {
+    if (next === issue.status) return;
+    const note = next === "resolved" || next === "wontfix" ? window.prompt(`Resolution note for ${issue.id} (optional):`, issue.resolutionNote ?? "") : null;
+    if (note === null && (next === "resolved" || next === "wontfix")) {
+      // prompt cancelled — abort without changing
+      return;
+    }
+    setConfirm({
+      title: "Update issue status",
+      body: `Mark ${issue.id} "${issue.title}" as ${next}.`,
+      confirmLabel: "Update",
+      tone: next === "wontfix" ? "danger" : "primary",
+      onConfirm: async () => {
+        await api(`/feedback/${encodeURIComponent(issue.id)}/status`, { method: "POST", body: JSON.stringify({ status: next, resolutionNote: note ?? undefined }) });
+        await load();
+        toast("success", `Issue ${issue.id} marked ${next}.`);
+      }
+    });
+  };
+
+  return (
+    <section className="panel">
+      <PanelTitle title="Agent feedback inbox" />
+      <Toolbar>
+        <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Filter issues by status">
+          <option value="">All status</option>
+          {feedbackStatusOptions.map((status) => <option key={status} value={status}>{status}</option>)}
+        </select>
+        {data && <span className="muted">{data.stats.open} open · {data.stats.total} total</span>}
+      </Toolbar>
+      {!data ? <div className="table-loader">Loading feedback...</div> : data.issues.length === 0 ? (
+        <EmptyState title="No issues" body="No agent-reported issues match the current filter. Agents report problems with the report_issue MCP tool." />
+      ) : (
+        <div className="table-wrap"><table><thead><tr><th>ID</th><th>Severity</th><th>Category</th><th>Tool</th><th>Title</th><th>Reported</th><th>Status</th></tr></thead><tbody>
+          {data.issues.map((issue) => (
+            <Fragment key={issue.id}>
+              <tr>
+                <td data-label="ID"><button type="button" className="link-button" onClick={() => setExpanded(expanded === issue.id ? null : issue.id)}><code>{issue.id}</code></button></td>
+                <td data-label="Severity"><span className={badgeClass(issue.severity)}>{issue.severity}</span></td>
+                <td data-label="Category">{issue.category}</td>
+                <td data-label="Tool">{issue.toolName ? <code>{issue.toolName}</code> : "-"}</td>
+                <td data-label="Title">{issue.title}</td>
+                <td data-label="Reported">{fmtDate(issue.createdAt)}{issue.reportedByClientId ? <><br /><small>{issue.reportedByClientId}</small></> : null}</td>
+                <td data-label="Status"><select value={issue.status} onChange={(event) => changeStatus(issue, event.target.value as IssueStatus)} aria-label={`Status for ${issue.id}`}>{feedbackStatusOptions.map((status) => <option key={status} value={status}>{status}</option>)}</select></td>
+              </tr>
+              {expanded === issue.id && (
+                <tr className="detail-row"><td colSpan={7}><div className="feedback-detail"><p><strong>Detail:</strong> {issue.detail}</p>{issue.reproSteps ? <p><strong>Repro:</strong> {issue.reproSteps}</p> : null}{issue.resolutionNote ? <p><strong>Resolution:</strong> {issue.resolutionNote}</p> : null}{issue.context ? <pre>{JSON.stringify(issue.context, null, 2)}</pre> : null}<small>Updated {fmtDate(issue.updatedAt)}</small></div></td></tr>
+              )}
+            </Fragment>
+          ))}
+        </tbody></table></div>
+      )}
+    </section>
+  );
 }
 
 function UsersPage({ setConfirm, toast }: { setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void }) {

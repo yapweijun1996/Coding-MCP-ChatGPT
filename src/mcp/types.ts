@@ -24,6 +24,7 @@ export interface ToolContext {
   commandTimeoutMs: number;
   shareRoot: string;
   artifactRoot: string;
+  feedbackRoot: string;
   projectRoot: string;
   clientId: string;
   userId?: string;

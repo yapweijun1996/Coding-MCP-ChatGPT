@@ -55,7 +55,18 @@ export const skillRegistry: readonly SkillDefinition[] = [
       "git_for_each_ref",
       "git_cat_file",
       "git_check_ref_format",
-      "refactor_hints"
+      "git_merge_base",
+      "git_count_objects",
+      "git_verify_pack",
+      "git_fsck",
+      "git_reflog",
+      "git_symbolic_ref",
+      "git_name_rev",
+      "refactor_hints",
+      "report_issue",
+      "list_reported_issues",
+      "run_tool_async",
+      "get_job_status"
     ],
     protocolMarkdown: `# Core Agent Basics
 
@@ -64,6 +75,7 @@ Use this skill to discover the available workspace/project context before taking
 - Prefer read-only project and workspace inspection first.
 - Use \`refactor_hints\` when the agent needs advisory signals for oversized or mixed-responsibility files before proposing refactor work.
 - Use \`list_agent_skills\` and \`get_agent_skill\` when the agent needs to know which protocols are available.
+- Use \`report_issue\` to flag any tool error, missing capability, or unclear behavior you hit instead of silently giving up; use \`list_reported_issues\` to check for an existing report before filing a duplicate.
 - Keep destructive file, process, and git actions out of this baseline path.`
   },
   {
@@ -104,6 +116,10 @@ Use this skill to discover the available workspace/project context before taking
       "record_project_workspace_video",
       "publish_project_workspace",
       "record_project_task",
+      "import_project_asset_from_local_file",
+      "patch_project_file",
+      "fork_project",
+      "screenshot_project",
       "read_project_file",
       "delete_project_file",
       "validate_project",

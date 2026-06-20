@@ -51,7 +51,7 @@ This MCP stores ChatGPT-created coding projects on disk under `.projects/`.
 - `run_project_build`: run controlled `npm run build`.
 - `publish_project_dist`: publish built `dist/` output to the stable `/share/:projectId/index.html` URL.
 - `get_app_project_report`: return manifest plus app dev server state.
-- `bind_project_workspace`: bind an existing `projectId` to a real local workspace path and Git repository.
+- `bind_project_workspace`: bind an existing `projectId` to a real local Git repository under `WORKSPACE_ROOT`.
 - `list_project_files`: list files in the bound workspace, excluding heavy generated folders by default.
 - `search_in_project`: search the bound workspace with ripgrep.
 - `apply_patch`: apply a unified diff to the bound workspace after `git apply --check`.
@@ -60,7 +60,7 @@ This MCP stores ChatGPT-created coding projects on disk under `.projects/`.
 - `run_project_npm_command`: run `npm install`, `npm run build`, `npm test`, `npm run lint`, or `npm run typecheck` in the bound workspace.
 - `run_shell_command`: run a bounded shell command in the bound workspace with a scrubbed environment; disabled by default.
 - `inspect_project_workspace`: start the bound workspace dev server and inspect desktop/tablet/mobile screenshots, layout, console errors, and optional accessibility.
-- `record_project_workspace_video`: start the bound workspace dev server and record real browser output to WebM, or MP4 when `ffmpeg` is installed.
+- `record_project_workspace_video`: start the bound workspace dev server and record real browser output to WebM, or MP4 when `ffmpeg` is installed; failed MP4 conversion still returns the WebM artifact.
 - `publish_project_workspace`: copy a built output directory such as `dist/` into the project files and publish it to `/share/:projectId/index.html`.
 - `record_project_task`: append queued/in-progress/completed/blocked task state to project history.
 
@@ -126,7 +126,7 @@ For idea-to-demo Vite apps, use the app project workflow:
 For existing repositories on disk, use the real workspace workflow:
 
 1. `create_project` or `get_project`
-2. `bind_project_workspace` with `projectId` and the repository path
+2. `bind_project_workspace` with `projectId` and the repository path under `WORKSPACE_ROOT`
 3. `git_status` with `projectId`
 4. `list_project_files` and `search_in_project`
 5. `apply_patch`
@@ -137,4 +137,4 @@ For existing repositories on disk, use the real workspace workflow:
 10. `publish_project_workspace`
 11. Return changed files, validation result, screenshot/inspection report URLs, video artifact URL when present, public URL, and remaining issues.
 
-`git_status`, `git_diff`, `git_commit`, and `git_push` accept an optional `projectId`. When present, they run inside the bound Git repository instead of the MCP server's default workspace. This avoids failures when the default workspace is not itself a Git repository.
+`git_status`, `git_diff`, `git_commit`, and `git_push` accept an optional `projectId`. When present, they run inside the bound Git repository instead of the MCP server's default workspace. Bound repositories must be under `WORKSPACE_ROOT` such as `/data/workspace` in Docker.

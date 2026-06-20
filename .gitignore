@@ -15,3 +15,6 @@ coverage/
 .projects/
 .state/
 .docker-data/
+.telemetry
+.jobs
+.users

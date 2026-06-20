@@ -121,7 +121,7 @@ test("blog routes render index and post, and gate writes to admins", async () =>
 
   const publishTool = blogTools.find((tool) => tool.definition.name === "publish_blog_post");
   assert.ok(publishTool);
-  const ctxBase = { publicBaseUrl: "https://example.test", workspaceRoot: root, commandTimeoutMs: 1000, shareRoot: root, artifactRoot: root, projectRoot: root, clientId: "test" };
+  const ctxBase = { publicBaseUrl: "https://example.test", workspaceRoot: root, commandTimeoutMs: 1000, shareRoot: root, artifactRoot: root, feedbackRoot: root, projectRoot: root, clientId: "test" };
 
   // non-admin (no userId) is rejected
   const denied = await publishTool.handler({ title: "Nope", content: "x" }, { ...ctxBase, userId: undefined });

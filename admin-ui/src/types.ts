@@ -188,3 +188,63 @@ export interface RegistrationSettings {
   defaultRole: "developer";
   allowedEmailDomains: string[];
 }
+
+export type IssueSeverity = "low" | "medium" | "high" | "critical";
+export type IssueStatus = "open" | "investigating" | "resolved" | "wontfix";
+
+export interface FeedbackIssue {
+  id: string;
+  title: string;
+  detail: string;
+  severity: IssueSeverity;
+  category: string;
+  status: IssueStatus;
+  toolName?: string;
+  reproSteps?: string;
+  context?: Record<string, unknown>;
+  reportedByClientId?: string;
+  reportedByUserId?: string;
+  createdAt: string;
+  updatedAt: string;
+  resolutionNote?: string;
+}
+
+export interface FeedbackResult extends ApiResult {
+  issues: FeedbackIssue[];
+  stats: { total: number; open: number; byStatus: Record<IssueStatus, number> };
+}
+
+export interface TelemetryMetric {
+  key: string;
+  calls: number;
+  errors: number;
+  errorRate: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  maxMs: number | null;
+  avgMs: number | null;
+}
+
+export interface TelemetryErrorSample {
+  time: string;
+  toolName?: string;
+  clientType?: string;
+  durationMs?: number;
+  errorMessage?: string;
+}
+
+export interface TelemetrySummary {
+  windowDays: number;
+  from: string;
+  to: string;
+  totalCalls: number;
+  totalErrors: number;
+  errorRate: number;
+  byTool: TelemetryMetric[];
+  byClient: TelemetryMetric[];
+  recentErrors: TelemetryErrorSample[];
+}
+
+export interface TelemetryResult extends ApiResult {
+  telemetry: TelemetrySummary;
+}
