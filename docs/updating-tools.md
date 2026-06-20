@@ -69,3 +69,29 @@ Long-running tools dispatched with `run_tool_async` persist their job records to
 `/data/jobs` volume, so `get_job_status` still works after a restart/rebuild. A job that was
 mid-run when the server stopped is reconciled to `error` on boot (re-run it); finished jobs are
 retained for `JOB_RETENTION_DAYS` (default 7).
+
+## Troubleshooting: the build stalls at "resolve image config for docker/dockerfile:1"
+
+The Dockerfile starts with `# syntax=docker/dockerfile:1`, so BuildKit must pull the
+`docker/dockerfile:1` frontend image from Docker Hub before it can build. On a host with
+restricted egress this step hangs (and may even exit 0 without producing a new image — the
+running container then silently stays on the OLD code).
+
+Workaround — build with the **legacy** builder, which ignores the `# syntax` directive and does
+not pull the frontend (the cached base image is reused):
+
+```bash
+DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0 docker compose build coding-mcp-chatgpt
+docker compose up -d
+```
+
+Always confirm the new code is actually live by checking the tool count, not just container
+health:
+
+```bash
+curl -s -H "authorization: Bearer $MCP_DEV_TOKEN" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' http://localhost:6859/mcp \
+  | grep -o '"name"' | wc -l
+```
+
+A container that is `Up` but serving an image built hours ago means the rebuild did not take.
