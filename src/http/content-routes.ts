@@ -1,0 +1,248 @@
+import type express from "express";
+import { readArtifact } from "../artifacts/store.js";
+import { renderPublicSharePage, type PublicShareLocale } from "../admin.js";
+import type { ServerConfig } from "../config.js";
+import { getJob } from "../jobs/store.js";
+import { renderPreviewPage } from "../preview.js";
+import {
+  getProject,
+  getProjectFileContentType,
+  getProjectStoredFilePath,
+  isProjectTextFilePath,
+  listProjects,
+  readProjectFile
+} from "../projects/store.js";
+import { readShareArtifact } from "../share/store.js";
+import { getBlogPostBySlug, getBlogTheme, listBlogPosts } from "../blog/store.js";
+import { renderBlogIndex, renderBlogPost, renderBlogRss } from "../blog/render.js";
+import { getHomepage } from "../site/store.js";
+import {
+  getAllProjectRoots,
+  getProjectRootForUser,
+  getPublicShareBasePathForUser,
+  getUserByProjectRoot,
+  getUserByUsername
+} from "../user-store.js";
+import { asyncRoute } from "./util.js";
+
+const homepageCsp = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https:; base-uri 'none'; form-action 'self';";
+const blogCsp = "default-src 'self' 'unsafe-inline' data: https:; base-uri 'none'; form-action 'self';";
+
+function getPublicShareLocale(req: express.Request): PublicShareLocale {
+  if (req.query.lang === "zh" || req.query.lang === "en") return req.query.lang;
+  const preferredLanguage = req.acceptsLanguages("zh-CN", "zh", "en");
+  return typeof preferredLanguage === "string" && preferredLanguage.startsWith("zh") ? "zh" : "en";
+}
+
+function injectCanonicalLink(html: string, canonicalUrl: string): string {
+  const link = `<link rel="canonical" href="${canonicalUrl.replaceAll("&", "&amp;").replaceAll('"', "&quot;")}">`;
+  if (/<link\s+[^>]*rel=["']canonical["'][^>]*>/i.test(html)) return html;
+  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${link}</head>`);
+  return `${link}\n${html}`;
+}
+
+async function sendPublishedProjectFile(res: express.Response, root: string, projectId: string, filename: string, canonicalUrl?: string): Promise<boolean> {
+  const project = await getProject(root, projectId);
+  if (project.status !== "published") return false;
+  const contentType = getProjectFileContentType(filename);
+  res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=86400");
+  if (canonicalUrl && contentType === "text/html") res.setHeader("Link", `<${canonicalUrl}>; rel="canonical"`);
+  if (isProjectTextFilePath(filename)) {
+    const content = await readProjectFile(root, project.id, filename, 1024 * 1024);
+    res.type(contentType).send(contentType === "text/html" && canonicalUrl ? injectCanonicalLink(content, canonicalUrl) : content);
+    return true;
+  }
+
+  const absolutePath = await getProjectStoredFilePath(root, project.id, filename);
+  res.type(contentType).sendFile(absolutePath, (error) => {
+    if (error && !res.headersSent) {
+      res.status(404).type("text/plain").send("Share not found.");
+    }
+  });
+  return true;
+}
+
+function renderDefaultLanding(): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coding MCP</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: ui-sans-serif, system-ui, sans-serif; background: #0f1511; color: #e8efe9; }
+  main { text-align: center; padding: 32px; }
+  h1 { font-size: clamp(28px, 5vw, 44px); margin: 0 0 12px; }
+  p { color: #9fb0a4; margin: 0 0 24px; }
+  a { display: inline-block; margin: 6px; padding: 11px 18px; border-radius: 8px; text-decoration: none; font-weight: 650; }
+  .primary { background: #16615a; color: #fff; }
+  .ghost { border: 1px solid #2c3a31; color: #cfe0d4; }
+</style>
+</head>
+<body>
+  <main>
+    <h1>Coding MCP</h1>
+    <p>No homepage has been published yet.</p>
+    <a class="primary" href="/admin">Admin console</a>
+    <a class="ghost" href="/blog/">Blog</a>
+    <a class="ghost" href="/share">Public projects</a>
+  </main>
+</body>
+</html>`;
+}
+
+export function registerContentRoutes(app: express.Express, config: ServerConfig): void {
+  const { publicBaseUrl, artifactRoot } = config;
+
+  async function serveHomepageFile(res: express.Response, relativePath?: string): Promise<boolean> {
+    const home = getHomepage();
+    if (!home.homeProjectId || !home.homeOwnerUserId) return false;
+    try {
+      const root = await getProjectRootForUser(home.homeOwnerUserId);
+      const project = await getProject(root, home.homeProjectId);
+      if (project.status !== "published") return false;
+      const filename = relativePath && relativePath !== "/" ? relativePath.replace(/^\/+/, "") : project.entryFile;
+      res.setHeader("Content-Security-Policy", homepageCsp);
+      return await sendPublishedProjectFile(res, root, home.homeProjectId, filename, `${publicBaseUrl.replace(/\/$/, "")}/`);
+    } catch {
+      return false;
+    }
+  }
+
+  app.get("/", asyncRoute(async (_req, res) => {
+    if (await serveHomepageFile(res)) return;
+    res.type("html").send(renderDefaultLanding());
+  }));
+
+  app.get("/health", (_req, res) => {
+    res.json({
+      ok: true,
+      version: "0.1.0",
+      service: "coding-mcp-chatgpt"
+    });
+  });
+
+  app.get(["/share", "/share/"], asyncRoute(async (req, res) => {
+    try {
+      const roots = await getAllProjectRoots();
+      const projects = (await Promise.all(roots.map((root) => listProjects(root, false).catch(() => [])))).flat().filter((project) => project.status === "published");
+      res.type("html").send(renderPublicSharePage({
+        publicBaseUrl,
+        projects,
+        locale: getPublicShareLocale(req)
+      }));
+    } catch {
+      res.status(500).type("text/plain").send("Unable to load public share index.");
+    }
+  }));
+
+  app.get("/outcome/:jobId", (req, res) => {
+    const job = getJob(req.params.jobId);
+    if (!job) {
+      res.status(404).send("Outcome not found.");
+      return;
+    }
+
+    res.type("html").send(renderPreviewPage(job));
+  });
+
+  app.get("/@:username", asyncRoute(async (req, res) => {
+    try {
+      const user = await getUserByUsername(req.params.username);
+      if (!user?.username || !user.publicShareUsernameEnabled || !user.projectRoot) {
+        res.status(404).type("text/plain").send("Public profile not found.");
+        return;
+      }
+      const projects = (await listProjects(user.projectRoot, false)).filter((project) => project.status === "published");
+      res.type("html").send(renderPublicSharePage({
+        publicBaseUrl,
+        projects,
+        locale: getPublicShareLocale(req)
+      }));
+    } catch {
+      res.status(404).type("text/plain").send("Public profile not found.");
+    }
+  }));
+
+  app.get("/@:username/share/:shareId/:filename(*)", asyncRoute(async (req, res) => {
+    try {
+      const user = await getUserByUsername(req.params.username);
+      if (!user?.username || !user.publicShareUsernameEnabled || !user.projectRoot) {
+        res.status(404).type("text/plain").send("Share not found.");
+        return;
+      }
+      const canonicalUrl = `${publicBaseUrl.replace(/\/$/, "")}/@${user.username}/share/${req.params.shareId}/${req.params.filename}`;
+      if (await sendPublishedProjectFile(res, user.projectRoot, req.params.shareId, req.params.filename, canonicalUrl)) return;
+    } catch {
+      // Fall through to 404.
+    }
+    if (!res.headersSent) res.status(404).type("text/plain").send("Share not found.");
+  }));
+
+  app.get("/share/:shareId/:filename(*)", asyncRoute(async (req, res) => {
+    try {
+      for (const root of await getAllProjectRoots()) {
+        try {
+          const owner = await getUserByProjectRoot(root);
+          const canonicalBase = getPublicShareBasePathForUser(owner);
+          const canonicalUrl = `${publicBaseUrl.replace(/\/$/, "")}${canonicalBase}/${req.params.shareId}/${req.params.filename}`;
+          if (await sendPublishedProjectFile(res, root, req.params.shareId, req.params.filename, canonicalUrl)) return;
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      // Not a published project share; fall back to legacy standalone shares.
+    }
+
+    const artifact = await readShareArtifact(req.params.shareId, req.params.filename);
+    if (!artifact || artifact.record.filename !== req.params.filename) {
+      res.status(404).type("text/plain").send("Share not found.");
+      return;
+    }
+    res.setHeader("Content-Security-Policy", "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; base-uri 'none'; form-action 'self';");
+    res.type("html").send(artifact.html);
+  }));
+
+  app.get("/artifact/:artifactId/:filename(*)", asyncRoute(async (req, res) => {
+    try {
+      const artifact = await readArtifact(artifactRoot, req.params.artifactId, req.params.filename);
+      if (!artifact) {
+        res.status(404).type("text/plain").send("Artifact not found.");
+        return;
+      }
+      res.type(artifact.record.contentType).send(artifact.content);
+    } catch {
+      res.status(404).type("text/plain").send("Artifact not found.");
+    }
+  }));
+
+  app.get(["/blog", "/blog/"], asyncRoute(async (_req, res) => {
+    const [posts, theme] = await Promise.all([listBlogPosts({ status: "published" }), getBlogTheme()]);
+    res.setHeader("Content-Security-Policy", blogCsp);
+    res.type("html").send(renderBlogIndex(posts, theme));
+  }));
+
+  app.get("/blog/rss.xml", asyncRoute(async (_req, res) => {
+    const [posts, theme] = await Promise.all([listBlogPosts({ status: "published" }), getBlogTheme()]);
+    res.type("application/rss+xml").send(renderBlogRss(posts, theme, publicBaseUrl));
+  }));
+
+  app.get("/blog/:slug", asyncRoute(async (req, res) => {
+    const post = await getBlogPostBySlug(req.params.slug);
+    if (!post || post.status !== "published") {
+      res.status(404).type("text/plain").send("Post not found.");
+      return;
+    }
+    const theme = await getBlogTheme();
+    res.setHeader("Content-Security-Policy", blogCsp);
+    res.type("html").send(renderBlogPost(post, theme));
+  }));
+
+  // Fallback: serve root-level assets of the homepage project (e.g. /styles.css, /assets/app.js).
+  // Registered last so it never shadows a named route; falls through to 404 when no homepage is set.
+  app.get("/:asset(*)", asyncRoute(async (req, res) => {
+    if (await serveHomepageFile(res, req.params.asset)) return;
+    res.status(404).type("text/plain").send("Not found.");
+  }));
+}
