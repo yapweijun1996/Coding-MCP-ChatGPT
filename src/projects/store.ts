@@ -52,6 +52,48 @@ export interface ProjectWorkspaceBinding {
   boundAt: string;
 }
 
+export type ReviewSeverity = "low" | "medium" | "high" | "critical";
+export type ReviewCategory =
+  | "bug"
+  | "ux"
+  | "visual"
+  | "accessibility"
+  | "performance"
+  | "content"
+  | "security"
+  | "other";
+export type ReviewStatus = "open" | "addressed" | "wontfix";
+
+// A single structured finding from a reviewer (e.g. ChatGPT after testing the generated page),
+// fed back to the coding agent so it can iterate on this specific project. Stored on the
+// project metadata (project.json), NOT in the published files/ directory, so it never leaks to
+// the public share URL.
+export interface ReviewFinding {
+  id: string;
+  title: string;
+  detail: string;
+  severity: ReviewSeverity;
+  category: ReviewCategory;
+  area?: string;
+  suggestion?: string;
+  pageUrl?: string;
+  status: ReviewStatus;
+  resolutionNote?: string;
+  reportedByClientId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReviewFindingInput {
+  title: string;
+  detail: string;
+  severity: ReviewSeverity;
+  category: ReviewCategory;
+  area?: string;
+  suggestion?: string;
+  pageUrl?: string;
+}
+
 export interface ProjectMetadata {
   id: string;
   title: string;
@@ -65,6 +107,7 @@ export interface ProjectMetadata {
   workspaceBinding?: ProjectWorkspaceBinding;
   lastValidation?: ProjectValidationResult;
   taskHistory?: ProjectTaskHistoryItem[];
+  reviewFeedback?: ReviewFinding[];
 }
 
 export interface ProjectFileInfo {
@@ -368,6 +411,98 @@ export async function appendProjectTaskHistory(
     const updated = addHistory(metadata, event);
     await writeProjectMetadata(projectRoot, updated);
     return updated;
+  });
+}
+
+const maxReviewFindings = 500;
+
+function nextReviewFindingId(findings: ReviewFinding[]): number {
+  return findings.reduce((max, finding) => {
+    const match = /^finding_(\d+)$/.exec(finding.id);
+    return match ? Math.max(max, Number.parseInt(match[1], 10)) : max;
+  }, 0) + 1;
+}
+
+// Reviewer (e.g. ChatGPT) submits structured findings about a generated project's page. Both
+// the review feedback and the task-history entry are written under one held lock via addHistory
+// — calling appendProjectTaskHistory here would deadlock on the same non-reentrant project lock.
+export async function submitReviewFeedback(
+  projectRoot: string,
+  projectId: string,
+  findings: ReviewFindingInput[],
+  reportedByClientId?: string
+): Promise<{ metadata: ProjectMetadata; added: ReviewFinding[] }> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot review a deleted project.");
+    const existing = metadata.reviewFeedback ?? [];
+    const now = new Date().toISOString();
+    let counter = nextReviewFindingId(existing);
+    const added: ReviewFinding[] = findings.map((finding) => ({
+      id: `finding_${String(counter++).padStart(3, "0")}`,
+      title: finding.title.trim(),
+      detail: finding.detail.trim(),
+      severity: finding.severity,
+      category: finding.category,
+      area: finding.area?.trim() || undefined,
+      suggestion: finding.suggestion?.trim() || undefined,
+      pageUrl: finding.pageUrl?.trim() || undefined,
+      status: "open",
+      reportedByClientId,
+      createdAt: now,
+      updatedAt: now
+    }));
+    const nextFindings = [...existing, ...added].slice(-maxReviewFindings);
+    const updated = addHistory({ ...metadata, reviewFeedback: nextFindings }, {
+      toolName: "submit_review_feedback",
+      ok: true,
+      summary: `Received ${added.length} review finding(s) for ${projectId}.`,
+      details: { count: added.length, ids: added.map((finding) => finding.id) }
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return { metadata: updated, added };
+  });
+}
+
+export async function listReviewFeedback(
+  projectRoot: string,
+  projectId: string,
+  filter: { status?: ReviewStatus } = {}
+): Promise<ReviewFinding[]> {
+  const metadata = await getProject(projectRoot, projectId);
+  const findings = metadata.reviewFeedback ?? [];
+  return filter.status ? findings.filter((finding) => finding.status === filter.status) : findings;
+}
+
+export async function updateReviewFindingStatus(
+  projectRoot: string,
+  projectId: string,
+  findingId: string,
+  status: ReviewStatus,
+  resolutionNote?: string
+): Promise<ReviewFinding> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    const findings = metadata.reviewFeedback ?? [];
+    const index = findings.findIndex((finding) => finding.id === findingId);
+    if (index === -1) throw new Error(`No review finding ${findingId} in project ${projectId}.`);
+    const now = new Date().toISOString();
+    const updatedFinding: ReviewFinding = {
+      ...findings[index],
+      status,
+      resolutionNote: resolutionNote?.trim() || findings[index].resolutionNote,
+      updatedAt: now
+    };
+    const nextFindings = [...findings];
+    nextFindings[index] = updatedFinding;
+    const updated = addHistory({ ...metadata, reviewFeedback: nextFindings }, {
+      toolName: "resolve_review_feedback",
+      ok: true,
+      summary: `Review finding ${findingId} marked ${status}.`,
+      details: { findingId, status }
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return updatedFinding;
   });
 }
 

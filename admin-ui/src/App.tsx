@@ -624,6 +624,23 @@ function ProjectDetailPage({ projectId, setConfirm, toast }: { projectId: string
         </div>
       </section>
       <section className="panel"><PanelTitle title="Files" />{files.length ? <div className="file-list">{files.map((file) => <div key={file.path}><FileCode2 size={16} /><span>{file.path}</span><small>{Math.round(file.size / 1024)} KB</small></div>)}</div> : <EmptyState title="No files" body="This project has no stored files." />}</section>
+      {(project.reviewFeedback?.length ?? 0) > 0 && (
+        <section className="panel wide">
+          <PanelTitle title={`Review feedback (${project.reviewFeedback!.filter((f) => f.status === "open").length} open)`} />
+          <div className="table-wrap"><table><thead><tr><th>ID</th><th>Severity</th><th>Category</th><th>Area</th><th>Finding</th><th>Status</th></tr></thead><tbody>
+            {project.reviewFeedback!.slice().reverse().map((f) => (
+              <tr key={f.id}>
+                <td data-label="ID"><code>{f.id}</code></td>
+                <td data-label="Severity"><span className={badgeClass(f.severity)}>{f.severity}</span></td>
+                <td data-label="Category">{f.category}</td>
+                <td data-label="Area">{f.area ? <code>{f.area}</code> : "-"}</td>
+                <td data-label="Finding"><strong>{f.title}</strong>{f.suggestion ? <><br /><small>{f.suggestion}</small></> : null}</td>
+                <td data-label="Status"><span className={badgeClass(f.status === "addressed" ? "ok" : f.status === "wontfix" ? "disabled" : "medium")}>{f.status}</span></td>
+              </tr>
+            ))}
+          </tbody></table></div>
+        </section>
+      )}
       <section className="panel wide"><PanelTitle title="Task history" /><HistoryList items={manifest?.taskHistory ?? []} /></section>
     </div>
   );

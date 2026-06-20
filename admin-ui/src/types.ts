@@ -57,6 +57,22 @@ export interface ProjectValidationResult {
   };
 }
 
+export interface ReviewFinding {
+  id: string;
+  title: string;
+  detail: string;
+  severity: "low" | "medium" | "high" | "critical";
+  category: string;
+  area?: string;
+  suggestion?: string;
+  pageUrl?: string;
+  status: "open" | "addressed" | "wontfix";
+  resolutionNote?: string;
+  reportedByClientId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ProjectSummary {
   id: string;
   title: string;
@@ -70,6 +86,7 @@ export interface ProjectSummary {
   filesCount: number;
   lastValidation?: ProjectValidationResult;
   taskHistory?: ProjectTaskHistoryItem[];
+  reviewFeedback?: ReviewFinding[];
 }
 
 export interface ProjectFileInfo {

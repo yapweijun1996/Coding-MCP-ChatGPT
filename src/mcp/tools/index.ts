@@ -14,6 +14,7 @@ import { codeIntelligenceTools } from "./code-intelligence.js";
 import { asyncJobTools } from "./async-jobs.js";
 import { docsKnowledgeTools } from "./docs-knowledge.js";
 import { feedbackTools } from "./feedback.js";
+import { reviewFeedbackTools } from "./review-feedback.js";
 import { integrationReadonlyTools } from "./integration-readonly.js";
 import { shareTools } from "./share.js";
 import { siteTools } from "./site.js";
@@ -32,6 +33,7 @@ export const allToolModules: ToolModule[] = [
   ...codeIntelligenceTools,
   ...docsKnowledgeTools,
   ...feedbackTools,
+  ...reviewFeedbackTools,
   ...asyncJobTools,
   ...integrationReadonlyTools,
   ...webInspectTools,
