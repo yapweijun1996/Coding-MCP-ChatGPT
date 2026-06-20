@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit && tsc -p admin-ui/tsconfig.json --noEmit",
     "test": "npm run typecheck && tsx --test tests/*.test.ts",
     "check:mcp": "npm run build && node scripts/check-mcp-registry.mjs",
+    "check:tools": "npm run build:server && node scripts/check-mcp-registry.mjs",
     "docker:build": "docker compose build",
     "docker:up": "docker compose up -d --build",
     "docker:down": "docker compose down",

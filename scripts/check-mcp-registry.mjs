@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { toolRegistry, toolDefinitions } from "../dist/mcp/registry.js";
 import { skillRegistry } from "../dist/skills/registry.js";
+import { visibleBrowserToolNames } from "../dist/special-tools.js";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const packageScripts = packageJson.scripts ?? {};
@@ -126,6 +127,27 @@ for (const skill of skillRegistry) {
       errors.push(`Skill ${skill.id} references unknown tool: ${toolName}`);
     }
   }
+}
+
+// Reachability guard. A tool's visibility in tools/list requires BOTH the tool to be enabled
+// AND at least one skill that lists it to be enabled (access: blocked_by_skill otherwise).
+// Gating a tool behind an opt-in skill (e.g. high-risk, disabled by default) is intentional.
+// The real trap is a tool that is in NO skill catalog at all: it can NEVER be exposed, no
+// matter which skills are toggled, and reconnecting the client does not help. That is almost
+// always "added a tool, forgot to register it in src/skills/registry.ts". Turn it into a
+// build-time failure. Visible-browser tools are exempt: they are exposed through the runtime
+// browser-control toggle (visibleBrowserToolNames), not the skill catalog.
+const visibleBrowserToolSet = new Set(visibleBrowserToolNames);
+const toolsInAnySkill = new Set();
+for (const skill of skillRegistry) {
+  for (const toolName of skill.toolNames) toolsInAnySkill.add(toolName);
+}
+const orphanedEnabledTools = toolRegistry
+  .filter((tool) => tool.enabledByDefault)
+  .map((tool) => tool.definition.name)
+  .filter((name) => !visibleBrowserToolSet.has(name) && !toolsInAnySkill.has(name));
+for (const toolName of orphanedEnabledTools) {
+  errors.push(`Tool "${toolName}" is enabledByDefault but is listed in NO skill catalog, so tools/list can never expose it (blocked_by_skill, unfixable by any toggle). Add it to a skill's toolNames in src/skills/registry.ts.`);
 }
 
 const highRiskSkill = skillRegistry.find((skill) => skill.id === "high-risk");
