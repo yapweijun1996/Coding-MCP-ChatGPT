@@ -35,6 +35,7 @@ services:
       - ./.docker-data/shares:/data/shares
       - ./.docker-data/artifacts:/data/artifacts
       - ./.docker-data/state:/data/state
+      - ./.docker-data/jobs:/data/jobs
       - ./:/data/workspace
     healthcheck:
       test:

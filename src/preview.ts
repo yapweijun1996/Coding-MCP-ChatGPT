@@ -10,7 +10,7 @@ function escapeHtml(value: string): string {
 }
 
 export function renderPreviewPage(job: JobRecord): string {
-  const statusLabel = job.status === "success" ? "Success" : job.status === "error" ? "Error" : "Created";
+  const statusLabel = job.status === "success" ? "Success" : job.status === "error" ? "Error" : job.status === "running" ? "Running" : "Created";
   const logHtml = job.logs.length > 0 ? job.logs.map((line) => `<li>${escapeHtml(line)}</li>`).join("") : "<li>No logs recorded.</li>";
   const artifactHtml = job.artifacts.length > 0 ? job.artifacts.map((item) => `<li>${escapeHtml(item)}</li>`).join("") : "<li>No artifacts recorded.</li>";
   const errorHtml = job.errors.length > 0 ? `<section><h2>Errors</h2><ul>${job.errors.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul></section>` : "";

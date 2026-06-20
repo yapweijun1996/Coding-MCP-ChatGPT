@@ -22,6 +22,7 @@ ENV NODE_ENV=production \
     SHARE_ROOT=/data/shares \
     ARTIFACT_ROOT=/data/artifacts \
     PROJECT_ROOT=/data/projects \
+    JOBS_ROOT=/data/jobs \
     SKILL_STATE_PATH=/data/state/skill-state.json \
     SITE_STATE_PATH=/data/state/site-state.json \
     BLOG_STATE_PATH=/data/state/blog-state.json \
@@ -36,7 +37,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/admin-ui/dist ./admin-ui/dist
 
-RUN mkdir -p /data/workspace /data/shares /data/artifacts /data/projects /data/state
+RUN mkdir -p /data/workspace /data/shares /data/artifacts /data/projects /data/state /data/jobs
 
 EXPOSE 6859
 
