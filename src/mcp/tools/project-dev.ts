@@ -10,7 +10,9 @@ import {
   bindProjectWorkspace,
   clearProjectFiles,
   getProject,
+  getProjectStoredFilePath,
   getProjectWorkspaceDirectory,
+  listProjectFiles,
   validateProject,
   publishProject,
   writeProjectAsset,
@@ -36,6 +38,12 @@ const bindProjectWorkspaceSchema = z.object({
   projectId: z.string().min(8).max(80),
   workspacePath: z.string().min(1).max(2000),
   requireGit: z.boolean().default(true)
+});
+
+const initProjectGitSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  relativePath: z.string().min(1).max(240).default("workspace"),
+  importProjectFiles: z.boolean().default(true)
 });
 
 const projectPathSchema = z.object({
@@ -477,6 +485,76 @@ async function copyPublishedDist(ctx: ToolContext, projectId: string, distRoot: 
 }
 
 export const projectDevTools: ToolModule[] = [
+  {
+    definition: {
+      name: "init_project_git",
+      description: "Create and git-init a real workspace for a project inside the tenant workspace root, seed it with the project's current files, make an initial commit, and bind the project to it. Use this when a project has no bound Git repository yet so that git_status/git_diff/git_commit/run_project_build and other workspace tools can be used. Idempotent: re-running rebinds the existing repo.",
+      inputSchema: { type: "object", properties: { projectId: { type: "string" }, relativePath: { type: "string", description: "Subdirectory under the workspace root to use as the repo (default 'workspace')." }, importProjectFiles: { type: "boolean", description: "Copy the project's stored files into the new repo (default true)." } }, required: ["projectId"], additionalProperties: false }
+    },
+    enabledByDefault: true,
+    schema: initProjectGitSchema,
+    handler: async (input, ctx) => {
+      const parsed = input as z.infer<typeof initProjectGitSchema>;
+      const relativePath = typeof parsed.relativePath === "string" && parsed.relativePath ? parsed.relativePath : "workspace";
+      const importProjectFiles = parsed.importProjectFiles ?? true;
+      const project = await getProject(ctx.projectRoot, parsed.projectId);
+      if (project.status === "deleted") throw new Error("Cannot initialize git for a deleted project.");
+      await mkdir(ctx.workspaceRoot, { recursive: true });
+      const safeRelative = assertSafeRelativePath(relativePath);
+      if (!safeRelative) throw new Error("relativePath must name a subdirectory.");
+      const workspace = await safeResolveInside(ctx.workspaceRoot, safeRelative);
+      await mkdir(workspace, { recursive: true });
+
+      const gitEnv = gitChildEnv();
+      const gitOpts = { cwd: workspace, env: gitEnv, timeout: 30000, maxBuffer: 1024 * 1024 };
+      const existingGitRoot = await findGitRoot(workspace);
+      const initialized = !existingGitRoot;
+      if (initialized) {
+        await execFileAsync("git", ["init", "-b", "main"], gitOpts);
+        await execFileAsync("git", ["config", "user.email", "agent@coding-mcp.local"], gitOpts);
+        await execFileAsync("git", ["config", "user.name", "Coding MCP Agent"], gitOpts);
+      }
+
+      let importedFiles = 0;
+      if (importProjectFiles) {
+        const files = await listProjectFiles(ctx.projectRoot, parsed.projectId);
+        for (const file of files) {
+          const source = await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, file.path);
+          const destination = path.join(workspace, file.path);
+          await mkdir(path.dirname(destination), { recursive: true });
+          await copyFile(source, destination);
+          importedFiles += 1;
+        }
+      }
+
+      await execFileAsync("git", ["add", "-A"], gitOpts);
+      const { stdout: porcelain } = await execFileAsync("git", ["status", "--porcelain"], gitOpts);
+      let committed = false;
+      if (porcelain.trim() || initialized) {
+        const message = importedFiles > 0 ? `Import ${importedFiles} file(s) from project ${parsed.projectId}` : "Initialize workspace";
+        await execFileAsync("git", ["commit", "--allow-empty", "-m", message], gitOpts);
+        committed = true;
+      }
+
+      const gitRoot = (await findGitRoot(workspace)) ?? workspace;
+      const metadata = await bindProjectWorkspace(ctx.projectRoot, parsed.projectId, { path: workspace, gitRoot });
+      await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, {
+        toolName: "init_project_git",
+        ok: true,
+        summary: `Initialized git workspace for ${parsed.projectId}.`,
+        details: { workspace, gitRoot, initialized, importedFiles, committed }
+      });
+      return {
+        ok: true,
+        summary: `Git workspace ready for ${parsed.projectId} at ${workspace} (${importedFiles} file(s) imported, initial commit: ${committed}). git_status/git_diff/git_commit are now usable.`,
+        jobId: parsed.projectId,
+        artifacts: [workspace],
+        structuredContent: { workspace, gitRoot, initialized, importedFiles, committed, workspaceBinding: metadata.workspaceBinding },
+        logs: [`workspace=${workspace}`, `gitRoot=${gitRoot}`, `initialized=${initialized}`, `importedFiles=${importedFiles}`, `committed=${committed}`],
+        errors: []
+      };
+    }
+  },
   {
     definition: {
       name: "bind_project_workspace",

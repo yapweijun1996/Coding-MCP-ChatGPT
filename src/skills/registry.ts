@@ -106,6 +106,7 @@ Use this skill to discover the available workspace/project context before taking
       "publish_project_dist",
       "get_app_project_report",
       "bind_project_workspace",
+      "init_project_git",
       "list_project_files",
       "search_in_project",
       "apply_patch",
