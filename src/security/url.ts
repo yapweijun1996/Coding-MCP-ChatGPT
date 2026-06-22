@@ -20,16 +20,30 @@ export function isBlockedIpv4(address: string): boolean {
     || first >= 224;
 }
 
+// First 16-bit hextet of an IPv6 address, for range checks. Returns 0 for "::"-prefixed
+// addresses and undefined when the leading group is not a clean hextet.
+function firstIpv6Hextet(normalized: string): number | undefined {
+  if (normalized.startsWith("::")) return 0;
+  const head = normalized.split(":")[0];
+  if (!/^[0-9a-f]{1,4}$/.test(head)) return undefined;
+  return Number.parseInt(head, 16);
+}
+
 export function isBlockedIpv6(address: string): boolean {
-  const normalized = address.toLowerCase();
+  const normalized = address.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
   const mappedIpv4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(normalized);
   if (mappedIpv4) return isBlockedIpv4(mappedIpv4[1]);
-  return normalized === "::"
-    || normalized === "::1"
-    || normalized.startsWith("fc")
-    || normalized.startsWith("fd")
-    || normalized.startsWith("fe80:")
-    || normalized.startsWith("::ffff:");
+  const compatIpv4 = /^::(\d+\.\d+\.\d+\.\d+)$/.exec(normalized); // deprecated ::a.b.c.d
+  if (compatIpv4) return isBlockedIpv4(compatIpv4[1]);
+  if (normalized === "::" || normalized === "::1") return true;
+  if (normalized.startsWith("::ffff:")) return true; // other IPv4-mapped forms
+  if (normalized.startsWith("64:ff9b:")) return true; // NAT64 64:ff9b::/96
+  const head = firstIpv6Hextet(normalized);
+  if (head !== undefined) {
+    if (head >= 0xfc00 && head <= 0xfdff) return true; // fc00::/7 unique-local
+    if (head >= 0xfe80 && head <= 0xfebf) return true; // fe80::/10 link-local (was only fe80:)
+  }
+  return false;
 }
 
 export function isBlockedIpAddress(address: string): boolean {
