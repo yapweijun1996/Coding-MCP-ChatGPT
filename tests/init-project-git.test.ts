@@ -54,6 +54,42 @@ test("init_project_git creates a real bound git repo so git tools work", async (
   }
 });
 
+test("init_project_git creates a nested repo and does NOT commit to an ancestor repo", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const run = promisify(execFile);
+  const root = await mkdtemp(path.join(tmpdir(), "initgit-"));
+  try {
+    const ctx = toolContext(root);
+    // Make the tenant workspace root itself a git repo (simulates the host-mounted /data/workspace).
+    await mkdir(ctx.workspaceRoot, { recursive: true });
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+    await run("git", ["init", "-b", "main"], { cwd: ctx.workspaceRoot, env });
+    await run("git", ["config", "user.email", "host@test"], { cwd: ctx.workspaceRoot, env });
+    await run("git", ["config", "user.name", "Host"], { cwd: ctx.workspaceRoot, env });
+    await writeFile(path.join(ctx.workspaceRoot, "host.txt"), "host\n");
+    await run("git", ["add", "-A"], { cwd: ctx.workspaceRoot, env });
+    await run("git", ["commit", "-m", "host initial"], { cwd: ctx.workspaceRoot, env });
+    const before = (await run("git", ["rev-list", "--count", "HEAD"], { cwd: ctx.workspaceRoot, env })).stdout.trim();
+
+    const project = await createProject(ctx.projectRoot, { title: "Nested", createdByClientId: "coder" });
+    await writeProjectFile(ctx.projectRoot, project.id, "index.html", "<html></html>\n");
+    const result = await getToolModule("init_project_git")!.handler({ projectId: project.id }, ctx);
+    assert.equal(result.ok, true);
+    const sc = result.structuredContent as { workspace: string; gitRoot: string };
+
+    // A fresh nested repo was created AT the workspace subdir, not the ancestor.
+    assert.notEqual(sc.gitRoot, ctx.workspaceRoot);
+    await stat(path.join(sc.workspace, ".git"));
+    // The ancestor (host) repo must be untouched — same commit count, no new staged commit.
+    const after = (await run("git", ["rev-list", "--count", "HEAD"], { cwd: ctx.workspaceRoot, env })).stdout.trim();
+    assert.equal(after, before, "the ancestor/host repo must not receive a commit");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("init_project_git is idempotent (re-run rebinds without error)", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "initgit-"));
   try {

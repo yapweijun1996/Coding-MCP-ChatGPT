@@ -30,6 +30,13 @@ const getJobStatusSchema = z.object({
 // tools/index -> this module).
 async function runJob(jobId: string, name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<void> {
   try {
+    // Re-check enablement at run time, not just at submit time: a tool may have been disabled
+    // between submit and this deferred execution.
+    const { isToolEffectivelyEnabled } = await import("../../tool-state.js");
+    if (!isToolEffectivelyEnabled(name)) {
+      updateJob(jobId, { status: "error", summary: `${name} was disabled before it ran.`, errors: [`Tool ${name} is disabled.`] });
+      return;
+    }
     const { callTool } = await import("../router.js");
     const result = await callTool(name, args, ctx);
     updateJob(jobId, {
@@ -119,7 +126,7 @@ export const asyncJobTools: ToolModule[] = [
       const parsed = input as z.infer<typeof getJobStatusSchema>;
       const job = getJob(parsed.jobId);
       if (!job) {
-        return { ok: false, summary: `No background job found for ${parsed.jobId}.`, artifacts: [], logs: [], errors: [`Unknown jobId: ${parsed.jobId}. Jobs are kept in memory and are lost on server restart.`] };
+        return { ok: false, summary: `No background job found for ${parsed.jobId}.`, artifacts: [], logs: [], errors: [`Unknown jobId: ${parsed.jobId}. It may have been pruned after the retention window, or the id is wrong. (Jobs persist across restarts; an interrupted job is marked "error", not lost.)`] };
       }
       const done = job.status === "success" || job.status === "error";
       return {

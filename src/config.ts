@@ -43,7 +43,7 @@ function resolveConfig(): ServerConfig {
     feedbackRoot: process.env.FEEDBACK_ROOT ?? `${workspaceRoot}/.feedback`,
     telemetryRoot: process.env.TELEMETRY_ROOT ?? `${workspaceRoot}/.telemetry`,
     jobsRoot: process.env.JOBS_ROOT ?? `${workspaceRoot}/.jobs`,
-    jobRetentionDays: Number.parseInt(process.env.JOB_RETENTION_DAYS ?? "7", 10) || 7,
+    jobRetentionDays: ((value) => (Number.isFinite(value) ? value : 7))(Number.parseInt(process.env.JOB_RETENTION_DAYS ?? "7", 10)),
     projectRoot: process.env.PROJECT_ROOT ?? `${workspaceRoot}/.projects`,
     usersRoot: process.env.USERS_ROOT ?? `${workspaceRoot}/.users`,
     userStatePath: process.env.USER_STATE_PATH ?? `${workspaceRoot}/.state/users-state.json`,

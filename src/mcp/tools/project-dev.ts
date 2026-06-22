@@ -507,8 +507,14 @@ export const projectDevTools: ToolModule[] = [
 
       const gitEnv = gitChildEnv();
       const gitOpts = { cwd: workspace, env: gitEnv, timeout: 30000, maxBuffer: 1024 * 1024 };
+      // findGitRoot walks ancestors, so a workspace that sits INSIDE another repo (e.g. the
+      // dev-token global workspace is a host-mounted repo) would otherwise be treated as
+      // "already a repo" and our git add/commit would mutate that ancestor. Only skip init when
+      // the existing repo root IS this workspace; otherwise git init a fresh nested repo here.
       const existingGitRoot = await findGitRoot(workspace);
-      const initialized = !existingGitRoot;
+      const existingIsSelf = existingGitRoot !== undefined
+        && (await realpath(existingGitRoot).catch(() => existingGitRoot)) === workspace;
+      const initialized = !existingIsSelf;
       if (initialized) {
         await execFileAsync("git", ["init", "-b", "main"], gitOpts);
         await execFileAsync("git", ["config", "user.email", "agent@coding-mcp.local"], gitOpts);
