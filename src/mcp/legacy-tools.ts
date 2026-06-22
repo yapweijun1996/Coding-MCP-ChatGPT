@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, copyFile, lstat, mkdir, open, readFile, readlink, readdir, rename as renameFile, stat, unlink, writeFile } from "node:fs/promises";
-import { createReadStream } from "node:fs";
+import { createReadStream, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -1963,6 +1963,35 @@ function resolveSafeWorkspacePath(workspaceRoot: string, relativePath: string, i
     throw new Error("Resolved path is outside the workspace.");
   }
 
+  // Symlink-escape guard: the lexical check above passes for a path with no "..", but an
+  // in-workspace symlink component can still redirect the file op outside the root. Resolve
+  // symlinks on the deepest path component that exists and assert it is still inside the
+  // realpath'd root. Returns the original lexical path unchanged when safe (callers unaffected).
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(normalizedRoot);
+  } catch {
+    return resolved;
+  }
+  let existing = resolved;
+  while (existing !== normalizedRoot) {
+    try {
+      statSync(existing);
+      break;
+    } catch {
+      existing = path.dirname(existing);
+    }
+  }
+  let realExisting: string;
+  try {
+    realExisting = realpathSync(existing);
+  } catch {
+    realExisting = existing;
+  }
+  if (realExisting !== realRoot && !realExisting.startsWith(`${realRoot}${path.sep}`)) {
+    throw new Error("Resolved path escapes the workspace via a symlink.");
+  }
+
   return resolved;
 }
 
@@ -3065,10 +3094,15 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
         if (!input.output) {
           throw new Error("output is required for action=create.");
         }
+        // Without this, --output=../../x escapes the workspace (arbitrary file write).
+        const safeOutput = resolveSafeWorkspacePath(ctx.workspaceRoot, input.output);
+        if (input.prefix && input.prefix.startsWith("-")) throw new Error("prefix must not start with '-'.");
+        const treeish = input.treeish ?? "HEAD";
+        if (treeish.startsWith("-")) throw new Error("treeish must not start with '-'.");
         args.push(`--format=${input.format}`);
-        args.push(`--output=${input.output}`);
+        args.push(`--output=${safeOutput}`);
         if (input.prefix) args.push(`--prefix=${input.prefix}`);
-        args.push(input.treeish ?? "HEAD");
+        args.push(treeish);
         if (input.path) {
           args.push("--", input.path);
         }

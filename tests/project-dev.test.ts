@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -86,6 +86,34 @@ test("list_project_files and search_in_project inspect the bound workspace", asy
     const searchResult = await callTool("search_in_project", { projectId: project.id, query: "Bound workspace" }, ctx);
     assert.equal(searchResult.ok, true);
     assert.match(searchResult.logs.join("\n"), /index\.html/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("write_project_workspace_asset rejects a write through an intermediate symlink (sandbox escape)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "coding-mcp-project-dev-"));
+  try {
+    const ctx = toolContext(root);
+    const repo = await createRepoInsideWorkspace(ctx, "repo");
+    const project = await createProject(ctx.projectRoot, { title: "Symlink guard", createdByClientId: "test-client" });
+    await callTool("bind_project_workspace", { projectId: project.id, workspacePath: repo }, ctx);
+
+    // Plant a symlink inside the workspace that points OUTSIDE it, then try to write through it.
+    const outside = path.join(root, "outside");
+    await mkdir(outside, { recursive: true });
+    await symlink(outside, path.join(repo, "evil"));
+    const glb = Buffer.concat([Buffer.from("glTF"), Buffer.alloc(16)]);
+
+    const result = await callTool("write_project_workspace_asset", {
+      projectId: project.id,
+      relativePath: "evil/model.glb",
+      contentBase64: glb.toString("base64")
+    }, ctx);
+    assert.equal(result.ok, false, "the symlink-escaping write must be rejected");
+    assert.match(`${result.summary} ${(result.errors ?? []).join(" ")}`, /outside the bound project workspace/);
+    // And nothing escaped to the outside directory.
+    await assert.rejects(() => stat(path.join(outside, "model.glb")));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

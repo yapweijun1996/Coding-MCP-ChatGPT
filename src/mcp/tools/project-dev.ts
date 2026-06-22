@@ -210,7 +210,24 @@ async function safeResolveInside(root: string, relativePath = ""): Promise<strin
   const safe = assertSafeRelativePath(relativePath);
   const resolvedRoot = await realpath(root);
   const candidate = path.resolve(resolvedRoot, safe);
-  const resolved = await realpath(candidate).catch(() => candidate);
+  if (candidate === resolvedRoot) return resolvedRoot;
+  // For a write to a not-yet-existing leaf, realpath(candidate) fails and a purely lexical
+  // check would miss an intermediate-dir SYMLINK that redirects the write outside the
+  // workspace. Resolve symlinks on the deepest path component that exists, assert it is inside
+  // root, then re-append the not-yet-existing suffix (already ".."-free via assertSafeRelativePath).
+  let existing = candidate;
+  const missing: string[] = [];
+  while (existing !== resolvedRoot) {
+    try {
+      await stat(existing);
+      break;
+    } catch {
+      missing.unshift(path.basename(existing));
+      existing = path.dirname(existing);
+    }
+  }
+  const resolvedExisting = await realpath(existing);
+  const resolved = missing.length ? path.join(resolvedExisting, ...missing) : resolvedExisting;
   if (resolved !== resolvedRoot && !resolved.startsWith(`${resolvedRoot}${path.sep}`)) {
     throw new Error("Resolved path is outside the bound project workspace.");
   }

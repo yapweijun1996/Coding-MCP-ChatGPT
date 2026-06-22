@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import pg from "pg";
+import { atomicWrite } from "../shared/atomic-write.js";
+import { withKeyedLock } from "../shared/keyed-lock.js";
 
 export type BlogPostStatus = "draft" | "published";
 export type BlogPostFormat = "markdown" | "html";
@@ -74,22 +76,31 @@ export function slugify(input: string): string {
 async function loadFileState(): Promise<void> {
   if (loaded) return;
   memory = { version: 1, posts: [], theme: { ...defaultTheme } };
+  let raw: string | undefined;
   try {
-    const parsed = JSON.parse(await readFile(statePath, "utf8")) as Partial<BlogStateFile>;
-    if (parsed && typeof parsed === "object") {
-      memory.posts = Array.isArray(parsed.posts) ? parsed.posts as BlogPost[] : [];
-      memory.theme = { ...defaultTheme, ...(parsed.theme ?? {}) };
-    }
+    raw = await readFile(statePath, "utf8");
   } catch (error) {
     const code = typeof error === "object" && error !== null && "code" in error ? (error as { code?: unknown }).code : undefined;
-    if (code !== "ENOENT") throw error;
+    if (code !== "ENOENT") throw error; // surface real I/O errors; a missing file is fine
+  }
+  if (raw !== undefined) {
+    try {
+      const parsed = JSON.parse(raw) as Partial<BlogStateFile>;
+      if (parsed && typeof parsed === "object") {
+        memory.posts = Array.isArray(parsed.posts) ? parsed.posts as BlogPost[] : [];
+        memory.theme = { ...defaultTheme, ...(parsed.theme ?? {}) };
+      }
+    } catch (error) {
+      // A torn/corrupt state file must not brick every blog read — fall back to defaults.
+      console.error(`Blog state at ${statePath} is corrupt; using defaults:`, error instanceof Error ? error.message : error);
+    }
   }
   loaded = true;
 }
 
 async function persistFileState(): Promise<void> {
   await mkdir(path.dirname(statePath), { recursive: true });
-  await writeFile(statePath, `${JSON.stringify(memory, null, 2)}\n`, "utf8");
+  await atomicWrite(statePath, `${JSON.stringify(memory, null, 2)}\n`);
 }
 
 function mapRow(row: Record<string, unknown>): BlogPost {
@@ -199,12 +210,14 @@ export async function upsertBlogPost(input: BlogUpsertInput): Promise<BlogPost> 
     return post;
   }
 
-  await loadFileState();
-  const index = memory.posts.findIndex((candidate) => candidate.slug === slug);
-  if (index >= 0) memory.posts[index] = post;
-  else memory.posts.push(post);
-  await persistFileState();
-  return post;
+  return withKeyedLock(statePath, async () => {
+    await loadFileState();
+    const index = memory.posts.findIndex((candidate) => candidate.slug === slug);
+    if (index >= 0) memory.posts[index] = post;
+    else memory.posts.push(post);
+    await persistFileState();
+    return post;
+  });
 }
 
 export async function deleteBlogPost(slug: string): Promise<boolean> {
@@ -212,12 +225,14 @@ export async function deleteBlogPost(slug: string): Promise<boolean> {
     const result = await pool.query("delete from blog_posts where slug = $1", [slug]);
     return (result.rowCount ?? 0) > 0;
   }
-  await loadFileState();
-  const before = memory.posts.length;
-  memory.posts = memory.posts.filter((post) => post.slug !== slug);
-  const changed = memory.posts.length !== before;
-  if (changed) await persistFileState();
-  return changed;
+  return withKeyedLock(statePath, async () => {
+    await loadFileState();
+    const before = memory.posts.length;
+    memory.posts = memory.posts.filter((post) => post.slug !== slug);
+    const changed = memory.posts.length !== before;
+    if (changed) await persistFileState();
+    return changed;
+  });
 }
 
 export async function getBlogTheme(): Promise<BlogTheme> {
@@ -226,13 +241,15 @@ export async function getBlogTheme(): Promise<BlogTheme> {
 }
 
 export async function setBlogTheme(input: Partial<BlogTheme>): Promise<BlogTheme> {
-  await loadFileState();
-  memory.theme = {
-    title: input.title ?? memory.theme.title,
-    css: input.css ?? memory.theme.css,
-    headerHtml: input.headerHtml ?? memory.theme.headerHtml,
-    footerHtml: input.footerHtml ?? memory.theme.footerHtml
-  };
-  await persistFileState();
-  return { ...memory.theme };
+  return withKeyedLock(statePath, async () => {
+    await loadFileState();
+    memory.theme = {
+      title: input.title ?? memory.theme.title,
+      css: input.css ?? memory.theme.css,
+      headerHtml: input.headerHtml ?? memory.theme.headerHtml,
+      footerHtml: input.footerHtml ?? memory.theme.footerHtml
+    };
+    await persistFileState();
+    return { ...memory.theme };
+  });
 }
