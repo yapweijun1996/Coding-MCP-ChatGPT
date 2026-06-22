@@ -64,11 +64,16 @@ function sanitizeSrcset(raw: string): string {
 
 function sanitizeStyle(raw: string): string {
   // Reject the whole declaration block if it contains a sink:
+  //  - backslash → CSS hex/char escapes (e.g. `\75 rl(` decodes to `url(`) would let
+  //    every check below be evaded; escapeAttr does NOT escape `\`, so the browser's CSS
+  //    tokenizer sees the decoded form. Drop any escaped value rather than try to decode.
+  //    (HTML-entity escapes like `&#117;` are already neutralized: escapeAttr re-encodes `&`.)
   //  - url(...) / @import  → CSS-based data exfiltration to an attacker host
   //  - position:fixed|absolute|sticky → full-page overlay / clickjacking
   //  - expression()/behavior/binding/javascript: → script execution (legacy IE / FF)
   // Blog posts authored over MCP are served with 'unsafe-inline', so inline CSS is
   // a real trust boundary even though on* handlers and dangerous tags are stripped.
+  if (raw.includes("\\")) return "";
   if (/(javascript:|expression\s*\(|url\s*\(|@import|behavior\s*:|-moz-binding|position\s*:\s*(fixed|absolute|sticky))/i.test(raw)) return "";
   return raw;
 }

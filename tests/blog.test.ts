@@ -86,6 +86,17 @@ test("HTML sanitizer keeps safe markup and strips dangerous content", () => {
 
   // data-* attributes are preserved (the guard was matching the literal "data-")
   assert.match(sanitizeBlogHtml('<p data-id="42">x</p>'), /data-id="42"/);
+
+  // inline-style sinks are dropped (CSS exfiltration / clickjacking)
+  assert.doesNotMatch(sanitizeBlogHtml('<p style="background:url(//evil/?c)">x</p>'), /evil/i);
+  assert.doesNotMatch(sanitizeBlogHtml('<p style="position:fixed;top:0">x</p>'), /position\s*:\s*fixed/i);
+  // CSS hex-escape bypass: `\75 rl(` decodes to `url(` in the browser, so the whole
+  // escaped value must be dropped rather than slip past the literal substring check.
+  const escaped = sanitizeBlogHtml('<p style="background:\\75 rl(//evil/?c)">x</p>');
+  assert.doesNotMatch(escaped, /evil/i);
+  assert.doesNotMatch(escaped, /\\75/);
+  // a benign style with no sink is still kept
+  assert.match(sanitizeBlogHtml('<p style="color:blue;margin:4px">x</p>'), /style="color:blue;margin:4px"/);
 });
 
 test("slugify produces url-safe slugs", () => {

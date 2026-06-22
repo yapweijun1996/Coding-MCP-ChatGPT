@@ -218,8 +218,9 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
         return;
       }
       // Sandbox served artifacts: scripts still run for HTML previews, but the
-      // document loads in an opaque origin (no allow-same-origin) so it cannot
-      // read the admin session cookie / storage on this shared origin.
+      // document loads in an opaque origin (no allow-same-origin) so it cannot reach
+      // admin-origin storage or make credentialed same-origin requests on this shared
+      // origin. (The session cookie is already HttpOnly, so this guards the rest.)
       res.setHeader("Content-Security-Policy", "sandbox allow-scripts allow-popups allow-forms allow-modals;");
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.type(artifact.record.contentType).send(artifact.content);
