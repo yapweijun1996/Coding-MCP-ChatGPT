@@ -30,10 +30,17 @@ const gitCommitSchema = z.object({
   path: z.string().min(1).max(500).optional()
 });
 
+// A leading dash lets a value masquerade as a git option (e.g.
+// `--receive-pack=<cmd>`/`--upload-pack=<cmd>`), which is argument injection
+// reaching command execution. These are positional args with no `--` guard,
+// so reject any leading-dash value at the schema boundary.
+const noLeadingDash = (label: string, max: number) =>
+  z.string().min(1).max(max).refine((v) => !v.startsWith("-"), { message: `${label} must not start with '-'.` });
+
 const gitPushSchema = z.object({
   projectId: z.string().min(8).max(80).optional(),
-  remote: z.string().min(1).max(120).optional(),
-  source: z.string().min(1).max(240).optional(),
+  remote: noLeadingDash("remote", 120).optional(),
+  source: noLeadingDash("source", 240).optional(),
   setUpstream: z.boolean().optional().default(false),
   forceWithLease: z.boolean().optional().default(false),
   all: z.boolean().optional().default(false)
