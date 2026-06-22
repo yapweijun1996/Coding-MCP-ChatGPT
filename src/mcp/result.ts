@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ZodError } from "zod";
 import { saveJob } from "../jobs/store.js";
 import type { ToolContext, ToolResult } from "./types.js";
 
@@ -35,8 +36,26 @@ export function createJobResult(ctx: ToolContext, title: string, summary: string
   };
 }
 
+// A raw ZodError stringifies to a JSON dump of every issue, which the agent reported as an
+// opaque "blocked / double check the input" failure with no actionable reason. Flatten it into
+// "field: reason" lines naming the exact constraint (e.g. the 1 MiB content cap) so the caller
+// can recover — split the file, shorten the path, or rename the argument.
+export function formatZodError(error: ZodError): string {
+  const lines = error.issues.map((issue) => {
+    const field = issue.path.length > 0 ? issue.path.join(".") : "(root)";
+    return `${field}: ${issue.message}`;
+  });
+  // Deduplicate while preserving order; multiple issues can map to the same field/message.
+  const unique = [...new Set(lines)];
+  return `Invalid arguments — ${unique.join("; ")}`;
+}
+
 export function errorResult(error: unknown): ToolResult {
-  const message = error instanceof Error ? error.message : "Tool execution failed.";
+  const message = error instanceof ZodError
+    ? formatZodError(error)
+    : error instanceof Error
+      ? error.message
+      : "Tool execution failed.";
   return {
     ok: false,
     summary: message,

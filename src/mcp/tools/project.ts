@@ -218,7 +218,8 @@ export const projectTools: ToolModule[] = [
   {
     definition: {
       name: "create_project",
-      description: "Create a persistent coding project and return its projectId.",
+      description:
+        "Create a persistent coding project and return its projectId. Pass that projectId (NOT the jobId field) plus a relativePath to write_project_file to add files.",
       inputSchema: {
         type: "object",
         properties: {
@@ -240,7 +241,21 @@ export const projectTools: ToolModule[] = [
         entryFile: parsed.entryFile,
         createdByClientId: ctx.clientId
       });
-      return { ok: true, summary: `Created project ${project.id}.`, jobId: project.id, artifacts: [project.id], logs: [JSON.stringify(project, null, 2)], errors: [] };
+      // Name projectId explicitly and show the exact next call. The shared jobId/artifacts fields
+      // led an agent to retry write_project_file with jobId/path instead of projectId/relativePath.
+      const nextStep = {
+        tool: "write_project_file",
+        arguments: { projectId: project.id, relativePath: project.entryFile, content: "<!doctype html>…" }
+      };
+      return {
+        ok: true,
+        summary: `Created project ${project.id}. Use projectId "${project.id}" with write_project_file (arguments: projectId + relativePath).`,
+        jobId: project.id,
+        artifacts: [project.id],
+        structuredContent: { projectId: project.id, entryFile: project.entryFile, nextStep },
+        logs: [JSON.stringify({ project, nextStep }, null, 2)],
+        errors: []
+      };
     }
   },
   {
