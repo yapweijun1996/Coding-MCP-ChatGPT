@@ -2,8 +2,19 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { createShareArtifact } from "../../share/store.js";
 import { makeShareUrl } from "../result.js";
+import { assertSafePublicUrl } from "../../security/url.js";
+import { installSsrfRouteGuard } from "../../security/playwright-guard.js";
 import type { Browser, Page } from "playwright";
 import type { ToolModule, ToolResult } from "../types.js";
+
+const BROWSER_PROTOCOLS = ["http:", "https:"];
+
+// Browser sessions never legitimately target the private network, so unlike
+// inspect_local_project there is no allowPrivateNetwork escape hatch: reject
+// non-public URLs (file:, internal IPs, cloud metadata) before navigating.
+async function guardBrowserUrl(url: string): Promise<void> {
+  await assertSafePublicUrl(url, { protocols: BROWSER_PROTOCOLS });
+}
 
 export interface BrowserSession {
   id: string;
@@ -222,6 +233,9 @@ export const browserTools: ToolModule[] = [
         viewport: { width: parsed.width, height: parsed.height }
       });
       const page = await context.newPage();
+      // Block SSRF/redirect/subresource access to internal hosts for the whole
+      // session lifetime (covers later browser_navigate calls too).
+      await installSsrfRouteGuard(page, false);
 
       const session: BrowserSession = {
         id,
@@ -256,6 +270,7 @@ export const browserTools: ToolModule[] = [
 
       if (parsed.startUrl) {
         try {
+          await guardBrowserUrl(parsed.startUrl);
           await page.goto(parsed.startUrl, { waitUntil: "load", timeout: parsed.timeoutMs });
           logs.push(`Navigated to ${parsed.startUrl}`);
           const screenshotResult = await screenshotAndRespond(session, `Open session at ${parsed.startUrl}`, ctx, `Started browser session ${id}.`, [
@@ -308,6 +323,7 @@ export const browserTools: ToolModule[] = [
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserNavigateSchema>;
       const session = getSessionOrThrow(parsed.sessionId);
+      await guardBrowserUrl(parsed.url);
       await session.page.goto(parsed.url, { waitUntil: parsed.waitUntil, timeout: parsed.timeoutMs });
       return screenshotAndRespond(session, `Navigate to ${parsed.url}`, ctx, `Navigated to ${parsed.url}.`, [`url=${parsed.url}`]);
     }
