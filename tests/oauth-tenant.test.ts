@@ -15,6 +15,7 @@ const config: OAuthConfig = {
   ownerPasscode: "",
   accessTokenTtlSeconds: 3600,
   authCodeTtlSeconds: 300,
+  refreshTokenTtlSeconds: 2592000,
   statePath: ""
 };
 

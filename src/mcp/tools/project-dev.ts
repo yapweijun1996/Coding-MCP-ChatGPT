@@ -631,7 +631,9 @@ export const projectDevTools: ToolModule[] = [
       if (!parsed.useRegex) args.push("--fixed-strings");
       if (!parsed.caseSensitive) args.push("--ignore-case");
       if (parsed.includeHidden) args.push("--hidden");
-      args.push(parsed.query, start);
+      // `--` terminates flag parsing so a query starting with `-` (e.g. `--pre=<cmd>`)
+      // is treated as a search pattern, not a ripgrep flag → blocks arg injection / RCE.
+      args.push("--", parsed.query, start);
       try {
         const { stdout, stderr } = await execFileAsync("rg", args, { cwd: workspace, timeout: 120000, maxBuffer: 1024 * 1024, env: childEnv() });
         return { ok: true, summary: "Search completed.", jobId: parsed.projectId, artifacts: [], logs: [trimOutput(stdout), trimOutput(stderr)].filter(Boolean), errors: [] };

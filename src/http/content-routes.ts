@@ -143,6 +143,12 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
       return;
     }
 
+    // The 122-bit random jobId is the capability — there is no session here. Job
+    // logs can contain sensitive command/build output, so prevent the URL leaking:
+    // no Referer to outbound links, no search-engine indexing, no shared caching.
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("X-Robots-Tag", "noindex, nofollow");
+    res.setHeader("Cache-Control", "private, no-store");
     res.type("html").send(renderPreviewPage(job));
   });
 
@@ -211,6 +217,11 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
         res.status(404).type("text/plain").send("Artifact not found.");
         return;
       }
+      // Sandbox served artifacts: scripts still run for HTML previews, but the
+      // document loads in an opaque origin (no allow-same-origin) so it cannot
+      // read the admin session cookie / storage on this shared origin.
+      res.setHeader("Content-Security-Policy", "sandbox allow-scripts allow-popups allow-forms allow-modals;");
+      res.setHeader("X-Content-Type-Options", "nosniff");
       res.type(artifact.record.contentType).send(artifact.content);
     } catch {
       res.status(404).type("text/plain").send("Artifact not found.");

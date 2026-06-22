@@ -11,6 +11,7 @@ export interface OAuthConfig {
   ownerPasscode: string;
   accessTokenTtlSeconds: number;
   authCodeTtlSeconds: number;
+  refreshTokenTtlSeconds: number;
   statePath: string;
 }
 
@@ -49,6 +50,9 @@ interface RefreshToken {
   clientId: string;
   scope: string;
   userId?: string;
+  // Absolute expiry. Preserved across rotation so an actively-refreshed leaked
+  // token still dies at the original deadline rather than living forever.
+  expiresAt?: number;
 }
 
 export interface OAuthClientStatus {
@@ -126,7 +130,8 @@ const persistedStateSchema = z.object({
     token: z.string(),
     clientId: z.string(),
     scope: z.string(),
-    userId: z.string().optional()
+    userId: z.string().optional(),
+    expiresAt: z.number().optional()
   })).optional(),
   clientStats: z.array(z.object({
     clientId: z.string(),
@@ -213,6 +218,14 @@ function cleanupExpired(): void {
   for (const [token, record] of accessTokens.entries()) {
     if (record.expiresAt <= ts) {
       accessTokens.delete(token);
+      changed = true;
+    }
+  }
+  for (const [token, record] of refreshTokens.entries()) {
+    // Legacy tokens persisted before expiry tracking have no expiresAt; treat them
+    // as expired so a pre-fix leaked token cannot live indefinitely (forces re-auth).
+    if (record.expiresAt === undefined || record.expiresAt <= ts) {
+      refreshTokens.delete(token);
       changed = true;
     }
   }
@@ -403,16 +416,22 @@ export function exchangeToken(rawBody: unknown, config: OAuthConfig): Record<str
     if (!input.refresh_token) throw new Error("refresh_token grant requires refresh_token.");
     const refresh = refreshTokens.get(input.refresh_token);
     if (!refresh) throw new Error("Invalid refresh token.");
+    if (refresh.expiresAt === undefined || refresh.expiresAt <= now()) {
+      refreshTokens.delete(input.refresh_token);
+      saveState();
+      throw new Error("Invalid or expired refresh token.");
+    }
     if (input.client_id && input.client_id !== refresh.clientId) throw new Error("client_id does not match refresh token.");
     // Rotate: a refresh token is single-use, so a captured one cannot be replayed indefinitely.
+    // Carry the original absolute expiry forward so rotation can't extend the lifetime.
     refreshTokens.delete(input.refresh_token);
-    return issueTokens(refresh.clientId, refresh.scope, config, refresh.userId);
+    return issueTokens(refresh.clientId, refresh.scope, config, refresh.userId, refresh.expiresAt);
   }
 
   throw new Error("Unsupported grant_type.");
 }
 
-function issueTokens(clientId: string, scope: string, config: OAuthConfig, userId?: string): Record<string, unknown> {
+function issueTokens(clientId: string, scope: string, config: OAuthConfig, userId?: string, refreshExpiresAt?: number): Record<string, unknown> {
   const accessToken = randomToken("access");
   const refreshToken = randomToken("refresh");
   accessTokens.set(accessToken, {
@@ -426,7 +445,9 @@ function issueTokens(clientId: string, scope: string, config: OAuthConfig, userI
     token: refreshToken,
     clientId,
     scope,
-    userId
+    userId,
+    // First issue gets a fresh absolute deadline; rotation reuses the original.
+    expiresAt: refreshExpiresAt ?? now() + config.refreshTokenTtlSeconds * 1000
   });
   clientStats.set(clientId, {
     ...clientStats.get(clientId),

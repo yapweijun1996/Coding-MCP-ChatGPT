@@ -58,6 +58,7 @@ function resolveConfig(): ServerConfig {
       ownerPasscode: process.env.KB_MCP_OAUTH_PASSCODE ?? "",
       accessTokenTtlSeconds: Number.parseInt(process.env.OAUTH_ACCESS_TOKEN_TTL_SECONDS ?? "3600", 10),
       authCodeTtlSeconds: Number.parseInt(process.env.OAUTH_AUTH_CODE_TTL_SECONDS ?? "300", 10),
+      refreshTokenTtlSeconds: Number.parseInt(process.env.OAUTH_REFRESH_TOKEN_TTL_SECONDS ?? "2592000", 10),
       statePath: process.env.OAUTH_STATE_PATH ?? `${workspaceRoot}/.state/oauth-state.json`
     },
     adminDistPath: process.env.ADMIN_UI_DIST ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../admin-ui/dist")

@@ -63,7 +63,13 @@ function sanitizeSrcset(raw: string): string {
 }
 
 function sanitizeStyle(raw: string): string {
-  if (/(javascript:|expression\s*\(|url\s*\(\s*['"]?\s*javascript:)/i.test(raw)) return "";
+  // Reject the whole declaration block if it contains a sink:
+  //  - url(...) / @import  → CSS-based data exfiltration to an attacker host
+  //  - position:fixed|absolute|sticky → full-page overlay / clickjacking
+  //  - expression()/behavior/binding/javascript: → script execution (legacy IE / FF)
+  // Blog posts authored over MCP are served with 'unsafe-inline', so inline CSS is
+  // a real trust boundary even though on* handlers and dangerous tags are stripped.
+  if (/(javascript:|expression\s*\(|url\s*\(|@import|behavior\s*:|-moz-binding|position\s*:\s*(fixed|absolute|sticky))/i.test(raw)) return "";
   return raw;
 }
 
