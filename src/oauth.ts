@@ -29,6 +29,10 @@ interface AuthorizationCode {
   codeChallenge: string;
   codeChallengeMethod: "S256";
   expiresAt: number;
+  // The user whose session approved this authorization. The token's tenant is resolved from
+  // this, NOT from client.ownerUserId, so two different users authorizing the same clientId
+  // can never be conflated (the confused-deputy bug).
+  userId?: string;
 }
 
 interface AccessToken {
@@ -36,12 +40,14 @@ interface AccessToken {
   clientId: string;
   scope: string;
   expiresAt: number;
+  userId?: string;
 }
 
 interface RefreshToken {
   token: string;
   clientId: string;
   scope: string;
+  userId?: string;
 }
 
 export interface OAuthClientStatus {
@@ -105,18 +111,21 @@ const persistedStateSchema = z.object({
     scope: z.string(),
     codeChallenge: z.string(),
     codeChallengeMethod: z.literal("S256"),
-    expiresAt: z.number()
+    expiresAt: z.number(),
+    userId: z.string().optional()
   })).optional(),
   accessTokens: z.array(z.object({
     token: z.string(),
     clientId: z.string(),
     scope: z.string(),
-    expiresAt: z.number()
+    expiresAt: z.number(),
+    userId: z.string().optional()
   })).optional(),
   refreshTokens: z.array(z.object({
     token: z.string(),
     clientId: z.string(),
-    scope: z.string()
+    scope: z.string(),
+    userId: z.string().optional()
   })).optional(),
   clientStats: z.array(z.object({
     clientId: z.string(),
@@ -352,7 +361,8 @@ export function createAuthorizationRedirectForUser(params: AuthorizeParams, owne
     scope: params.scope,
     codeChallenge: params.codeChallenge,
     codeChallengeMethod: "S256",
-    expiresAt: now() + config.authCodeTtlSeconds * 1000
+    expiresAt: now() + config.authCodeTtlSeconds * 1000,
+    userId: ownerUserId
   });
   saveState();
 
@@ -379,32 +389,37 @@ export function exchangeToken(rawBody: unknown, config: OAuthConfig): Record<str
 
     authCodes.delete(input.code);
     saveState();
-    return issueTokens(code.clientId, code.scope, config);
+    return issueTokens(code.clientId, code.scope, config, code.userId);
   }
 
   if (input.grant_type === "refresh_token") {
     if (!input.refresh_token) throw new Error("refresh_token grant requires refresh_token.");
     const refresh = refreshTokens.get(input.refresh_token);
     if (!refresh) throw new Error("Invalid refresh token.");
-    return issueTokens(refresh.clientId, refresh.scope, config);
+    if (input.client_id && input.client_id !== refresh.clientId) throw new Error("client_id does not match refresh token.");
+    // Rotate: a refresh token is single-use, so a captured one cannot be replayed indefinitely.
+    refreshTokens.delete(input.refresh_token);
+    return issueTokens(refresh.clientId, refresh.scope, config, refresh.userId);
   }
 
   throw new Error("Unsupported grant_type.");
 }
 
-function issueTokens(clientId: string, scope: string, config: OAuthConfig): Record<string, unknown> {
+function issueTokens(clientId: string, scope: string, config: OAuthConfig, userId?: string): Record<string, unknown> {
   const accessToken = randomToken("access");
   const refreshToken = randomToken("refresh");
   accessTokens.set(accessToken, {
     token: accessToken,
     clientId,
     scope,
-    expiresAt: now() + config.accessTokenTtlSeconds * 1000
+    expiresAt: now() + config.accessTokenTtlSeconds * 1000,
+    userId
   });
   refreshTokens.set(refreshToken, {
     token: refreshToken,
     clientId,
-    scope
+    scope,
+    userId
   });
   clientStats.set(clientId, {
     ...clientStats.get(clientId),
@@ -466,8 +481,14 @@ export function getUserIdForClient(clientId: string | undefined): string | undef
 }
 
 export function getUserIdForAccessToken(token: string | undefined): string | undefined {
-  const clientId = getClientIdForAccessToken(token);
-  return getUserIdForClient(clientId);
+  cleanupExpired();
+  if (token) {
+    const record = accessTokens.get(token);
+    // Tenant is resolved from the token's own approver. Fall back to the client owner only for
+    // legacy tokens issued before per-token userId binding (they expire within the access TTL).
+    if (record && record.expiresAt > now() && record.userId) return record.userId;
+  }
+  return getUserIdForClient(getClientIdForAccessToken(token));
 }
 
 export function getOAuthClientStatus(clientId: string): OAuthClientStatus | undefined {
