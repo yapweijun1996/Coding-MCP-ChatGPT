@@ -289,6 +289,17 @@ export function renderConsentPage(params: AuthorizeParams, error?: string, user?
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
 
+  // Show WHERE the authorization code will be delivered. Without this the user
+  // cannot tell a legitimate client from a phishing client whose redirect_uri
+  // points at an attacker host, so approving would hand the attacker a token
+  // bound to this user's tenant.
+  let redirectHost = "an unknown destination";
+  try {
+    redirectHost = new URL(params.redirectUri).host || redirectHost;
+  } catch {
+    // Leave the fallback; an unparseable redirect_uri is itself worth flagging.
+  }
+
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -306,6 +317,7 @@ export function renderConsentPage(params: AuthorizeParams, error?: string, user?
     a { color: #16615a; font-weight: 700; }
     .error { color: #a11f1f; }
     .account { margin: 16px 0; padding: 12px; border: 1px solid #d8ddd2; border-radius: 6px; background: #f7faf8; }
+    .redirect { margin: 16px 0; padding: 12px; border: 1px solid #e0c98a; border-radius: 6px; background: #fcf7e8; }
     code { background: #eef1eb; padding: 2px 5px; border-radius: 4px; }
   </style>
 </head>
@@ -314,6 +326,7 @@ export function renderConsentPage(params: AuthorizeParams, error?: string, user?
     <h1>Authorize Coding MCP</h1>
     <p>Client <code>${safe(params.clientId)}</code> is requesting access to <code>${safe(params.scope || "mcp")}</code>.</p>
     ${user ? `<div class="account"><strong>Signed in as ${safe(user.email)}</strong><p>This connector will be bound to this ${safe(user.role)} account.</p>${switchAccountUrl ? `<a href="${safe(switchAccountUrl)}">Switch account</a>` : ""}</div>` : ""}
+    <div class="redirect"><strong>After you authorize, you will be sent to <code>${safe(redirectHost)}</code>.</strong><p>Only approve if you recognize and trust this destination.</p></div>
     ${error ? `<p class="error">${safe(error)}</p>` : ""}
     <form method="post" action="/oauth/approve">
       <input type="hidden" name="csrf_token" value="${safe(csrfToken)}">
