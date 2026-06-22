@@ -1,7 +1,8 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { atomicWriteSync } from "./shared/atomic-write.js";
+import { constantTimeEqual } from "./shared/crypto.js";
 import type { Request } from "express";
 import { z } from "zod";
 
@@ -174,13 +175,6 @@ function saveState(): void {
 
 function randomToken(prefix: string): string {
   return `${prefix}_${randomBytes(32).toString("base64url")}`;
-}
-
-function constantTimeEqual(left: string, right: string): boolean {
-  const leftBuffer = Buffer.from(left);
-  const rightBuffer = Buffer.from(right);
-  if (leftBuffer.length !== rightBuffer.length) return false;
-  return timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 function pkceS256(verifier: string): string {
