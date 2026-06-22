@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { ZipArchive } from "archiver";
 import express from "express";
+import { constantTimeEqual } from "./shared/crypto.js";
 import type { ActivityEvent } from "./activity.js";
 import { listActivity, recordActivity } from "./activity.js";
 import type { OAuthClientStatus } from "./oauth.js";
@@ -161,7 +162,7 @@ async function requireSession(req: express.Request, res: express.Response): Prom
 }
 
 function requireCsrf(req: express.Request, res: express.Response, session: UserSession): boolean {
-  if (req.header("x-csrf-token") === session.csrfToken) return true;
+  if (constantTimeEqual(req.header("x-csrf-token"), session.csrfToken)) return true;
   fail(res, 403, "Invalid CSRF token.");
   return false;
 }

@@ -76,7 +76,7 @@ function parseAttributes(tag: string, attrString: string): string {
     const name = match[1].toLowerCase();
     const rawValue = match[3] ?? match[4] ?? match[5] ?? "";
     if (name.startsWith("on")) continue; // event handlers
-    const allowed = GLOBAL_ATTRS.has(name) || name.startsWith("aria-") || name === "data-" || (tagAttrs?.has(name) ?? false);
+    const allowed = GLOBAL_ATTRS.has(name) || name.startsWith("aria-") || name.startsWith("data-") || (tagAttrs?.has(name) ?? false);
     if (!allowed) continue;
 
     if (name === "style") {

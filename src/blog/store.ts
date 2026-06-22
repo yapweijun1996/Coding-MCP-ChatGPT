@@ -179,26 +179,35 @@ export async function getBlogPostBySlug(slug: string): Promise<BlogPost | undefi
 export async function upsertBlogPost(input: BlogUpsertInput): Promise<BlogPost> {
   const slug = slugify(input.slug || input.title);
   const status: BlogPostStatus = input.status === "draft" ? "draft" : "published";
-  const existing = await getBlogPostBySlug(slug);
-  const now = nowIso();
-  const post: BlogPost = {
-    id: existing?.id ?? randomUUID(),
-    slug,
-    title: input.title,
-    content: input.content,
-    format: input.format ?? existing?.format ?? "markdown",
-    excerpt: input.excerpt ?? existing?.excerpt ?? "",
-    coverImageUrl: input.coverImageUrl ?? existing?.coverImageUrl ?? null,
-    tags: input.tags ?? existing?.tags ?? [],
-    seoDescription: input.seoDescription ?? existing?.seoDescription ?? null,
-    authorUserId: input.authorUserId ?? existing?.authorUserId ?? null,
-    status,
-    createdAt: existing?.createdAt ?? now,
-    updatedAt: now,
-    publishedAt: status === "published" ? (existing?.publishedAt ?? now) : null
+
+  // Merge against the existing post so unspecified fields and id/createdAt are
+  // preserved. Must be computed from a pre-image read inside the same critical
+  // section as the write (file branch) or the lost-update window reopens.
+  const buildPost = (existing: BlogPost | undefined): BlogPost => {
+    const now = nowIso();
+    return {
+      id: existing?.id ?? randomUUID(),
+      slug,
+      title: input.title,
+      content: input.content,
+      format: input.format ?? existing?.format ?? "markdown",
+      excerpt: input.excerpt ?? existing?.excerpt ?? "",
+      coverImageUrl: input.coverImageUrl ?? existing?.coverImageUrl ?? null,
+      tags: input.tags ?? existing?.tags ?? [],
+      seoDescription: input.seoDescription ?? existing?.seoDescription ?? null,
+      authorUserId: input.authorUserId ?? existing?.authorUserId ?? null,
+      status,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      publishedAt: status === "published" ? (existing?.publishedAt ?? now) : null
+    };
   };
 
   if (pool) {
+    // Postgres upsert is atomic via the slug unique constraint; on conflict the
+    // id/created_at columns are intentionally not overwritten, so reading the
+    // pre-image outside a lock is safe here.
+    const post = buildPost(await getBlogPostBySlug(slug));
     await pool.query(`
       insert into blog_posts (id, slug, title, content, format, excerpt, cover_image_url, tags, seo_description, author_user_id, status, created_at, updated_at, published_at)
       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
@@ -213,6 +222,7 @@ export async function upsertBlogPost(input: BlogUpsertInput): Promise<BlogPost> 
   return withKeyedLock(statePath, async () => {
     await loadFileState();
     const index = memory.posts.findIndex((candidate) => candidate.slug === slug);
+    const post = buildPost(index >= 0 ? memory.posts[index] : undefined);
     if (index >= 0) memory.posts[index] = post;
     else memory.posts.push(post);
     await persistFileState();

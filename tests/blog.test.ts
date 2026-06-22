@@ -83,6 +83,9 @@ test("HTML sanitizer keeps safe markup and strips dangerous content", () => {
 
   // unknown tag unwrapped, inner text kept
   assert.equal(sanitizeBlogHtml("<marquee>hello</marquee>"), "hello");
+
+  // data-* attributes are preserved (the guard was matching the literal "data-")
+  assert.match(sanitizeBlogHtml('<p data-id="42">x</p>'), /data-id="42"/);
 });
 
 test("slugify produces url-safe slugs", () => {

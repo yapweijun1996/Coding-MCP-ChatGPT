@@ -397,8 +397,14 @@ export async function recordResearchEvidence(
     if (!input.kind.trim()) throw new Error("Evidence kind is required.");
     if (!input.summary.trim()) throw new Error("Evidence summary is required.");
     const evidence = await readResearchEvidence(projectRoot, projectId);
+    // Derive from the max existing suffix, not the array length, so removing an
+    // item can never mint a duplicate id (matches nextResearchSourceId).
+    const nextEvidenceIndex = evidence.reduce((max, e) => {
+      const m = /^evidence_(\d+)$/.exec(e.id);
+      return m ? Math.max(max, Number.parseInt(m[1], 10)) : max;
+    }, 0) + 1;
     const item: ResearchEvidence = {
-      id: `evidence_${String(evidence.length + 1).padStart(3, "0")}`,
+      id: `evidence_${String(nextEvidenceIndex).padStart(3, "0")}`,
       sourceId: input.sourceId,
       kind: input.kind.trim(),
       url: input.url,

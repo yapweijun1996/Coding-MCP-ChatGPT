@@ -398,7 +398,7 @@ export function exchangeToken(rawBody: unknown, config: OAuthConfig): Record<str
     if (!code || code.expiresAt <= now()) throw new Error("Invalid or expired authorization code.");
     if (code.clientId !== input.client_id) throw new Error("client_id does not match authorization code.");
     if (code.redirectUri !== input.redirect_uri) throw new Error("redirect_uri does not match authorization code.");
-    if (pkceS256(input.code_verifier) !== code.codeChallenge) throw new Error("PKCE verification failed.");
+    if (!constantTimeEqual(pkceS256(input.code_verifier), code.codeChallenge)) throw new Error("PKCE verification failed.");
 
     authCodes.delete(input.code);
     saveState();

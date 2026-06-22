@@ -26,6 +26,7 @@ import {
 } from "../user-store.js";
 import { asyncRoute } from "./util.js";
 import { asJsonRpcRequest, jsonRpcError, jsonRpcResult } from "./json-rpc.js";
+import { constantTimeEqual } from "../shared/crypto.js";
 
 const supportedProtocolVersions = new Set(["2024-11-05", "2025-03-26", "2025-06-18"]);
 
@@ -125,7 +126,7 @@ export function registerMcpRoutes(app: express.Express, config: ServerConfig): v
       // are migrated to the legacy user on startup, so this path is an edge case only.
       return { clientId, projectRoot, workspaceRoot };
     }
-    if (devToken && token === devToken) return { clientId: "dev-token", projectRoot, workspaceRoot };
+    if (devToken && constantTimeEqual(token, devToken)) return { clientId: "dev-token", projectRoot, workspaceRoot };
     return unauthorized(res);
   }
 
