@@ -14,6 +14,7 @@ import { initializeSiteState } from "./site/store.js";
 import { initializeSkillState } from "./skills/state.js";
 import { initializeTelemetry } from "./telemetry/store.js";
 import { initializeJobStore } from "./jobs/store.js";
+import { initializeShareStore } from "./share/store.js";
 import { getUserByEmail, initializeUserStore } from "./user-store.js";
 
 export const app = express();
@@ -25,6 +26,7 @@ initializeSkillState(config.skillStatePath);
 initializeSiteState(config.siteStatePath);
 initializeTelemetry(config.telemetryRoot);
 initializeJobStore(config.jobsRoot, config.jobRetentionDays);
+await initializeShareStore(config.shareRoot);
 await initializeBlogStore({ databaseUrl: process.env.DATABASE_URL, statePath: config.blogStatePath });
 await initializeUserStore({
   databaseUrl: process.env.DATABASE_URL,
