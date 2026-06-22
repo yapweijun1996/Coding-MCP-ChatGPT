@@ -1,5 +1,6 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import { withKeyedLock } from "../shared/keyed-lock.js";
 
 // Persistent telemetry sink for MCP calls. This is the durable, accumulating tier behind
 // the in-memory activity ring (see activity.ts) — same capture chokepoint, two retention
@@ -84,6 +85,13 @@ async function persist(event: TelemetryEvent): Promise<void> {
       safe.args = `${serialized.slice(0, maxArgsChars)}...[truncated ${serialized.length} chars]`;
     }
   }
-  await mkdir(telemetryRoot, { recursive: true });
-  await appendFile(telemetryDayFilePath(event.time), `${JSON.stringify(safe)}\n`, "utf8");
+  const filePath = telemetryDayFilePath(event.time);
+  const line = `${JSON.stringify(safe)}\n`;
+  // A single O_APPEND write is only atomic below the OS pipe-buffer size; a line with a
+  // ~4000-char args field can exceed it and interleave with a concurrent append, producing
+  // a torn line the reader silently drops. Serialize appends to each day file to prevent it.
+  await withKeyedLock(filePath, async () => {
+    await mkdir(telemetryRoot, { recursive: true });
+    await appendFile(filePath, line, "utf8");
+  });
 }

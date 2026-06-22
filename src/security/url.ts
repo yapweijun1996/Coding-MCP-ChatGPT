@@ -42,6 +42,8 @@ export function isBlockedIpv6(address: string): boolean {
   if (head !== undefined) {
     if (head >= 0xfc00 && head <= 0xfdff) return true; // fc00::/7 unique-local
     if (head >= 0xfe80 && head <= 0xfebf) return true; // fe80::/10 link-local (was only fe80:)
+    if (head >= 0xfec0 && head <= 0xfeff) return true; // fec0::/10 site-local (deprecated)
+    if (head >= 0xff00) return true; // ff00::/8 multicast
   }
   return false;
 }

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -66,12 +67,29 @@ async function runGit(ctx: ToolContext, projectId: string | undefined, args: str
 async function resolveGitPath(ctx: ToolContext, projectId: string | undefined, relativePath: string): Promise<string> {
   if (projectId) return resolveProjectGitPath(ctx, projectId, relativePath);
   if (path.isAbsolute(relativePath)) throw new Error("Absolute git paths are not allowed.");
-  const normalizedRoot = path.resolve(ctx.workspaceRoot);
-  const resolved = path.resolve(normalizedRoot, relativePath);
-  if (resolved !== normalizedRoot && !resolved.startsWith(`${normalizedRoot}${path.sep}`)) {
+  if (relativePath.split(/[\\/]/).includes("..")) throw new Error("Path traversal is not allowed.");
+  const resolvedRoot = await realpath(ctx.workspaceRoot);
+  const candidate = path.resolve(resolvedRoot, relativePath);
+  // Resolve symlinks on the deepest existing component before the containment check
+  // so a symlink inside the workspace can't redirect a git pathspec outside it
+  // (lexical startsWith alone would miss this, unlike the project branch).
+  let existing = candidate;
+  const missing: string[] = [];
+  while (existing !== resolvedRoot) {
+    try {
+      await stat(existing);
+      break;
+    } catch {
+      missing.unshift(path.basename(existing));
+      existing = path.dirname(existing);
+    }
+  }
+  const resolvedExisting = await realpath(existing);
+  const resolved = missing.length ? path.join(resolvedExisting, ...missing) : resolvedExisting;
+  if (resolved !== resolvedRoot && !resolved.startsWith(`${resolvedRoot}${path.sep}`)) {
     throw new Error("Path is outside the workspace.");
   }
-  return path.relative(normalizedRoot, resolved).replaceAll("\\", "/");
+  return path.relative(resolvedRoot, resolved).replaceAll("\\", "/");
 }
 
 function gitResult(summary: string, cwd: string, stdout: string, stderr: string) {

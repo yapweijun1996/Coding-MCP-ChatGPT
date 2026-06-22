@@ -20,6 +20,12 @@ test("isBlockedIpv6 blocks fc00::/7 unique-local and NAT64", () => {
   }
 });
 
+test("isBlockedIpv6 blocks fec0::/10 site-local and ff00::/8 multicast", () => {
+  for (const addr of ["fec0::1", "feff::1", "ff02::1", "ff05::1:3", "ffff::1"]) {
+    assert.equal(isBlockedIpv6(addr), true, `${addr} must be blocked`);
+  }
+});
+
 test("isBlockedIpv6 allows ordinary global addresses", () => {
   for (const addr of ["2001:4860:4860::8888", "2606:4700:4700::1111"]) {
     assert.equal(isBlockedIpv6(addr), false, `${addr} (global) must be allowed`);
