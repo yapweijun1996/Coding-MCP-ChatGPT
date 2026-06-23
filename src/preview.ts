@@ -10,7 +10,7 @@ function escapeHtml(value: string): string {
 }
 
 export function renderPreviewPage(job: JobRecord): string {
-  const statusLabel = job.status === "success" ? "Success" : job.status === "error" ? "Error" : job.status === "running" ? "Running" : "Created";
+  const statusLabel = job.status === "success" ? "Success" : job.status === "error" ? "Error" : job.status === "running" ? "Running" : job.status === "cancelled" ? "Cancelled" : job.status === "timeout" ? "Timeout" : "Created";
   const logHtml = job.logs.length > 0 ? job.logs.map((line) => `<li>${escapeHtml(line)}</li>`).join("") : "<li>No logs recorded.</li>";
   const artifactHtml = job.artifacts.length > 0 ? job.artifacts.map((item) => `<li>${escapeHtml(item)}</li>`).join("") : "<li>No artifacts recorded.</li>";
   const errorHtml = job.errors.length > 0 ? `<section><h2>Errors</h2><ul>${job.errors.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul></section>` : "";
@@ -79,7 +79,7 @@ export function renderPreviewPage(job: JobRecord): string {
       gap: 8px;
       font-family: ui-sans-serif, system-ui, sans-serif;
       font-size: 13px;
-      color: ${job.status === "error" ? "var(--error)" : "var(--accent)"};
+      color: ${job.status === "error" || job.status === "cancelled" || job.status === "timeout" ? "var(--error)" : "var(--accent)"};
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
@@ -109,4 +109,3 @@ export function renderPreviewPage(job: JobRecord): string {
 </body>
 </html>`;
 }
-

@@ -28,6 +28,51 @@ const openapiSchema = z.object({
   maxPaths: z.number().int().min(1).max(4000).optional().default(300)
 });
 
+const jsonContractSchema: z.ZodType<Record<string, unknown>> = z.lazy(() => z.object({
+  type: z.enum(["object", "array", "string", "number", "integer", "boolean", "null"]).optional(),
+  required: z.array(z.string().min(1).max(160)).max(100).optional(),
+  properties: z.record(z.string(), jsonContractSchema).optional(),
+  items: jsonContractSchema.optional(),
+  enum: z.array(z.union([z.string(), z.number(), z.boolean(), z.null()])).max(100).optional()
+}).passthrough());
+
+const contractAssertionSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("json_path_exists"), path: z.string().min(1).max(240) }),
+  z.object({ kind: z.literal("json_path_equals"), path: z.string().min(1).max(240), value: z.union([z.string(), z.number(), z.boolean(), z.null()]) }),
+  z.object({ kind: z.literal("json_path_type"), path: z.string().min(1).max(240), type: z.enum(["object", "array", "string", "number", "integer", "boolean", "null"]) }),
+  z.object({ kind: z.literal("header_exists"), name: z.string().min(1).max(160) }),
+  z.object({ kind: z.literal("header_equals"), name: z.string().min(1).max(160), value: z.string().max(500) })
+]);
+
+const apiContractCaseSchema = z.object({
+  id: z.string().min(1).max(120),
+  name: z.string().min(1).max(200).optional(),
+  url: z.string().url({ message: "url must be a valid http(s) URL." }),
+  method: z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]).optional().default("GET"),
+  headers: z.record(z.string(), z.string()).optional().default({}),
+  body: z.string().max(200000).optional(),
+  expectStatus: z.union([z.number().int().min(100).max(599), z.array(z.number().int().min(100).max(599))]).optional(),
+  expectJsonSchema: jsonContractSchema.optional(),
+  assertions: z.array(contractAssertionSchema).max(80).optional().default([]),
+  pagination: z.object({
+    itemsPath: z.string().min(1).max(240),
+    nextPath: z.string().min(1).max(240).optional(),
+    minItems: z.number().int().min(0).max(10000).optional().default(0)
+  }).optional()
+});
+
+const apiContractTestSchema = z.object({
+  cases: z.array(apiContractCaseSchema).min(1).max(30),
+  allowlistedHosts: z.array(z.string().min(1).max(240)).optional().default([]),
+  timeoutMs: z.number().int().min(200).max(120000).optional().default(10000),
+  compareMockToReal: z.object({
+    mockBaseUrl: z.string().url(),
+    realBaseUrl: z.string().url(),
+    ignorePaths: z.array(z.string().min(1).max(240)).max(80).optional().default([])
+  }).optional(),
+  maxBodyBytes: z.number().int().min(120).max(250000).optional().default(120000)
+});
+
 function isAllowlistedHost(parsedUrl: string, allowlistedHosts: string[]): boolean {
   const parsed = new URL(parsedUrl);
   const host = parsed.hostname.toLowerCase();
@@ -54,6 +99,180 @@ function isAllowlistedHost(parsedUrl: string, allowlistedHosts: string[]): boole
 function parseIntToArray(value?: number | number[]) {
   if (!value) return undefined;
   return Array.isArray(value) ? value : [value];
+}
+
+function jsonTypeOf(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (Number.isInteger(value)) return "integer";
+  return typeof value;
+}
+
+function readJsonPath(root: unknown, expression: string): { found: boolean; value?: unknown } {
+  const normalized = expression.trim().replace(/^\$\.?/, "");
+  if (!normalized) return { found: true, value: root };
+  const parts = normalized.split(".").flatMap((part) => {
+    const segments: string[] = [];
+    const re = /([^\[\]]+)|\[(\d+)\]/g;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(part))) segments.push(match[1] ?? match[2]);
+    return segments;
+  }).filter(Boolean);
+  let current = root;
+  for (const part of parts) {
+    if (Array.isArray(current) && /^\d+$/.test(part)) {
+      const index = Number(part);
+      if (index >= current.length) return { found: false };
+      current = current[index];
+      continue;
+    }
+    if (current && typeof current === "object" && part in current) {
+      current = (current as Record<string, unknown>)[part];
+      continue;
+    }
+    return { found: false };
+  }
+  return { found: true, value: current };
+}
+
+function validateJsonContract(value: unknown, schema: Record<string, unknown>, pathExpression = "$"): string[] {
+  const errors: string[] = [];
+  const expectedType = typeof schema.type === "string" ? schema.type : undefined;
+  if (expectedType) {
+    const actual = jsonTypeOf(value);
+    const ok = expectedType === "number" ? actual === "number" || actual === "integer" : actual === expectedType;
+    if (!ok) return [`${pathExpression} expected ${expectedType}, got ${actual}`];
+  }
+  if (schema.enum && Array.isArray(schema.enum) && !schema.enum.some((item) => Object.is(item, value))) {
+    errors.push(`${pathExpression} expected one of ${JSON.stringify(schema.enum)}, got ${JSON.stringify(value)}`);
+  }
+  if (schema.required && Array.isArray(schema.required)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      errors.push(`${pathExpression} expected object with required fields`);
+    } else {
+      for (const key of schema.required) {
+        if (typeof key === "string" && !(key in value)) errors.push(`${pathExpression}.${key} is required`);
+      }
+    }
+  }
+  if (schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties) && value && typeof value === "object" && !Array.isArray(value)) {
+    for (const [key, childSchema] of Object.entries(schema.properties as Record<string, unknown>)) {
+      if (key in value && childSchema && typeof childSchema === "object") {
+        errors.push(...validateJsonContract((value as Record<string, unknown>)[key], childSchema as Record<string, unknown>, `${pathExpression}.${key}`));
+      }
+    }
+  }
+  if (schema.items && typeof schema.items === "object" && Array.isArray(value)) {
+    value.slice(0, 50).forEach((item, index) => {
+      errors.push(...validateJsonContract(item, schema.items as Record<string, unknown>, `${pathExpression}[${index}]`));
+    });
+  }
+  return errors;
+}
+
+async function runContractCase(testCase: z.infer<typeof apiContractCaseSchema>, options: z.infer<typeof apiContractTestSchema>, urlOverride?: string): Promise<Record<string, unknown>> {
+  const url = urlOverride ?? testCase.url;
+  if (!isAllowlistedHost(url, options.allowlistedHosts)) {
+    return { id: testCase.id, ok: false, url, method: testCase.method, errors: ["Host not in allowlist"] };
+  }
+  const expectedStatuses = parseIntToArray(testCase.expectStatus) ?? [200, 201, 204];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  const startAt = Date.now();
+  try {
+    const response = await safeFetch(url, {
+      method: testCase.method,
+      headers: {
+        "Content-Type": "application/json",
+        ...testCase.headers
+      },
+      body: ["POST", "PUT", "PATCH", "DELETE"].includes(testCase.method) ? testCase.body : undefined,
+      signal: controller.signal
+    }, { protocols: ["http:", "https:"], allowPrivateNetwork: true });
+    const elapsedMs = Date.now() - startAt;
+    const rawBody = testCase.method === "HEAD" ? "" : (await response.text()).slice(0, options.maxBodyBytes);
+    let json: unknown;
+    let jsonParseError: string | undefined;
+    if (rawBody.trim()) {
+      try {
+        json = JSON.parse(rawBody);
+      } catch (error) {
+        jsonParseError = error instanceof Error ? error.message : "Invalid JSON response.";
+      }
+    }
+    const errors: string[] = [];
+    if (!expectedStatuses.includes(response.status)) errors.push(`Expected status ${expectedStatuses.join(",")}, got ${response.status}`);
+    if (testCase.expectJsonSchema) {
+      if (jsonParseError) errors.push(`Response is not valid JSON: ${jsonParseError}`);
+      else errors.push(...validateJsonContract(json, testCase.expectJsonSchema));
+    }
+    const headers: Record<string, string> = {};
+    response.headers.forEach((value, key) => { headers[key.toLowerCase()] = value; });
+    for (const assertion of testCase.assertions) {
+      switch (assertion.kind) {
+        case "header_exists":
+          if (!(assertion.name.toLowerCase() in headers)) errors.push(`Missing header ${assertion.name}`);
+          break;
+        case "header_equals":
+          if (headers[assertion.name.toLowerCase()] !== assertion.value) errors.push(`Header ${assertion.name} expected ${assertion.value}, got ${headers[assertion.name.toLowerCase()] ?? "(missing)"}`);
+          break;
+        case "json_path_exists": {
+          if (jsonParseError) {
+            errors.push(`Cannot evaluate ${assertion.path}: response is not JSON`);
+            break;
+          }
+          const target = readJsonPath(json, assertion.path);
+          if (!target.found) errors.push(`Missing JSON path ${assertion.path}`);
+          break;
+        }
+        case "json_path_equals": {
+          if (jsonParseError) {
+            errors.push(`Cannot evaluate ${assertion.path}: response is not JSON`);
+            break;
+          }
+          const target = readJsonPath(json, assertion.path);
+          if (!target.found || !Object.is(target.value, assertion.value)) errors.push(`JSON path ${assertion.path} expected ${JSON.stringify(assertion.value)}, got ${JSON.stringify(target.value)}`);
+          break;
+        }
+        case "json_path_type": {
+          if (jsonParseError) {
+            errors.push(`Cannot evaluate ${assertion.path}: response is not JSON`);
+            break;
+          }
+          const target = readJsonPath(json, assertion.path);
+          if (!target.found || (assertion.type === "number" ? !["number", "integer"].includes(jsonTypeOf(target.value)) : jsonTypeOf(target.value) !== assertion.type)) errors.push(`JSON path ${assertion.path} expected type ${assertion.type}, got ${target.found ? jsonTypeOf(target.value) : "(missing)"}`);
+          break;
+        }
+      }
+    }
+    if (testCase.pagination) {
+      const items = readJsonPath(json, testCase.pagination.itemsPath);
+      if (!items.found || !Array.isArray(items.value)) errors.push(`Pagination itemsPath ${testCase.pagination.itemsPath} is not an array`);
+      else if (items.value.length < testCase.pagination.minItems) errors.push(`Pagination expected at least ${testCase.pagination.minItems} item(s), got ${items.value.length}`);
+      if (testCase.pagination.nextPath) {
+        const next = readJsonPath(json, testCase.pagination.nextPath);
+        if (!next.found) errors.push(`Pagination nextPath ${testCase.pagination.nextPath} is missing`);
+      }
+    }
+    return sanitizeSecretLikeValue({
+      id: testCase.id,
+      name: testCase.name,
+      ok: errors.length === 0,
+      url,
+      method: testCase.method,
+      status: response.status,
+      elapsedMs,
+      expectedStatuses,
+      bodyJsonValid: !jsonParseError,
+      bodyPreview: rawBody.slice(0, 2000),
+      errors
+    }) as Record<string, unknown>;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown network error.";
+    return { id: testCase.id, ok: false, url, method: testCase.method, elapsedMs: Date.now() - startAt, errors: [message] };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function summarizeOpenapi(payload: Record<string, unknown>) {
@@ -250,6 +469,107 @@ export const integrationReadonlyTools: ToolModule[] = [
       } finally {
         clearTimeout(timer);
       }
+    }
+  },
+  {
+    definition: {
+      name: "api_contract_test",
+      description: "Run readonly API contract tests for request/response shape, status handling, JSON schema/path assertions, pagination, and optional mock-vs-real comparison.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          cases: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                name: { type: "string" },
+                url: { type: "string" },
+                method: { type: "string", enum: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"] },
+                headers: { type: "object", additionalProperties: { type: "string" } },
+                body: { type: "string" },
+                expectStatus: {
+                  anyOf: [
+                    { type: "number", minimum: 100, maximum: 599 },
+                    { type: "array", items: { type: "number", minimum: 100, maximum: 599 } }
+                  ]
+                },
+                expectJsonSchema: { type: "object" },
+                assertions: { type: "array", items: { type: "object" } },
+                pagination: { type: "object" }
+              },
+              required: ["id", "url"],
+              additionalProperties: false
+            }
+          },
+          allowlistedHosts: { type: "array", items: { type: "string" } },
+          timeoutMs: { type: "number" },
+          compareMockToReal: {
+            type: "object",
+            properties: {
+              mockBaseUrl: { type: "string" },
+              realBaseUrl: { type: "string" },
+              ignorePaths: { type: "array", items: { type: "string" } }
+            },
+            required: ["mockBaseUrl", "realBaseUrl"],
+            additionalProperties: false
+          },
+          maxBodyBytes: { type: "number" }
+        },
+        required: ["cases"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: apiContractTestSchema,
+    handler: async (input) => {
+      const parsed = apiContractTestSchema.parse(input);
+      const caseResults = [];
+      for (const testCase of parsed.cases) caseResults.push(await runContractCase(testCase, parsed));
+
+      const comparisons: Array<Record<string, unknown>> = [];
+      if (parsed.compareMockToReal) {
+        const mockBase = parsed.compareMockToReal.mockBaseUrl.replace(/\/$/, "");
+        const realBase = parsed.compareMockToReal.realBaseUrl.replace(/\/$/, "");
+        for (const testCase of parsed.cases) {
+          const caseUrl = new URL(testCase.url);
+          const pathWithQuery = `${caseUrl.pathname}${caseUrl.search}`;
+          const mockResult = await runContractCase(testCase, parsed, `${mockBase}${pathWithQuery}`);
+          const realResult = await runContractCase(testCase, parsed, `${realBase}${pathWithQuery}`);
+          const mockComparable = JSON.stringify({ status: mockResult.status, ok: mockResult.ok, errors: mockResult.errors });
+          const realComparable = JSON.stringify({ status: realResult.status, ok: realResult.ok, errors: realResult.errors });
+          comparisons.push({
+            id: testCase.id,
+            ok: mockComparable === realComparable,
+            mock: mockResult,
+            real: realResult,
+            errors: mockComparable === realComparable ? [] : ["Mock and real contract outcomes differ."]
+          });
+        }
+      }
+
+      const failures = [
+        ...caseResults.flatMap((result) => (result.errors as string[] | undefined ?? []).map((error) => `${result.id}: ${error}`)),
+        ...comparisons.flatMap((result) => (result.errors as string[] | undefined ?? []).map((error) => `${result.id}: ${error}`))
+      ];
+      const report = {
+        ok: failures.length === 0,
+        caseCount: parsed.cases.length,
+        passed: caseResults.filter((result) => result.ok).length,
+        failed: caseResults.filter((result) => !result.ok).length,
+        caseResults,
+        comparisons,
+        failures
+      };
+      return {
+        ok: report.ok,
+        summary: report.ok ? `api_contract_test passed ${report.passed}/${report.caseCount} case(s).` : `api_contract_test found ${failures.length} contract failure(s).`,
+        artifacts: [],
+        logs: trimLogLines([`cases=${report.caseCount}`, `passed=${report.passed}`, `failed=${report.failed}`, ...failures.slice(0, 20)]),
+        structuredContent: trimStructuredContent(report),
+        errors: failures
+      };
     }
   },
   {

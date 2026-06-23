@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { ToolContext, ToolModule, ToolResult } from "../types.js";
-import { getJob, saveJob, updateJob } from "../../jobs/store.js";
+import { cancelJob, getJob, listJobs, saveJob, updateJob, type JobRecord } from "../../jobs/store.js";
 
 // Tools that can blow past a proxy's request timeout (Cloudflare cuts proxied HTTP requests
 // at ~100s -> 524). Only these may be run via run_tool_async. Fast tools have no reason to go
@@ -18,28 +18,81 @@ const asyncEligibleSet = new Set<string>(asyncEligibleTools);
 
 const runToolAsyncSchema = z.object({
   name: z.enum(asyncEligibleTools),
-  arguments: z.record(z.unknown()).default({})
+  arguments: z.record(z.unknown()).default({}),
+  timeoutMs: z.number().int().min(1000).max(30 * 60 * 1000).optional(),
+  maxAttempts: z.number().int().min(1).max(5).optional().default(1)
 });
 
 const getJobStatusSchema = z.object({
   jobId: z.string().min(1).max(200)
 });
 
+const listBackgroundJobsSchema = z.object({
+  status: z.enum(["created", "running", "success", "error", "cancelled", "timeout"]).optional(),
+  sourceToolName: z.string().min(1).max(160).optional(),
+  limit: z.number().int().min(1).max(500).optional().default(100)
+});
+
+const cancelBackgroundJobSchema = z.object({
+  jobId: z.string().min(1).max(200),
+  reason: z.string().min(1).max(500).optional().default("Cancelled by request.")
+});
+
+const retryBackgroundJobSchema = z.object({
+  jobId: z.string().min(1).max(200),
+  timeoutMs: z.number().int().min(1000).max(30 * 60 * 1000).optional()
+});
+
+const recoverJobPartialResultSchema = z.object({
+  jobId: z.string().min(1).max(200)
+});
+
+function terminal(status: JobRecord["status"]): boolean {
+  return status === "success" || status === "error" || status === "cancelled" || status === "timeout";
+}
+
+function safeUpdateRunningJob(jobId: string, update: Partial<Omit<JobRecord, "id" | "createdAt">>): void {
+  const current = getJob(jobId);
+  if (!current || terminal(current.status)) return;
+  updateJob(jobId, update);
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number | undefined): Promise<T | { timeout: true }> {
+  if (!timeoutMs) return promise;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve({ timeout: true }), timeoutMs);
+    promise.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    }, (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
 // Runs the wrapped tool to completion in the background and folds its ToolResult into the job
 // record. Dynamic import of the router avoids a module-init cycle (router -> registry ->
 // tools/index -> this module).
-async function runJob(jobId: string, name: string, args: Record<string, unknown>, ctx: ToolContext): Promise<void> {
+async function runJob(jobId: string, name: string, args: Record<string, unknown>, ctx: ToolContext, timeoutMs?: number): Promise<void> {
   try {
+    const current = getJob(jobId);
+    if (!current || terminal(current.status)) return;
+    updateJob(jobId, { status: "running", summary: `Running ${name} in the background...` });
     // Re-check enablement at run time, not just at submit time: a tool may have been disabled
     // between submit and this deferred execution.
     const { isToolEffectivelyEnabled } = await import("../../tool-state.js");
     if (!isToolEffectivelyEnabled(name)) {
-      updateJob(jobId, { status: "error", summary: `${name} was disabled before it ran.`, errors: [`Tool ${name} is disabled.`] });
+      safeUpdateRunningJob(jobId, { status: "error", summary: `${name} was disabled before it ran.`, errors: [`Tool ${name} is disabled.`] });
       return;
     }
     const { callTool } = await import("../router.js");
-    const result = await callTool(name, args, ctx);
-    updateJob(jobId, {
+    const result = await withTimeout(callTool(name, args, ctx), timeoutMs);
+    if (typeof result === "object" && result && "timeout" in result) {
+      safeUpdateRunningJob(jobId, { status: "timeout", summary: `${name} timed out after ${timeoutMs}ms.`, errors: [`Timeout after ${timeoutMs}ms.`] });
+      return;
+    }
+    safeUpdateRunningJob(jobId, {
       status: result.ok ? "success" : "error",
       summary: result.summary,
       logs: result.logs ?? [],
@@ -48,7 +101,7 @@ async function runJob(jobId: string, name: string, args: Record<string, unknown>
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Async tool execution failed.";
-    updateJob(jobId, { status: "error", summary: `${name} failed.`, errors: [message] });
+    safeUpdateRunningJob(jobId, { status: "error", summary: `${name} failed.`, errors: [message] });
   }
 }
 
@@ -62,7 +115,9 @@ export const asyncJobTools: ToolModule[] = [
         type: "object",
         properties: {
           name: { type: "string", enum: [...asyncEligibleTools], description: "The long-running tool to execute." },
-          arguments: { type: "object", description: "The arguments object for that tool." }
+          arguments: { type: "object", description: "The arguments object for that tool." },
+          timeoutMs: { type: "number", description: "Optional background timeout in milliseconds." },
+          maxAttempts: { type: "number", description: "Retry budget metadata for agents. Defaults to 1." }
         },
         required: ["name"],
         additionalProperties: false
@@ -91,10 +146,15 @@ export const asyncJobTools: ToolModule[] = [
         logs: [],
         artifacts: [],
         errors: [],
+        sourceToolName: parsed.name,
+        sourceArgs: parsed.arguments,
+        attempt: 1,
+        maxAttempts: parsed.maxAttempts,
+        timeoutMs: parsed.timeoutMs,
         createdAt: now,
         updatedAt: now
       });
-      void runJob(jobId, parsed.name, parsed.arguments, ctx);
+      void runJob(jobId, parsed.name, parsed.arguments, ctx, parsed.timeoutMs);
       const statusUrl = `${ctx.publicBaseUrl.replace(/\/$/, "")}/outcome/${jobId}`;
       return {
         ok: true,
@@ -102,7 +162,7 @@ export const asyncJobTools: ToolModule[] = [
         jobId,
         previewUrl: statusUrl,
         artifacts: [],
-        structuredContent: { jobId, status: "running", statusUrl, tool: parsed.name },
+        structuredContent: { jobId, status: "running", statusUrl, tool: parsed.name, timeoutMs: parsed.timeoutMs, maxAttempts: parsed.maxAttempts },
         logs: [`Background job ${jobId} started for ${parsed.name}.`],
         errors: []
       };
@@ -128,9 +188,9 @@ export const asyncJobTools: ToolModule[] = [
       if (!job) {
         return { ok: false, summary: `No background job found for ${parsed.jobId}.`, artifacts: [], logs: [], errors: [`Unknown jobId: ${parsed.jobId}. It may have been pruned after the retention window, or the id is wrong. (Jobs persist across restarts; an interrupted job is marked "error", not lost.)`] };
       }
-      const done = job.status === "success" || job.status === "error";
+      const done = terminal(job.status);
       return {
-        ok: job.status !== "error",
+        ok: job.status !== "error" && job.status !== "cancelled" && job.status !== "timeout",
         summary: done ? job.summary : `Job ${job.id} is still ${job.status}.`,
         jobId: job.id,
         artifacts: job.artifacts,
@@ -138,6 +198,104 @@ export const asyncJobTools: ToolModule[] = [
         logs: job.logs,
         errors: job.errors
       };
+    }
+  },
+  {
+    definition: {
+      name: "list_background_jobs",
+      description: "List background jobs, optionally filtered by status or source tool, newest first.",
+      inputSchema: { type: "object", properties: { status: { type: "string" }, sourceToolName: { type: "string" }, limit: { type: "number" } }, required: [], additionalProperties: false }
+    },
+    enabledByDefault: true,
+    schema: listBackgroundJobsSchema,
+    handler: (input: unknown): ToolResult => {
+      const parsed = listBackgroundJobsSchema.parse(input);
+      const jobs = listJobs(parsed);
+      return { ok: true, summary: `Found ${jobs.length} background job(s).`, artifacts: [], structuredContent: { jobs, count: jobs.length }, logs: jobs.map((job) => `${job.id} ${job.status} ${job.title}: ${job.summary}`), errors: [] };
+    }
+  },
+  {
+    definition: {
+      name: "cancel_background_job",
+      description: "Mark a non-terminal background job as cancelled so late results cannot overwrite the cancelled state.",
+      inputSchema: { type: "object", properties: { jobId: { type: "string" }, reason: { type: "string" } }, required: ["jobId"], additionalProperties: false }
+    },
+    enabledByDefault: true,
+    schema: cancelBackgroundJobSchema,
+    handler: (input: unknown): ToolResult => {
+      const parsed = cancelBackgroundJobSchema.parse(input);
+      const job = cancelJob(parsed.jobId, parsed.reason);
+      if (!job) return { ok: false, summary: `No background job found for ${parsed.jobId}.`, artifacts: [], logs: [], errors: [`Unknown jobId: ${parsed.jobId}.`] };
+      const changed = job.status === "cancelled";
+      return { ok: changed, summary: changed ? `Cancelled ${parsed.jobId}.` : `Job ${parsed.jobId} is already terminal (${job.status}).`, jobId: job.id, artifacts: job.artifacts, structuredContent: { job, done: terminal(job.status) }, logs: job.logs, errors: changed ? [] : [`Job is already ${job.status}.`] };
+    }
+  },
+  {
+    definition: {
+      name: "retry_background_job",
+      description: "Retry a background job using its stored source tool and arguments, returning a new jobId linked to the original.",
+      inputSchema: { type: "object", properties: { jobId: { type: "string" }, timeoutMs: { type: "number" } }, required: ["jobId"], additionalProperties: false }
+    },
+    enabledByDefault: true,
+    schema: retryBackgroundJobSchema,
+    handler: async (input: unknown, ctx: ToolContext): Promise<ToolResult> => {
+      const parsed = retryBackgroundJobSchema.parse(input);
+      const previous = getJob(parsed.jobId);
+      if (!previous) return { ok: false, summary: `No background job found for ${parsed.jobId}.`, artifacts: [], logs: [], errors: [`Unknown jobId: ${parsed.jobId}.`] };
+      if (!previous.sourceToolName || !previous.sourceArgs) return { ok: false, summary: `Job ${parsed.jobId} has no retry source metadata.`, artifacts: [], logs: [], errors: ["Missing sourceToolName/sourceArgs."] };
+      if (!asyncEligibleSet.has(previous.sourceToolName as (typeof asyncEligibleTools)[number])) return { ok: false, summary: `${previous.sourceToolName} is not eligible for async retry.`, artifacts: [], logs: [], errors: [`Ineligible tool: ${previous.sourceToolName}.`] };
+      const nextAttempt = (previous.attempt ?? 1) + 1;
+      if (previous.maxAttempts && nextAttempt > previous.maxAttempts) return { ok: false, summary: `Retry budget exhausted for ${parsed.jobId}.`, artifacts: previous.artifacts, logs: previous.logs, errors: [`maxAttempts ${previous.maxAttempts} reached.`] };
+      const now = new Date().toISOString();
+      const jobId = `job_${randomUUID()}`;
+      const timeoutMs = parsed.timeoutMs ?? previous.timeoutMs;
+      saveJob({
+        id: jobId,
+        status: "running",
+        title: previous.sourceToolName,
+        summary: `Retrying ${previous.sourceToolName} from ${parsed.jobId}...`,
+        logs: [],
+        artifacts: [],
+        errors: [],
+        sourceToolName: previous.sourceToolName,
+        sourceArgs: previous.sourceArgs,
+        parentJobId: previous.id,
+        attempt: nextAttempt,
+        maxAttempts: previous.maxAttempts,
+        timeoutMs,
+        createdAt: now,
+        updatedAt: now
+      });
+      void runJob(jobId, previous.sourceToolName, previous.sourceArgs, ctx, timeoutMs);
+      return { ok: true, summary: `Retry started as ${jobId}.`, jobId, artifacts: [], structuredContent: { jobId, parentJobId: previous.id, attempt: nextAttempt, status: "running" }, logs: [`Retry ${jobId} started from ${previous.id}.`], errors: [] };
+    }
+  },
+  {
+    definition: {
+      name: "recover_job_partial_result",
+      description: "Recover partial result data from any background job, including logs, artifacts, errors, retry metadata, and suggested next actions.",
+      inputSchema: { type: "object", properties: { jobId: { type: "string" } }, required: ["jobId"], additionalProperties: false }
+    },
+    enabledByDefault: true,
+    schema: recoverJobPartialResultSchema,
+    handler: (input: unknown): ToolResult => {
+      const parsed = recoverJobPartialResultSchema.parse(input);
+      const job = getJob(parsed.jobId);
+      if (!job) return { ok: false, summary: `No background job found for ${parsed.jobId}.`, artifacts: [], logs: [], errors: [`Unknown jobId: ${parsed.jobId}.`] };
+      const partial = { logs: job.logs, artifacts: job.artifacts, errors: job.errors, summary: job.summary };
+      const canRetry = Boolean(job.sourceToolName && job.sourceArgs && (!job.maxAttempts || (job.attempt ?? 1) < job.maxAttempts));
+      const result = {
+        job,
+        partial,
+        canRetry,
+        nextActions: [
+          ...(job.status === "running" ? ["Poll get_job_status again before retrying."] : []),
+          ...(canRetry ? ["Call retry_background_job if the partial result is insufficient."] : []),
+          ...(job.artifacts.length ? ["Inspect recovered artifacts before repeating expensive work."] : []),
+          ...(job.errors.length ? ["Use errors/logs to narrow the next attempt."] : [])
+        ]
+      };
+      return { ok: true, summary: `Recovered partial result for ${job.id}.`, jobId: job.id, artifacts: job.artifacts, structuredContent: result, logs: job.logs, errors: [] };
     }
   }
 ];

@@ -100,6 +100,48 @@ test("capture_webpage schema applies defaults and rejects unsupported values", (
   assert.throws(() => schema.parse({ url: "https://93.184.216.34/", mode: "deep_crawl" }), /Invalid enum value/);
 });
 
+test("convert_design_to_static_project creates editable component output and validation report", async () => {
+  await withTempRoot(async (_root, ctx) => {
+    const convertTool = tool("convert_design_to_static_project");
+    const parsed = convertTool.schema!.parse({
+      title: "Ops Console Redesign",
+      surface: "admin_panel",
+      designBrief: "A dense but calm operations console with a left sidebar, top metrics, table rows, and clear retry feedback.",
+      referenceImages: ["artifact://design-target.png"],
+      components: ["sidebar", "metric card", "data table", "retry toast"],
+      wireframe: [
+        { id: "nav", role: "sidebar", text: "Persistent project navigation", priority: "primary" },
+        { id: "metrics", role: "metric-card", text: "Four operational counters", priority: "primary" },
+        { id: "table", role: "data-table", text: "Recent jobs with status pills", priority: "secondary" }
+      ],
+      styleTokens: { primary: "#0b695d", accent: "#d5a11e", background: "#f5f7f4", text: "#17211d", radius: 8, density: "compact" },
+      responsiveVariants: ["desktop", "mobile"],
+      publish: false,
+      browserValidation: false
+    });
+    const result = await convertTool.handler(parsed, ctx);
+
+    assert.equal(result.ok, true);
+    const projectId = result.jobId!;
+    const manifest = await getProjectManifest(ctx.projectRoot, projectId);
+    assert.equal(manifest.metadata.status, "draft");
+    assert.deepEqual(manifest.files.map((file) => file.path), ["components.md", "design-system.json", "index.html", "script.js", "styles.css", "visual-validation.json"]);
+
+    const html = await readProjectFile(ctx.projectRoot, projectId, "index.html");
+    assert.match(html, /Ops Console Redesign/);
+    assert.match(html, /data-component="sidebar"/);
+    const designSystem = JSON.parse(await readProjectFile(ctx.projectRoot, projectId, "design-system.json")) as { components: string[]; tokens: { primary: string } };
+    assert.ok(designSystem.components.includes("retry-toast"));
+    assert.equal(designSystem.tokens.primary, "#0b695d");
+    const visual = JSON.parse(await readProjectFile(ctx.projectRoot, projectId, "visual-validation.json")) as { score: number; confidence: string; signals: string[] };
+    assert.ok(visual.score > 0.5);
+    assert.equal(visual.confidence, "medium");
+    assert.ok(visual.signals.includes("reference-images"));
+    const components = await readProjectFile(ctx.projectRoot, projectId, "components.md");
+    assert.match(components, /retry-toast/);
+  });
+});
+
 test("capture storage writes and reads capture JSON", async () => {
   await withTempRoot(async (root) => {
     const captureRoot = getCaptureRoot(root);

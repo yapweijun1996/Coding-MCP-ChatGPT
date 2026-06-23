@@ -2,7 +2,7 @@ import path from "node:path";
 import { mkdirSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { atomicWriteSync } from "../shared/atomic-write.js";
 
-export type JobStatus = "created" | "running" | "success" | "error";
+export type JobStatus = "created" | "running" | "success" | "error" | "cancelled" | "timeout";
 
 export interface JobRecord {
   id: string;
@@ -14,6 +14,13 @@ export interface JobRecord {
   errors: string[];
   createdAt: string;
   updatedAt: string;
+  sourceToolName?: string;
+  sourceArgs?: Record<string, unknown>;
+  parentJobId?: string;
+  attempt?: number;
+  maxAttempts?: number;
+  timeoutMs?: number;
+  cancelledAt?: string;
 }
 
 // In-memory index for fast reads, backed by one JSON file per job under jobsRoot. Writes are
@@ -41,6 +48,7 @@ function persist(job: JobRecord): void {
 
 export function initializeJobStore(root: string, retentionDays = 7): void {
   jobsRoot = root;
+  jobs.clear();
   let files: string[];
   try {
     files = readdirSync(jobsRoot).filter((file) => file.endsWith(".json"));
@@ -63,7 +71,7 @@ export function initializeJobStore(root: string, retentionDays = 7): void {
         unlinkSync(path.join(jobsRoot, file));
         continue;
       }
-      if (job.status === "running") {
+      if (job.status === "running" || job.status === "created") {
         // A job left "running" cannot survive a restart: the background execution that owned it
         // is gone with the previous process. Fail it explicitly so get_job_status reports a
         // terminal state instead of a permanent "running".
@@ -95,6 +103,15 @@ export function getJob(id: string): JobRecord | undefined {
   return jobs.get(id);
 }
 
+export function listJobs(options: { status?: JobStatus; sourceToolName?: string; limit?: number } = {}): JobRecord[] {
+  const limit = options.limit ?? 100;
+  return [...jobs.values()]
+    .filter((job) => !options.status || job.status === options.status)
+    .filter((job) => !options.sourceToolName || job.sourceToolName === options.sourceToolName || job.title === options.sourceToolName)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, limit);
+}
+
 export function countJobs(): number {
   return jobs.size;
 }
@@ -111,4 +128,16 @@ export function updateJob(id: string, update: Partial<Omit<JobRecord, "id" | "cr
   jobs.set(id, next);
   persist(next);
   return next;
+}
+
+export function cancelJob(id: string, reason = "Cancelled by request."): JobRecord | undefined {
+  const existing = jobs.get(id);
+  if (!existing) return undefined;
+  if (["success", "error", "cancelled", "timeout"].includes(existing.status)) return existing;
+  return updateJob(id, {
+    status: "cancelled",
+    summary: reason,
+    cancelledAt: new Date().toISOString(),
+    errors: [...existing.errors, reason]
+  });
 }

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { initializeJobStore, saveJob, getJob, updateJob, type JobRecord } from "../src/jobs/store.js";
+import { cancelJob, initializeJobStore, listJobs, saveJob, getJob, updateJob, type JobRecord } from "../src/jobs/store.js";
 
 function job(id: string, status: JobRecord["status"]): JobRecord {
   const now = "2026-06-20T10:00:00.000Z";
@@ -95,4 +95,21 @@ test("retentionDays <= 0 disables pruning", async () => {
 test("getJob is undefined when jobsRoot is unset and id is unknown", () => {
   initializeJobStore("");
   assert.equal(getJob("never-seen-id"), undefined);
+});
+
+test("listJobs and cancelJob expose queue control state", () => {
+  initializeJobStore("");
+  const running = saveJob({ ...job("job_cancel_me", "running"), sourceToolName: "run_project_build", sourceArgs: {} });
+  saveJob(job("job_done_for_list", "success"));
+
+  const runningJobs = listJobs({ status: "running", limit: 10 });
+  assert.equal(runningJobs.some((item) => item.id === running.id), true);
+
+  const cancelled = cancelJob(running.id, "No longer needed.");
+  assert.ok(cancelled);
+  assert.equal(cancelled!.status, "cancelled");
+  assert.equal(cancelled!.errors.includes("No longer needed."), true);
+
+  const secondCancel = cancelJob(running.id, "again");
+  assert.equal(secondCancel!.status, "cancelled");
 });

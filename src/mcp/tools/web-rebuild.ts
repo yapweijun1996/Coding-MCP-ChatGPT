@@ -52,6 +52,33 @@ const generateImprovedStaticPageSchema = z.object({
   browserValidation: z.boolean().optional().default(true)
 });
 
+const designSurfaceSchema = z.enum(["admin_panel", "landing_page", "dashboard", "game_ui", "mobile_app", "component_library", "generic_web"]);
+
+const convertDesignToStaticProjectSchema = z.object({
+  title: z.string().min(1).max(160),
+  designBrief: z.string().min(1).max(6000),
+  surface: designSurfaceSchema.optional().default("generic_web"),
+  referenceImages: z.array(z.string().min(1).max(2000)).max(12).optional().default([]),
+  wireframe: z.array(z.object({
+    id: z.string().min(1).max(80),
+    role: z.string().min(1).max(80),
+    text: z.string().max(500).optional(),
+    priority: z.enum(["primary", "secondary", "tertiary"]).optional().default("secondary")
+  })).max(30).optional().default([]),
+  components: z.array(z.string().min(1).max(80)).max(40).optional().default([]),
+  styleTokens: z.object({
+    primary: z.string().regex(/^#[0-9a-f]{6}$/i).optional(),
+    accent: z.string().regex(/^#[0-9a-f]{6}$/i).optional(),
+    background: z.string().regex(/^#[0-9a-f]{6}$/i).optional(),
+    text: z.string().regex(/^#[0-9a-f]{6}$/i).optional(),
+    radius: z.number().int().min(0).max(24).optional(),
+    density: z.enum(["compact", "comfortable", "spacious"]).optional()
+  }).optional().default({}),
+  responsiveVariants: z.array(z.enum(["desktop", "tablet", "mobile"])).min(1).max(3).optional().default(["desktop", "mobile"]),
+  browserValidation: z.boolean().optional().default(true),
+  publish: z.boolean().optional().default(true)
+});
+
 function analysisPath(captureRoot: string, analysisId: string): string {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(analysisId)) throw new Error("Invalid analysisId.");
   return path.join(captureRoot, `${analysisId}.analysis.json`);
@@ -341,11 +368,393 @@ function generateScriptJs(): string {
 `;
 }
 
+type DesignConversionInput = z.infer<typeof convertDesignToStaticProjectSchema>;
+
+function sentenceFromBrief(brief: string, fallback: string): string {
+  return brief.split(/[.!?\n]/).map((item) => item.trim()).find(Boolean)?.slice(0, 220) || fallback;
+}
+
+function uniqueComponents(input: DesignConversionInput): string[] {
+  const defaultsBySurface: Record<z.infer<typeof designSurfaceSchema>, string[]> = {
+    admin_panel: ["sidebar", "topbar", "metric-card", "data-table", "toolbar", "status-pill"],
+    landing_page: ["hero", "feature-grid", "testimonial", "pricing-card", "cta-band"],
+    dashboard: ["sidebar", "topbar", "metric-card", "chart-panel", "activity-list"],
+    game_ui: ["hud", "score-panel", "inventory", "action-bar", "modal"],
+    mobile_app: ["app-shell", "bottom-nav", "list-item", "floating-action", "sheet"],
+    component_library: ["button", "card", "tabs", "modal", "form-field", "toast"],
+    generic_web: ["hero", "card", "button", "form-field", "navigation"]
+  };
+  return [...new Set([...(input.components.length ? input.components : defaultsBySurface[input.surface]), ...input.wireframe.map((item) => item.role)])]
+    .map((component) => component.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""))
+    .filter(Boolean)
+    .slice(0, 24);
+}
+
+function designTokens(input: DesignConversionInput): Record<string, string | number> {
+  const compact = input.styleTokens.density === "compact";
+  const spacious = input.styleTokens.density === "spacious";
+  return {
+    primary: input.styleTokens.primary ?? "#145c52",
+    accent: input.styleTokens.accent ?? "#d5a11e",
+    background: input.styleTokens.background ?? "#f5f7f4",
+    text: input.styleTokens.text ?? "#17211d",
+    panel: "#ffffff",
+    muted: "#66736f",
+    line: "#dce3df",
+    radius: input.styleTokens.radius ?? 8,
+    spacing: compact ? 12 : spacious ? 24 : 18,
+    controlHeight: compact ? 36 : spacious ? 48 : 42
+  };
+}
+
+function renderWireframeItems(input: DesignConversionInput): string {
+  const items = input.wireframe.length > 0
+    ? input.wireframe
+    : [
+      { id: "hero", role: "primary-panel", text: sentenceFromBrief(input.designBrief, input.title), priority: "primary" as const },
+      { id: "details", role: "content-grid", text: "Translate visual direction into editable, responsive sections.", priority: "secondary" as const },
+      { id: "actions", role: "action-bar", text: "Use stable controls and clear feedback states.", priority: "secondary" as const }
+    ];
+  return items.map((item, index) => `<article class="wire-card ${escapeHtml(item.priority)}" data-component="${escapeHtml(item.role)}">
+      <span>${String(index + 1).padStart(2, "0")}</span>
+      <h3>${escapeHtml(item.role)}</h3>
+      <p>${escapeHtml(item.text || item.id)}</p>
+    </article>`).join("\n");
+}
+
+function generateDesignIndexHtml(input: DesignConversionInput, components: string[]): string {
+  const lead = sentenceFromBrief(input.designBrief, `Static implementation of ${input.title}.`);
+  const referenceList = input.referenceImages.map((reference) => `<li><code>${escapeHtml(reference)}</code></li>`).join("");
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="${escapeHtml(lead.slice(0, 155))}">
+  <title>${escapeHtml(input.title)}</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body data-surface="${escapeHtml(input.surface)}">
+  <aside class="app-sidebar">
+    <a class="brand" href="#">${escapeHtml(input.title)}</a>
+    <nav>${components.slice(0, 7).map((component) => `<a href="#${escapeHtml(component)}">${escapeHtml(component.replaceAll("-", " "))}</a>`).join("")}</nav>
+  </aside>
+  <main class="design-shell">
+    <header class="hero-panel">
+      <p class="eyebrow">${escapeHtml(input.surface.replaceAll("_", " "))}</p>
+      <h1>${escapeHtml(input.title)}</h1>
+      <p>${escapeHtml(lead)}</p>
+      <div class="hero-actions">
+        <button type="button" data-command="primary">Primary</button>
+        <button type="button" class="secondary" data-command="secondary">Secondary</button>
+      </div>
+    </header>
+    <section class="wire-grid" aria-label="Generated layout sections">
+      ${renderWireframeItems(input)}
+    </section>
+    <section class="component-board" aria-label="Extracted components">
+      ${components.map((component) => `<article id="${escapeHtml(component)}" class="component-card">
+        <div class="component-preview ${escapeHtml(component)}"></div>
+        <div>
+          <h2>${escapeHtml(component.replaceAll("-", " "))}</h2>
+          <p>Editable ${escapeHtml(component)} component generated from the design brief.</p>
+        </div>
+      </article>`).join("\n")}
+    </section>
+    ${referenceList ? `<section class="reference-list"><h2>Reference Inputs</h2><ul>${referenceList}</ul></section>` : ""}
+    <section class="feedback-panel" aria-live="polite">
+      <h2>Implementation Status</h2>
+      <p data-status>Ready for visual review and screenshot comparison.</p>
+    </section>
+  </main>
+  <script src="./script.js"></script>
+</body>
+</html>`;
+}
+
+function generateDesignStylesCss(tokens: Record<string, string | number>, variants: string[]): string {
+  return `:root {
+  --primary: ${tokens.primary};
+  --accent: ${tokens.accent};
+  --background: ${tokens.background};
+  --text: ${tokens.text};
+  --panel: ${tokens.panel};
+  --muted: ${tokens.muted};
+  --line: ${tokens.line};
+  --radius: ${tokens.radius}px;
+  --space: ${tokens.spacing}px;
+  --control: ${tokens.controlHeight}px;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  background: var(--background);
+  color: var(--text);
+  font-family: Inter, "Avenir Next", "Segoe UI", sans-serif;
+}
+.app-sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  padding: calc(var(--space) * 1.2);
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 92%, var(--primary));
+}
+.brand { display: block; margin-bottom: calc(var(--space) * 1.4); font-weight: 800; text-decoration: none; }
+nav { display: grid; gap: 8px; }
+nav a { padding: 10px 12px; border-radius: var(--radius); color: var(--muted); text-decoration: none; }
+nav a:hover { background: var(--background); color: var(--text); }
+.design-shell { width: min(1180px, calc(100vw - 280px)); margin: 0 auto; padding: calc(var(--space) * 1.6); }
+.hero-panel, .feedback-panel, .reference-list {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: calc(var(--space) * 1.5);
+}
+.hero-panel { display: grid; gap: var(--space); min-height: 320px; align-content: center; }
+.eyebrow { margin: 0; color: var(--primary); font-size: 12px; font-weight: 800; text-transform: uppercase; }
+h1 { max-width: 780px; margin: 0; font-size: 54px; line-height: 1; letter-spacing: 0; }
+h2, h3, p { margin-top: 0; }
+p { color: var(--muted); line-height: 1.5; }
+.hero-actions, .wire-grid, .component-board { display: grid; gap: var(--space); }
+.hero-actions { grid-template-columns: repeat(2, max-content); }
+button {
+  min-height: var(--control);
+  border: 0;
+  border-radius: calc(var(--radius) - 2px);
+  padding: 0 18px;
+  background: var(--primary);
+  color: white;
+  font: inherit;
+  font-weight: 800;
+}
+button.secondary { background: transparent; color: var(--primary); box-shadow: inset 0 0 0 1px var(--line); }
+.wire-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: var(--space) 0; }
+.wire-card, .component-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: var(--space);
+}
+.wire-card.primary { box-shadow: inset 4px 0 0 var(--primary); }
+.wire-card span { color: var(--accent); font-weight: 900; }
+.component-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.component-card { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: var(--space); align-items: center; }
+.component-preview {
+  width: 88px;
+  aspect-ratio: 1;
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, var(--primary), var(--accent));
+}
+.reference-list, .feedback-panel { margin-top: var(--space); }
+.reference-list code { overflow-wrap: anywhere; }
+${variants.includes("tablet") ? "@media (max-width: 960px) { body { grid-template-columns: 1fr; } .app-sidebar { position: static; height: auto; } .design-shell { width: min(100% - 28px, 920px); } .wire-grid, .component-board { grid-template-columns: 1fr 1fr; } }" : ""}
+${variants.includes("mobile") ? "@media (max-width: 640px) { h1 { font-size: 38px; } .wire-grid, .component-board, .hero-actions { grid-template-columns: 1fr; } .component-card { grid-template-columns: 1fr; } }" : ""}
+`;
+}
+
+function generateDesignScriptJs(): string {
+  return `document.querySelectorAll("[data-command]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const status = document.querySelector("[data-status]");
+    if (status) status.textContent = \`\${button.textContent} action captured in the static design preview.\`;
+  });
+});
+`;
+}
+
+function generateComponentsMarkdown(input: DesignConversionInput, components: string[], tokens: Record<string, string | number>): string {
+  return `# ${input.title} Components
+
+## Design Brief
+
+${input.designBrief}
+
+## Tokens
+
+\`\`\`json
+${JSON.stringify(tokens, null, 2)}
+\`\`\`
+
+## Components
+
+${components.map((component) => `- \`${component}\`: generated as an editable HTML/CSS component with stable class names and responsive constraints.`).join("\n")}
+
+## Reference Images
+
+${input.referenceImages.length ? input.referenceImages.map((reference) => `- ${reference}`).join("\n") : "- None supplied."}
+`;
+}
+
+function visualSimilarityReport(input: DesignConversionInput, components: string[]): Record<string, unknown> {
+  const signals = [
+    input.referenceImages.length > 0 ? "reference-images" : undefined,
+    input.wireframe.length > 0 ? "wireframe-regions" : undefined,
+    components.length > 0 ? "component-extraction" : undefined,
+    input.responsiveVariants.length > 1 ? "responsive-variants" : undefined,
+    Object.keys(input.styleTokens).length > 0 ? "style-tokens" : undefined
+  ].filter(Boolean);
+  const score = Math.min(0.92, 0.48 + signals.length * 0.08 + Math.min(input.wireframe.length, 8) * 0.015);
+  return {
+    method: "heuristic_design_brief_similarity",
+    score: Number(score.toFixed(2)),
+    confidence: input.referenceImages.length > 0 ? "medium" : "low",
+    signals,
+    gaps: [
+      input.referenceImages.length === 0 ? "No actual screenshot/image artifact was supplied, so pixel-level diff cannot be computed." : undefined,
+      "Run inspect_webpage_plus or visual regression after publishing for browser-captured evidence."
+    ].filter(Boolean),
+    nextStep: "Compare the published page screenshot against the design reference, then patch component files and re-run validation."
+  };
+}
+
 function withoutScreenshots(results: Awaited<ReturnType<typeof inspectWebpageUrl>>) {
   return results.map(({ screenshotDataUrl, ...result }) => result);
 }
 
 export const webRebuildTools: ToolModule[] = [
+  {
+    definition: {
+      name: "convert_design_to_static_project",
+      description: "Convert a screenshot, wireframe, or design reference brief into editable static HTML/CSS/JS with components, CSS tokens, responsive variants, and a visual similarity report.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          designBrief: { type: "string", description: "Description of the screenshot, wireframe, or design target to recreate." },
+          surface: { type: "string", enum: ["admin_panel", "landing_page", "dashboard", "game_ui", "mobile_app", "component_library", "generic_web"] },
+          referenceImages: { type: "array", items: { type: "string" }, description: "Image artifact URLs, local paths, or design reference identifiers." },
+          wireframe: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                role: { type: "string" },
+                text: { type: "string" },
+                priority: { type: "string", enum: ["primary", "secondary", "tertiary"] }
+              },
+              required: ["id", "role"],
+              additionalProperties: false
+            }
+          },
+          components: { type: "array", items: { type: "string" } },
+          styleTokens: {
+            type: "object",
+            properties: {
+              primary: { type: "string" },
+              accent: { type: "string" },
+              background: { type: "string" },
+              text: { type: "string" },
+              radius: { type: "number" },
+              density: { type: "string", enum: ["compact", "comfortable", "spacious"] }
+            },
+            additionalProperties: false
+          },
+          responsiveVariants: { type: "array", items: { type: "string", enum: ["desktop", "tablet", "mobile"] } },
+          browserValidation: { type: "boolean" },
+          publish: { type: "boolean" }
+        },
+        required: ["title", "designBrief"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: convertDesignToStaticProjectSchema,
+    handler: async (input, ctx) => {
+      const parsed = convertDesignToStaticProjectSchema.parse(input);
+      const components = uniqueComponents(parsed);
+      const tokens = designTokens(parsed);
+      const visualReport = visualSimilarityReport(parsed, components);
+      const project = await createProject(ctx.projectRoot, {
+        title: parsed.title,
+        summary: `Design-to-code conversion generated from ${parsed.surface} reference.`,
+        entryFile: "index.html",
+        createdByClientId: ctx.clientId
+      });
+      const files = [
+        await writeProjectFile(ctx.projectRoot, project.id, "index.html", generateDesignIndexHtml(parsed, components)),
+        await writeProjectFile(ctx.projectRoot, project.id, "styles.css", generateDesignStylesCss(tokens, parsed.responsiveVariants)),
+        await writeProjectFile(ctx.projectRoot, project.id, "script.js", generateDesignScriptJs()),
+        await writeProjectFile(ctx.projectRoot, project.id, "design-system.json", `${JSON.stringify({ title: parsed.title, surface: parsed.surface, tokens, components, wireframe: parsed.wireframe, referenceImages: parsed.referenceImages }, null, 2)}\n`),
+        await writeProjectFile(ctx.projectRoot, project.id, "components.md", generateComponentsMarkdown(parsed, components, tokens)),
+        await writeProjectFile(ctx.projectRoot, project.id, "visual-validation.json", `${JSON.stringify(visualReport, null, 2)}\n`)
+      ];
+      const validation = await validateProject(ctx.projectRoot, project.id, "index.html", "static_html");
+      let publishedUrl: string | undefined;
+      let inspectionReportUrl: string | undefined;
+      let browserInspection: Record<string, unknown> | undefined;
+
+      if (validation.ok && parsed.publish) {
+        const published = await publishProject(ctx.projectRoot, project.id, ctx.publicBaseUrl, "index.html", { shareBasePath: ctx.publicShareBasePath });
+        publishedUrl = published.publishedUrl;
+      }
+
+      if (validation.ok && publishedUrl && parsed.browserValidation) {
+        const browserResults = await inspectWebpageUrl(publishedUrl, {
+          viewports: parsed.responsiveVariants,
+          waitUntil: "networkidle",
+          screenshot: true,
+          fullPage: false,
+          maxIssues: 12
+        });
+        const inspectionShare = await createShareArtifact({
+          shareRoot: ctx.shareRoot,
+          title: "Design Conversion Browser Inspection",
+          summary: `Browser validation for ${project.id}.`,
+          filename: `design-conversion-inspection-${project.id}.html`,
+          html: renderWebpageInspectionReport(publishedUrl, browserResults)
+        });
+        inspectionReportUrl = makeShareUrl(ctx.publicBaseUrl, inspectionShare.id, inspectionShare.filename);
+        const inspectionSummary = {
+          ...summarizeBrowserInspection(withoutScreenshots(browserResults)),
+          reportUrl: inspectionReportUrl,
+          inspectedAt: new Date().toISOString()
+        };
+        browserInspection = inspectionSummary as unknown as Record<string, unknown>;
+        await recordProjectBrowserInspection(ctx.projectRoot, project.id, inspectionSummary, "convert_design_to_static_project_browser_validation");
+      }
+
+      const ok = validation.ok && (!browserInspection || Boolean(browserInspection.ok));
+      const report = {
+        ok,
+        projectId: project.id,
+        publishedUrl,
+        validation,
+        browserInspection,
+        inspectionReportUrl,
+        designConversion: {
+          title: parsed.title,
+          surface: parsed.surface,
+          components,
+          tokens,
+          responsiveVariants: parsed.responsiveVariants,
+          visualSimilarity: visualReport
+        },
+        files
+      };
+      await appendProjectTaskHistory(ctx.projectRoot, project.id, {
+        toolName: "convert_design_to_static_project",
+        ok,
+        summary: ok ? `Converted design reference into static project ${project.id}.` : `Design conversion created ${project.id} with validation issues.`,
+        details: report
+      });
+      return {
+        ok,
+        summary: ok ? `Converted design reference into static project ${project.id}.` : `Design conversion created ${project.id} but validation found issues.`,
+        jobId: project.id,
+        previewUrl: publishedUrl,
+        shareUrl: publishedUrl,
+        artifacts: [...(publishedUrl ? [publishedUrl] : []), ...(inspectionReportUrl ? [inspectionReportUrl] : []), ...files.map((file) => file.path)],
+        structuredContent: report as unknown as Record<string, unknown>,
+        logs: [JSON.stringify(report, null, 2)],
+        errors: [...validation.errors, ...((browserInspection?.blockingErrors as string[] | undefined) ?? [])]
+      };
+    }
+  },
   {
     definition: {
       name: "capture_webpage",

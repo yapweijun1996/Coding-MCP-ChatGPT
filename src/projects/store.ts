@@ -46,6 +46,33 @@ export interface ProjectTaskHistoryItem {
   details?: unknown;
 }
 
+export type ProjectTaskStatus = "todo" | "doing" | "blocked" | "done";
+export type ProjectTaskPriority = "low" | "medium" | "high" | "urgent";
+
+export interface ProjectTaskEvidenceLink {
+  label: string;
+  kind?: "validation" | "inspect_report" | "screenshot" | "published_url" | "changed_file" | "artifact" | "note";
+  url?: string;
+  artifact?: string;
+  filePath?: string;
+  note?: string;
+  recordedAt?: string;
+}
+
+export interface ProjectTaskItem {
+  id: string;
+  title: string;
+  status: ProjectTaskStatus;
+  priority: ProjectTaskPriority;
+  notes: string;
+  progress: number;
+  dependsOn: string[];
+  evidence: ProjectTaskEvidenceLink[];
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
 export interface ProjectWorkspaceBinding {
   path: string;
   gitRoot?: string;
@@ -107,6 +134,7 @@ export interface ProjectMetadata {
   workspaceBinding?: ProjectWorkspaceBinding;
   lastValidation?: ProjectValidationResult;
   taskHistory?: ProjectTaskHistoryItem[];
+  taskList?: ProjectTaskItem[];
   reviewFeedback?: ReviewFinding[];
 }
 
@@ -128,6 +156,7 @@ export interface ProjectManifest {
   workspaceBinding?: ProjectWorkspaceBinding;
   lastValidation?: ProjectValidationResult;
   taskHistory: ProjectTaskHistoryItem[];
+  taskList: ProjectTaskItem[];
 }
 
 export interface ProjectActivity {
@@ -137,6 +166,22 @@ export interface ProjectActivity {
   createdByClientId: string;
   lastValidation?: ProjectValidationResult;
   taskHistory: ProjectTaskHistoryItem[];
+  taskList: ProjectTaskItem[];
+}
+
+export interface ProjectTaskGraphNode extends ProjectTaskItem {
+  blockedBy: string[];
+  blocked: boolean;
+  dependents: string[];
+}
+
+export interface ProjectTaskGraph {
+  projectId: string;
+  nodes: ProjectTaskGraphNode[];
+  edges: Array<{ from: string; to: string }>;
+  readyTasks: ProjectTaskGraphNode[];
+  blockedTasks: ProjectTaskGraphNode[];
+  cycles: string[][];
 }
 
 export interface PublishProjectOptions {
@@ -153,7 +198,7 @@ const filesDirectoryName = "files";
 const workspaceDirectoryName = "workspace";
 const maxTaskHistoryItems = 100;
 const allowedTextExtensions = new Set([".html", ".css", ".js", ".mjs", ".json", ".webmanifest", ".txt", ".md", ".svg"]);
-const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mp4", ".webm", ".pptx"]);
+const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".mp4", ".webm", ".pptx"]);
 const projectContentTypes = new Map([
   [".html", "text/html"],
   [".css", "text/css"],
@@ -177,6 +222,8 @@ const projectContentTypes = new Map([
   [".mp3", "audio/mpeg"],
   [".wav", "audio/wav"],
   [".ogg", "audio/ogg"],
+  [".mid", "audio/midi"],
+  [".midi", "audio/midi"],
   [".mp4", "video/mp4"],
   [".webm", "video/webm"],
   [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"]
@@ -333,7 +380,7 @@ function validateProjectAssetBytes(relativePath: string, buffer: Buffer, content
   if (buffer.length === 0) throw new Error("Project asset content is empty.");
   if (extension === ".pptx") {
     if (buffer.length > maxProjectPresentationAssetBytes) throw new Error("PPTX asset exceeds 25 MiB.");
-  } else if ([".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mp4", ".webm"].includes(extension)) {
+  } else if ([".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".mp4", ".webm"].includes(extension)) {
     if (buffer.length > maxProjectMediaAssetBytes) throw new Error("Media/model asset exceeds 100 MiB.");
   } else if (buffer.length > maxProjectImageAssetBytes) {
     throw new Error("Image asset exceeds 10 MiB.");
@@ -344,6 +391,7 @@ function validateProjectAssetBytes(relativePath: string, buffer: Buffer, content
   if (extension === ".gif" && !includesAscii(buffer.subarray(0, 6), "GIF87a") && !includesAscii(buffer.subarray(0, 6), "GIF89a")) throw new Error("GIF asset has invalid magic bytes.");
   if (extension === ".webp" && (!includesAscii(buffer.subarray(0, 4), "RIFF") || !includesAscii(buffer.subarray(8, 12), "WEBP"))) throw new Error("WebP asset has invalid magic bytes.");
   if (extension === ".glb" && !includesAscii(buffer.subarray(0, 4), "glTF")) throw new Error("GLB asset has invalid magic bytes.");
+  if ((extension === ".mid" || extension === ".midi") && !includesAscii(buffer.subarray(0, 4), "MThd")) throw new Error("MIDI asset has invalid magic bytes.");
   if (extension === ".gltf") {
     const decoder = new TextDecoder("utf-8", { fatal: true });
     const parsed = JSON.parse(decoder.decode(buffer)) as { asset?: { version?: unknown } };
@@ -356,9 +404,11 @@ function validateProjectAssetBytes(relativePath: string, buffer: Buffer, content
 }
 
 function normalizeProjectMetadata(metadata: ProjectMetadata): ProjectMetadata {
+  const taskList = (metadata.taskList ?? []).map((task) => ({ ...task, dependsOn: task.dependsOn ?? [] }));
   return {
     ...metadata,
-    taskHistory: metadata.taskHistory ?? []
+    taskHistory: metadata.taskHistory ?? [],
+    taskList
   };
 }
 
@@ -633,7 +683,8 @@ export async function getProjectManifest(projectRoot: string, projectId: string)
     publishedUrl: metadata.publishedUrl,
     workspaceBinding: metadata.workspaceBinding,
     lastValidation: metadata.lastValidation,
-    taskHistory: metadata.taskHistory ?? []
+    taskHistory: metadata.taskHistory ?? [],
+    taskList: metadata.taskList ?? []
   };
 }
 
@@ -669,8 +720,241 @@ export async function getProjectActivity(projectRoot: string, projectId: string,
     publishedUrl: metadata.publishedUrl,
     createdByClientId: metadata.createdByClientId,
     lastValidation: metadata.lastValidation,
-    taskHistory: (metadata.taskHistory ?? []).slice(-limit)
+    taskHistory: (metadata.taskHistory ?? []).slice(-limit),
+    taskList: metadata.taskList ?? []
   };
+}
+
+function nextProjectTaskId(tasks: ProjectTaskItem[]): string {
+  const next = tasks.reduce((max, task) => {
+    const match = /^task_(\d+)$/.exec(task.id);
+    return match ? Math.max(max, Number.parseInt(match[1], 10)) : max;
+  }, 0) + 1;
+  return `task_${String(next).padStart(3, "0")}`;
+}
+
+export async function listProjectTasks(projectRoot: string, projectId: string, filter: { status?: ProjectTaskStatus; priority?: ProjectTaskPriority } = {}): Promise<ProjectTaskItem[]> {
+  const metadata = await getProject(projectRoot, projectId);
+  let tasks = metadata.taskList ?? [];
+  if (filter.status) tasks = tasks.filter((task) => task.status === filter.status);
+  if (filter.priority) tasks = tasks.filter((task) => task.priority === filter.priority);
+  return tasks.slice().sort((left, right) => {
+    const statusRank: Record<ProjectTaskStatus, number> = { doing: 0, blocked: 1, todo: 2, done: 3 };
+    const priorityRank: Record<ProjectTaskPriority, number> = { urgent: 0, high: 1, medium: 2, low: 3 };
+    return statusRank[left.status] - statusRank[right.status]
+      || priorityRank[left.priority] - priorityRank[right.priority]
+      || right.updatedAt.localeCompare(left.updatedAt);
+  });
+}
+
+export async function getProjectTask(projectRoot: string, projectId: string, taskId: string): Promise<ProjectTaskItem> {
+  const metadata = await getProject(projectRoot, projectId);
+  const task = (metadata.taskList ?? []).find((item) => item.id === taskId);
+  if (!task) throw new Error(`Task ${taskId} not found.`);
+  return task;
+}
+
+export async function searchProjectTasks(
+  projectRoot: string,
+  projectId: string,
+  query: string,
+  filter: { status?: ProjectTaskStatus; priority?: ProjectTaskPriority; maxResults?: number } = {}
+): Promise<ProjectTaskItem[]> {
+  const tokens = query.toLowerCase().split(/\s+/).map((token) => token.trim()).filter(Boolean);
+  const tasks = await listProjectTasks(projectRoot, projectId, { status: filter.status, priority: filter.priority });
+  const maxResults = filter.maxResults ?? 50;
+  const matches = !query.trim()
+    ? tasks
+    : tasks.filter((task) => {
+      const haystack = [
+        task.id,
+        task.title,
+        task.status,
+        task.priority,
+        task.notes,
+        ...task.dependsOn,
+        ...task.evidence.flatMap((item) => [item.label, item.kind, item.url, item.artifact, item.filePath, item.note].filter(Boolean))
+      ].join("\n").toLowerCase();
+      return tokens.every((token) => haystack.includes(token));
+    });
+  return matches.slice(0, maxResults);
+}
+
+function findTaskCycles(tasks: ProjectTaskItem[]): string[][] {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const cycles: string[][] = [];
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const stack: string[] = [];
+  const visit = (taskId: string) => {
+    if (visiting.has(taskId)) {
+      const start = stack.indexOf(taskId);
+      if (start >= 0) cycles.push([...stack.slice(start), taskId]);
+      return;
+    }
+    if (visited.has(taskId)) return;
+    const task = byId.get(taskId);
+    if (!task) return;
+    visiting.add(taskId);
+    stack.push(taskId);
+    for (const dependency of task.dependsOn ?? []) visit(dependency);
+    stack.pop();
+    visiting.delete(taskId);
+    visited.add(taskId);
+  };
+  for (const task of tasks) visit(task.id);
+  return cycles;
+}
+
+function assertValidTaskDependencies(tasks: ProjectTaskItem[]): void {
+  const ids = new Set(tasks.map((task) => task.id));
+  for (const task of tasks) {
+    for (const dependency of task.dependsOn ?? []) {
+      if (dependency === task.id) throw new Error(`Task ${task.id} cannot depend on itself.`);
+      if (!ids.has(dependency)) throw new Error(`Task ${task.id} depends on unknown task ${dependency}.`);
+    }
+  }
+  const cycles = findTaskCycles(tasks);
+  if (cycles.length > 0) throw new Error(`Task dependency cycle detected: ${cycles[0].join(" -> ")}.`);
+}
+
+export async function getProjectTaskGraph(projectRoot: string, projectId: string): Promise<ProjectTaskGraph> {
+  const metadata = await getProject(projectRoot, projectId);
+  const tasks = metadata.taskList ?? [];
+  const dependents = new Map<string, string[]>();
+  for (const task of tasks) {
+    for (const dependency of task.dependsOn ?? []) {
+      dependents.set(dependency, [...(dependents.get(dependency) ?? []), task.id]);
+    }
+  }
+  const nodes: ProjectTaskGraphNode[] = tasks.map((task) => {
+    const blockedBy = (task.dependsOn ?? []).filter((dependency) => tasks.find((candidate) => candidate.id === dependency)?.status !== "done");
+    return {
+      ...task,
+      blockedBy,
+      blocked: blockedBy.length > 0 || task.status === "blocked",
+      dependents: dependents.get(task.id) ?? []
+    };
+  });
+  const edges = tasks.flatMap((task) => (task.dependsOn ?? []).map((dependency) => ({ from: dependency, to: task.id })));
+  const readyTasks = nodes.filter((task) => !task.blocked && task.status !== "done");
+  const blockedTasks = nodes.filter((task) => task.blocked && task.status !== "done");
+  return { projectId, nodes, edges, readyTasks, blockedTasks, cycles: findTaskCycles(tasks) };
+}
+
+export async function upsertProjectTask(
+  projectRoot: string,
+  projectId: string,
+  input: {
+    taskId?: string;
+    title: string;
+    status?: ProjectTaskStatus;
+    priority?: ProjectTaskPriority;
+    notes?: string;
+    progress?: number;
+    dependsOn?: string[];
+    evidence?: ProjectTaskEvidenceLink[];
+  }
+): Promise<ProjectTaskItem> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot update tasks for a deleted project.");
+    const now = new Date().toISOString();
+    const tasks = metadata.taskList ?? [];
+    const index = input.taskId ? tasks.findIndex((task) => task.id === input.taskId) : -1;
+    const previous = index >= 0 ? tasks[index] : undefined;
+    const nextTask: ProjectTaskItem = {
+      id: previous?.id ?? nextProjectTaskId(tasks),
+      title: input.title.trim(),
+      status: input.status ?? previous?.status ?? "todo",
+      priority: input.priority ?? previous?.priority ?? "medium",
+      notes: input.notes?.trim() ?? previous?.notes ?? "",
+      progress: input.progress ?? previous?.progress ?? 0,
+      dependsOn: input.dependsOn ?? previous?.dependsOn ?? [],
+      evidence: input.evidence ?? previous?.evidence ?? [],
+      createdAt: previous?.createdAt ?? now,
+      updatedAt: now,
+      completedAt: input.status === "done" ? previous?.completedAt ?? now : previous?.completedAt
+    };
+    const nextTasks = index >= 0 ? [...tasks.slice(0, index), nextTask, ...tasks.slice(index + 1)] : [...tasks, nextTask];
+    assertValidTaskDependencies(nextTasks);
+    const updated = addHistory({ ...metadata, taskList: nextTasks }, {
+      toolName: "upsert_project_task",
+      ok: nextTask.status !== "blocked",
+      summary: `${previous ? "Updated" : "Created"} task ${nextTask.id}: ${nextTask.title}`,
+      details: { taskId: nextTask.id, status: nextTask.status, priority: nextTask.priority, progress: nextTask.progress }
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return nextTask;
+  });
+}
+
+export async function recordProjectTaskEvidence(
+  projectRoot: string,
+  projectId: string,
+  taskId: string,
+  evidence: ProjectTaskEvidenceLink[]
+): Promise<ProjectTaskItem> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot update tasks for a deleted project.");
+    const tasks = metadata.taskList ?? [];
+    const index = tasks.findIndex((task) => task.id === taskId);
+    if (index < 0) throw new Error(`Task ${taskId} not found.`);
+    const now = new Date().toISOString();
+    const normalized = evidence.map((item) => ({
+      ...item,
+      label: item.label.trim(),
+      note: item.note?.trim(),
+      recordedAt: item.recordedAt ?? now
+    }));
+    const task = tasks[index];
+    const nextTask: ProjectTaskItem = {
+      ...task,
+      evidence: [...task.evidence, ...normalized],
+      updatedAt: now
+    };
+    const nextTasks = [...tasks.slice(0, index), nextTask, ...tasks.slice(index + 1)];
+    const updated = addHistory({ ...metadata, taskList: nextTasks }, {
+      toolName: "record_project_task_evidence",
+      ok: true,
+      summary: `Recorded ${normalized.length} evidence link(s) for task ${taskId}: ${task.title}`,
+      details: {
+        taskId,
+        evidence: normalized.map((item) => ({
+          label: item.label,
+          kind: item.kind,
+          url: item.url,
+          artifact: item.artifact,
+          filePath: item.filePath
+        }))
+      }
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return nextTask;
+  });
+}
+
+export async function deleteProjectTask(projectRoot: string, projectId: string, taskId: string): Promise<ProjectTaskItem> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot update tasks for a deleted project.");
+    const tasks = metadata.taskList ?? [];
+    const index = tasks.findIndex((task) => task.id === taskId);
+    if (index < 0) throw new Error(`Task ${taskId} not found.`);
+    const dependents = tasks.filter((task) => task.dependsOn.includes(taskId)).map((task) => task.id);
+    if (dependents.length > 0) throw new Error(`Cannot delete task ${taskId}; dependent task(s) still reference it: ${dependents.join(", ")}.`);
+    const deletedTask = tasks[index];
+    const nextTasks = [...tasks.slice(0, index), ...tasks.slice(index + 1)];
+    const updated = addHistory({ ...metadata, taskList: nextTasks }, {
+      toolName: "delete_project_task",
+      ok: true,
+      summary: `Deleted task ${taskId}: ${deletedTask.title}`,
+      details: { taskId, title: deletedTask.title }
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return deletedTask;
+  });
 }
 
 export async function writeProjectFile(projectRoot: string, projectId: string, relativePath: string, content: string): Promise<ProjectFileInfo> {
