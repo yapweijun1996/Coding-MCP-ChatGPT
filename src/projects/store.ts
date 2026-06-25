@@ -273,8 +273,8 @@ const filesDirectoryName = "files";
 const workspaceDirectoryName = "workspace";
 const maxTaskHistoryItems = 100;
 const allowedTextExtensions = new Set([".html", ".css", ".js", ".mjs", ".json", ".webmanifest", ".txt", ".md", ".csv", ".svg"]);
-const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".mp4", ".webm", ".pptx", ".zip"]);
-const mediaAssetExtensions = new Set([".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".mp4", ".webm"]);
+const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".sf3", ".mp4", ".webm", ".pptx", ".zip"]);
+const mediaAssetExtensions = new Set([".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".sf3", ".mp4", ".webm"]);
 const projectContentTypes = new Map([
   [".html", "text/html"],
   [".css", "text/css"],
@@ -303,6 +303,7 @@ const projectContentTypes = new Map([
   [".midi", "audio/midi"],
   [".sfz", "text/plain"],
   [".sf2", "audio/soundfont"],
+  [".sf3", "audio/soundfont"],
   [".mp4", "video/mp4"],
   [".webm", "video/webm"],
   [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
@@ -474,7 +475,7 @@ function validateProjectAssetBytes(relativePath: string, buffer: Buffer, content
   if (extension === ".webp" && (!includesAscii(buffer.subarray(0, 4), "RIFF") || !includesAscii(buffer.subarray(8, 12), "WEBP"))) throw new Error("WebP asset has invalid magic bytes.");
   if (extension === ".glb" && !includesAscii(buffer.subarray(0, 4), "glTF")) throw new Error("GLB asset has invalid magic bytes.");
   if ((extension === ".mid" || extension === ".midi") && !includesAscii(buffer.subarray(0, 4), "MThd")) throw new Error("MIDI asset has invalid magic bytes.");
-  if (extension === ".sf2" && (!includesAscii(buffer.subarray(0, 4), "RIFF") || !includesAscii(buffer.subarray(8, 12), "sfbk"))) throw new Error("SoundFont asset has invalid magic bytes.");
+  if ((extension === ".sf2" || extension === ".sf3") && (!includesAscii(buffer.subarray(0, 4), "RIFF") || !includesAscii(buffer.subarray(8, 12), "sfbk"))) throw new Error("SoundFont asset has invalid magic bytes.");
   if (extension === ".sfz") {
     const decoder = new TextDecoder("utf-8", { fatal: true });
     try {

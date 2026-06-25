@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getToolModule } from "../src/mcp/registry.js";
@@ -22,6 +22,48 @@ function toolContext(root: string): ToolContext {
   };
 }
 
+function fakeSoundfontBytes() {
+  return Buffer.concat([Buffer.from("RIFF", "ascii"), Buffer.from([0x04, 0x00, 0x00, 0x00]), Buffer.from("sfbk", "ascii"), Buffer.from("pdta", "ascii")]);
+}
+
+async function installFakeFluidSynth(root: string) {
+  const bin = path.join(root, "bin");
+  await mkdir(bin, { recursive: true });
+  const scriptPath = path.join(bin, "fluidsynth");
+  const script = `#!/usr/bin/env node
+const fs = require("fs");
+if (process.argv.includes("--version")) {
+  console.log("FluidSynth fake 2.3.0");
+  process.exit(0);
+}
+const out = process.argv[process.argv.indexOf("-F") + 1];
+const sampleRate = 8000;
+const frames = sampleRate / 4;
+const pcm = Buffer.alloc(frames * 2);
+for (let i = 0; i < frames; i++) {
+  const value = Math.round(Math.sin(i / 12) * 8000);
+  pcm.writeInt16LE(value, i * 2);
+}
+const header = Buffer.alloc(44);
+header.write("RIFF", 0);
+header.writeUInt32LE(36 + pcm.length, 4);
+header.write("WAVEfmt ", 8);
+header.writeUInt32LE(16, 16);
+header.writeUInt16LE(1, 20);
+header.writeUInt16LE(1, 22);
+header.writeUInt32LE(sampleRate, 24);
+header.writeUInt32LE(sampleRate * 2, 28);
+header.writeUInt16LE(2, 32);
+header.writeUInt16LE(16, 34);
+header.write("data", 36);
+header.writeUInt32LE(pcm.length, 40);
+fs.writeFileSync(out, Buffer.concat([header, pcm]));
+`;
+  await writeFile(scriptPath, script);
+  await chmod(scriptPath, 0o755);
+  return bin;
+}
+
 test("music workflow composes, edits, renders, audits, and exports music assets", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "music-workflow-"));
   try {
@@ -36,9 +78,10 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     const inspect = getToolModule("inspect_audio_quality");
     const licenseManifest = getToolModule("build_music_license_manifest");
     const packManager = getToolModule("manage_jazz_instrument_packs");
+    const soundfontRender = getToolModule("render_midi_with_soundfont");
     const exportAssets = getToolModule("export_music_assets");
     const audition = getToolModule("audition_music_variations");
-    for (const [name, tool] of Object.entries({ styleBrief, compose, edit, render, harmony, drums, inspect, licenseManifest, packManager, exportAssets, audition })) assert.ok(tool, `${name} registered`);
+    for (const [name, tool] of Object.entries({ styleBrief, compose, edit, render, harmony, drums, inspect, licenseManifest, packManager, soundfontRender, exportAssets, audition })) assert.ok(tool, `${name} registered`);
 
     const briefResult = await styleBrief!.handler({
       projectId: project.id,
@@ -100,11 +143,17 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     const renderPayload = renderResult.structuredContent as {
       fullMixPath: string;
       stemPaths: Record<string, string>;
+      qualityTier: string;
+      productionReady: boolean;
+      blockingReasons: string[];
       renderReport: { requestedFormats: string[]; renderedFormats: string[]; sampleRate: number; bitDepth: number; peakLevel: number; missingInstrumentFallbackWarnings: string[]; fileSizes: Record<string, number> };
-      licenseManifest: { renderer: string; instruments: Record<string, { license: string }> };
+      licenseManifest: { renderer: string; qualityTier: string; productionReady: boolean; instruments: Record<string, { license: string }> };
       warnings: string[];
     };
     assert.equal(renderPayload.fullMixPath, "music/rendered-preview.wav");
+    assert.equal(renderPayload.qualityTier, "preview_only");
+    assert.equal(renderPayload.productionReady, false);
+    assert.ok(renderPayload.blockingReasons.some((reason) => reason.includes("preview_only")));
     assert.ok(renderPayload.stemPaths.piano);
     assert.ok(renderPayload.stemPaths.bass);
     assert.ok(renderPayload.stemPaths.drums);
@@ -114,7 +163,9 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     assert.equal(renderPayload.renderReport.bitDepth, 16);
     assert.ok(renderPayload.renderReport.peakLevel > 0);
     assert.equal(renderPayload.renderReport.missingInstrumentFallbackWarnings.length, 0);
-    assert.equal(renderPayload.licenseManifest.renderer, "built_in_safe_synth");
+    assert.equal(renderPayload.licenseManifest.renderer, "built_in_procedural_synth");
+    assert.equal(renderPayload.licenseManifest.qualityTier, "preview_only");
+    assert.equal(renderPayload.licenseManifest.productionReady, false);
     assert.equal(renderPayload.licenseManifest.instruments.piano.license, "generated_original_procedural");
     assert.ok(renderPayload.warnings.some((warning) => warning.includes("MP3 output requires")));
     const renderReport = await readProjectFile(ctx.projectRoot, project.id, "music/render-report.json");
@@ -133,6 +184,8 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     assert.equal(qaResult.ok, true);
     const qaPayload = qaResult.structuredContent as {
       noteCount: number;
+      productionSafe: boolean;
+      blockingReasons: string[];
       peak: number;
       warnings: string[];
       technicalReport: { format: string; sampleRate: number; bitDepth: number; durationSeconds: number; peak: number; rms: number; silenceGaps: unknown[]; harshHighFrequencyProxy: number; excessiveBassProxy: number };
@@ -144,6 +197,8 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
       recommendations: string[];
     };
     assert.ok(qaPayload.noteCount > 0);
+    assert.equal(qaPayload.productionSafe, true);
+    assert.deepEqual(qaPayload.blockingReasons, []);
     assert.ok(qaPayload.peak > 0);
     assert.equal(qaPayload.technicalReport.format, "wav_pcm");
     assert.equal(qaPayload.technicalReport.sampleRate, 16000);
@@ -220,7 +275,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     const pianoSfz = "<region> sample=piano-C4.wav key=60\n";
     const bassSfz = "<region> sample=bass-E2.wav key=40\n";
     const brushesSfz = "<region> sample=brush-snare.wav key=38\n";
-    const pianoSf2 = Buffer.concat([Buffer.from("RIFF", "ascii"), Buffer.from([0x04, 0x00, 0x00, 0x00]), Buffer.from("sfbk", "ascii"), Buffer.from("pdta", "ascii")]);
+    const pianoSf2 = fakeSoundfontBytes();
     await writeProjectAsset(ctx.projectRoot, project.id, "instruments/piano/warm-pack.sfz", Buffer.from(pianoSfz, "utf8"), "text/plain");
     await writeProjectAsset(ctx.projectRoot, project.id, "instruments/bass/upright-pack.sfz", Buffer.from(bassSfz, "utf8"), "text/plain");
     await writeProjectAsset(ctx.projectRoot, project.id, "instruments/brushes/soft-pack.sfz", Buffer.from(brushesSfz, "utf8"), "text/plain");
@@ -347,24 +402,61 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
       readyPackIds: string[];
       reviewRequiredPackIds: string[];
       blockedPackIds: string[];
-      packs: Array<{ packId: string; format: string; computedSha256?: string }>;
+      packs: Array<{ packId: string; format: string; computedSha256?: string; eligibleRenderer?: string }>;
       instrumentMapCandidates: Record<string, { packId?: string; rendererUse: string }>;
-      rendererIntegration: { rule: string; safeProceduralFallbackMap: Record<string, string> };
+      rendererIntegration: { rule: string; eligibleRenderer: string; safeProceduralFallbackMap: Record<string, string> };
       licenseManifest: { commercialUseStatus: string; unsafeAssets: unknown[] };
     };
     assert.deepEqual(safePackPayload.readyPackIds.sort(), ["brushes_cc0", "upright_bass_apache", "warm_piano_mit"].sort());
     assert.deepEqual(safePackPayload.reviewRequiredPackIds, []);
     assert.deepEqual(safePackPayload.blockedPackIds, []);
-    assert.ok(safePackPayload.packs.some((pack) => pack.packId === "upright_bass_apache" && pack.format === "soundfont" && pack.computedSha256 === createHash("sha256").update(pianoSf2).digest("hex")));
+    assert.ok(safePackPayload.packs.some((pack) => pack.packId === "upright_bass_apache" && pack.format === "soundfont" && pack.eligibleRenderer === "fluidsynth" && pack.computedSha256 === createHash("sha256").update(pianoSf2).digest("hex")));
     assert.equal(safePackPayload.instrumentMapCandidates.realistic_piano.packId, "warm_piano_mit");
     assert.equal(safePackPayload.instrumentMapCandidates.upright_bass.packId, "upright_bass_apache");
     assert.equal(safePackPayload.instrumentMapCandidates.brush_drums.packId, "brushes_cc0");
-    assert.match(safePackPayload.rendererIntegration.rule, /Only packs with status=ready/);
+    assert.match(safePackPayload.rendererIntegration.rule, /status=ready/);
+    assert.equal(safePackPayload.rendererIntegration.eligibleRenderer, "fluidsynth");
     assert.equal(safePackPayload.rendererIntegration.safeProceduralFallbackMap.brush_drums, "jazz_brushes");
     assert.equal(safePackPayload.licenseManifest.commercialUseStatus, "allowed");
     assert.equal(safePackPayload.licenseManifest.unsafeAssets.length, 0);
     const safePackRegistry = await readProjectFile(ctx.projectRoot, project.id, "music/jazz-instrument-packs.json");
     assert.match(safePackRegistry, /warm_piano_mit/);
+
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${oldPath}`;
+    try {
+      const soundfontResult = await soundfontRender!.handler({
+        projectId: project.id,
+        compositionManifestPath: "music/edited-composition-manifest.json",
+        soundfontPackId: "upright_bass_apache",
+        stems: true,
+        sampleRate: 8000
+      }, ctx);
+      assert.equal(soundfontResult.ok, true);
+      const soundfontPayload = soundfontResult.structuredContent as {
+        renderer: string;
+        qualityTier: string;
+        productionReady: boolean;
+        fullMixPath: string;
+        stemPaths: Record<string, string>;
+        soundfont: { packId: string; computedSha256: string };
+        renderReport: { renderedFormats: string[]; peakLevel: number; rms: number };
+      };
+      assert.equal(soundfontPayload.renderer, "fluidsynth");
+      assert.equal(soundfontPayload.qualityTier, "production_candidate");
+      assert.equal(soundfontPayload.productionReady, true);
+      assert.equal(soundfontPayload.fullMixPath, "music/rendered-soundfont.wav");
+      assert.ok(Object.keys(soundfontPayload.stemPaths).length > 0);
+      assert.equal(soundfontPayload.soundfont.packId, "upright_bass_apache");
+      assert.equal(soundfontPayload.soundfont.computedSha256, createHash("sha256").update(pianoSf2).digest("hex"));
+      assert.deepEqual(soundfontPayload.renderReport.renderedFormats, ["wav"]);
+      assert.ok(soundfontPayload.renderReport.peakLevel > 0);
+      assert.ok(soundfontPayload.renderReport.rms > 0);
+      const rendered = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, soundfontPayload.fullMixPath));
+      assert.equal(rendered.subarray(0, 4).toString("ascii"), "RIFF");
+    } finally {
+      process.env.PATH = oldPath;
+    }
 
     const exportResult = await exportAssets!.handler({
       projectId: project.id,
@@ -771,6 +863,7 @@ test("export_music_project creates a music package with README, playlist, checks
       missingFiles: string[];
       licenseWarnings: string[];
       unsupportedFormats: string[];
+      productionGateWarnings: string[];
       naming: { baseFileName: string };
     };
     assert.equal(payload.packageName, "cafe-jazz-background-pack");
@@ -781,6 +874,7 @@ test("export_music_project creates a music package with README, playlist, checks
     assert.ok(payload.licenseWarnings.some((warning) => warning.includes("attribution")));
     assert.ok(payload.licenseWarnings.some((warning) => warning.includes("business demos")));
     assert.ok(payload.unsupportedFormats.some((warning) => warning.includes("MP3")));
+    assert.ok(payload.productionGateWarnings.some((warning) => warning.includes("preview_only")));
     assert.match(payload.naming.baseFileName, /cafe-jazz-background-pack-v2-92bpm-f-3600s/);
     assert.ok(result.artifacts.includes("music/export-package/README.md"));
     assert.ok(result.artifacts.includes("music/export-package/playlist.json"));
@@ -837,10 +931,100 @@ test("export_music_project fails when requested encoded formats are missing", as
     }, ctx);
     assert.equal(result.ok, false);
     assert.ok(result.errors.some((error) => error.includes("MP3 export was requested")));
-    const payload = result.structuredContent as { missingFiles: string[]; licenseWarnings: string[]; unsupportedFormats: string[] };
+    const payload = result.structuredContent as { missingFiles: string[]; licenseWarnings: string[]; unsupportedFormats: string[]; productionGateWarnings: string[] };
     assert.deepEqual(payload.missingFiles, []);
     assert.deepEqual(payload.licenseWarnings, []);
     assert.ok(payload.unsupportedFormats.some((warning) => warning.includes("MP3")));
+    assert.ok(payload.productionGateWarnings.some((warning) => warning.includes("preview_only")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("render_midi_with_soundfont blocks missing renderer and unsafe packs", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-soundfont-gate-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "SoundFont gate", createdByClientId: "producer" });
+    const compose = getToolModule("compose_music");
+    const packManager = getToolModule("manage_jazz_instrument_packs");
+    const soundfontRender = getToolModule("render_midi_with_soundfont");
+    assert.ok(compose);
+    assert.ok(packManager);
+    assert.ok(soundfontRender);
+
+    await compose!.handler({
+      projectId: project.id,
+      title: "SoundFont Gate Cue",
+      style: "cafe_jazz",
+      durationSeconds: 8,
+      outputManifestPath: "music/soundfont-gate.json",
+      outputMidiPath: "music/soundfont-gate.mid"
+    }, ctx);
+    const sf2 = fakeSoundfontBytes();
+    await writeProjectAsset(ctx.projectRoot, project.id, "instruments/unsafe.sf2", sf2, "audio/soundfont");
+    await packManager!.handler({
+      projectId: project.id,
+      packs: [{
+        packId: "unsafe_unknown",
+        displayName: "Unsafe Unknown",
+        instrumentRole: "realistic_piano",
+        format: "soundfont",
+        assetPaths: ["instruments/unsafe.sf2"],
+        licenseType: "unknown",
+        source: "fixture",
+        commercialUseAllowed: true,
+        redistributionAllowed: true
+      }]
+    }, ctx);
+
+    const unsafeOldPath = process.env.PATH;
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${unsafeOldPath}`;
+    try {
+      const unsafeResult = await soundfontRender!.handler({
+        projectId: project.id,
+        compositionManifestPath: "music/soundfont-gate.json",
+        soundfontPackId: "unsafe_unknown"
+      }, ctx);
+      assert.equal(unsafeResult.ok, false);
+      assert.ok(unsafeResult.errors.some((error) => error.includes("not ready") || error.includes("unresolved risk")));
+      const unsafePayload = unsafeResult.structuredContent as { qualityTier: string; productionReady: boolean; blockingReasons: string[] };
+      assert.equal(unsafePayload.qualityTier, "preview_only");
+      assert.equal(unsafePayload.productionReady, false);
+      assert.ok(unsafePayload.blockingReasons.length > 0);
+    } finally {
+      process.env.PATH = unsafeOldPath;
+    }
+
+    await packManager!.handler({
+      projectId: project.id,
+      packs: [{
+        packId: "ready_pd",
+        displayName: "Ready PD",
+        instrumentRole: "realistic_piano",
+        format: "soundfont",
+        assetPaths: ["instruments/unsafe.sf2"],
+        licenseType: "public_domain",
+        source: "fixture",
+        commercialUseAllowed: true,
+        redistributionAllowed: true
+      }]
+    }, ctx);
+    const emptyBin = path.join(root, "empty-bin");
+    await mkdir(emptyBin, { recursive: true });
+    const oldPath = process.env.PATH;
+    process.env.PATH = emptyBin;
+    try {
+      const missingRendererResult = await soundfontRender!.handler({
+        projectId: project.id,
+        compositionManifestPath: "music/soundfont-gate.json",
+        soundfontPackId: "ready_pd"
+      }, ctx);
+      assert.equal(missingRendererResult.ok, false);
+      assert.ok(missingRendererResult.errors.some((error) => error.includes("FluidSynth is not available")));
+    } finally {
+      process.env.PATH = oldPath;
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1136,6 +1320,7 @@ test("music-workflow skill exposes music tools through dedicated, coding, and de
     "compose_music",
     "edit_midi",
     "render_midi_to_audio",
+    "render_midi_with_soundfont",
     "generate_jazz_harmony",
     "generate_drum_groove",
     "inspect_audio_quality",

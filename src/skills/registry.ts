@@ -311,6 +311,7 @@ Use this skill to discover the available workspace/project context before taking
       "compose_music",
       "edit_midi",
       "render_midi_to_audio",
+      "render_midi_with_soundfont",
       "generate_jazz_harmony",
       "generate_drum_groove",
       "inspect_audio_quality",
@@ -752,6 +753,7 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "compose_music",
       "edit_midi",
       "render_midi_to_audio",
+      "render_midi_with_soundfont",
       "generate_jazz_harmony",
       "generate_drum_groove",
       "inspect_audio_quality",
@@ -1310,6 +1312,7 @@ Use this skill for project-local 3D assets, game scene planning, gameplay QA, an
       "compose_music",
       "edit_midi",
       "render_midi_to_audio",
+      "render_midi_with_soundfont",
       "generate_jazz_harmony",
       "generate_drum_groove",
       "inspect_audio_quality",
@@ -1325,13 +1328,13 @@ Use this skill for original background music, MIDI sketches, WAV previews, jazz 
 - Start with \`create_music_style_brief\` when the user references a venue, brand, artist, or vibe; convert it into broad non-copying musical traits.
 - Use \`compose_music\` to generate the structured composition manifest and MIDI.
 - Use \`edit_midi\` for quantize, transpose, humanize, swing, and velocity shaping.
-- Use \`render_midi_to_audio\` for a project WAV preview from the built-in safe synth; MP3/OGG require a verified encoder step.
+- Use \`render_midi_to_audio\` for a project WAV preview from the built-in safe synth; it is always \`preview_only\`. Use \`render_midi_with_soundfont\` for FluidSynth + ready .sf2/.sf3 SoundFont \`production_candidate\` renders. MP3/OGG require a verified encoder step.
 - Use \`generate_jazz_harmony\` for section-aware original jazz progressions, piano voicings, bass guide tones, MIDI-ready voicing data, and variation notes before composing cafe/lounge tracks; use \`generate_drum_groove\` for section-aware MIDI-ready drum/brush grooves with swing, velocities, fills, background safety constraints, and variation maps.
 - Run \`inspect_audio_quality\` before delivery or publishing to check clipping, loudness, dynamic range, silence gaps, harshness/bass proxies, density, repetition, loop seams, session transitions, severity-ranked findings, and background suitability fixes.
 - Use \`assemble_original_music_session\` or \`assemble_music_session\` after 5-10 minute arrangements to create 30/60/90/120 minute background programs with energy profile, transition map, loudness report, source manifest, and render/export plan.
 - Use \`process_music_revision_feedback\` after an audition listener picks a version or leaves timestamped comments; turn subjective feedback into MIDI edit operations, arrangement/mix changes, QA checks, revision history, and the next tool sequence.
 - Use \`build_music_license_manifest\` before public demos, website/cafe/video/game use, ZIP exports, or client delivery to classify generated assets, soundfonts, samples, drum kits, ambience beds, stems, session mixes, attribution, and commercial-use safety.
-- Use \`manage_jazz_instrument_packs\` before claiming realistic piano/upright bass/brush drum rendering; register SFZ/SoundFont/WAV multisample/impulse-response packs, verify hashes, commercial-use permission, attribution, redistribution rules, GPL/LGPL/proprietary/non-commercial risk, and select only ready packs.
+- Use \`manage_jazz_instrument_packs\` before claiming realistic piano/upright bass/brush drum rendering; register SFZ/SoundFont/WAV multisample/impulse-response packs, verify hashes, commercial-use permission, attribution, redistribution rules, GPL/LGPL/proprietary/non-commercial risk, and select only ready packs. Production handoff requires commercial-safe ready SoundFont render evidence, not procedural preview audio.
 - Use \`export_music_assets\` for MIDI/WAV/chord-chart/license metadata handoff.
 - Do not copy melodies, lyrics, recordings, artist identity, or distinctive arrangements from copyrighted works.`
   },

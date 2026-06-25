@@ -2,6 +2,10 @@
 
 FROM mcr.microsoft.com/playwright:v1.61.0-noble AS build
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends fluidsynth ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY package*.json ./
@@ -13,6 +17,10 @@ COPY admin-ui ./admin-ui
 RUN npm run build
 
 FROM mcr.microsoft.com/playwright:v1.61.0-noble AS runtime
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends fluidsynth ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
     PORT=6859 \
