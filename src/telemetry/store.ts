@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { withKeyedLock } from "../shared/keyed-lock.js";
+import { redactSecrets } from "../shared/redact.js";
 
 // Persistent telemetry sink for MCP calls. This is the durable, accumulating tier behind
 // the in-memory activity ring (see activity.ts) — same capture chokepoint, two retention
@@ -75,6 +76,7 @@ export async function readTelemetryDay(day: string): Promise<TelemetryEvent[]> {
 async function persist(event: TelemetryEvent): Promise<void> {
   const safe: TelemetryEvent = { ...event };
   if (safe.args !== undefined) {
+    safe.args = redactSecrets(safe.args);
     let serialized: string;
     try {
       serialized = JSON.stringify(safe.args) ?? "";

@@ -365,6 +365,62 @@ test("admin session cookie Secure flag follows request and ADMIN_COOKIE_SECURE m
   });
 });
 
+test("admin user management protects the last active admin", async () => {
+  await withServer(async (baseUrl) => {
+    const { cookie, csrfToken } = await login(baseUrl);
+    const sessionBody = await (await fetch(`${baseUrl}/admin/api/session`, { headers: { Cookie: cookie } })).json() as { user?: { id?: string } };
+    const adminId = sessionBody.user?.id;
+    assert.ok(adminId);
+    const headers = { Cookie: cookie, "Content-Type": "application/json", "X-CSRF-Token": csrfToken };
+
+    const noOpRole = await fetch(`${baseUrl}/admin/api/users/${adminId}/role`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ role: "admin" })
+    });
+    assert.equal(noOpRole.status, 200);
+
+    const disableOnlyAdmin = await fetch(`${baseUrl}/admin/api/users/${adminId}/disable`, {
+      method: "POST",
+      headers
+    });
+    assert.equal(disableOnlyAdmin.status, 400);
+    assert.match(JSON.stringify(await disableOnlyAdmin.json()), /last active admin/);
+
+    const demoteOnlyAdmin = await fetch(`${baseUrl}/admin/api/users/${adminId}/role`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ role: "viewer" })
+    });
+    assert.equal(demoteOnlyAdmin.status, 400);
+    assert.match(JSON.stringify(await demoteOnlyAdmin.json()), /last active admin/);
+
+    await updateRegistrationSettings({ allowRegistration: true, allowedEmailDomains: [] });
+    const secondEmail = `second-admin-${Date.now()}@example.test`;
+    const secondPassword = "test-second-admin-password";
+    const secondUser = await registerUser(secondEmail, secondPassword);
+    await approveUser(secondUser.id, adminId);
+    const promoteSecond = await fetch(`${baseUrl}/admin/api/users/${secondUser.id}/role`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ role: "admin" })
+    });
+    assert.equal(promoteSecond.status, 200);
+
+    const secondLogin = await loginResponse(baseUrl, {}, secondPassword, secondEmail);
+    assert.equal(secondLogin.status, 200);
+
+    const demoteFirst = await fetch(`${baseUrl}/admin/api/users/${adminId}/role`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ role: "viewer" })
+    });
+    assert.equal(demoteFirst.status, 200);
+    const demoteFirstBody = await demoteFirst.json() as { user?: { role?: string } };
+    assert.equal(demoteFirstBody.user?.role, "viewer");
+  });
+});
+
 test("admin login rate limit locks repeated bad passwords and success clears failures", async () => {
   await withServer(async (baseUrl) => {
     process.env.ADMIN_COOKIE_SECURE = "auto";

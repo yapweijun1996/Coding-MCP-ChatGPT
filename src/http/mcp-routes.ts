@@ -27,6 +27,7 @@ import {
 import { asyncRoute } from "./util.js";
 import { asJsonRpcRequest, jsonRpcError, jsonRpcResult } from "./json-rpc.js";
 import { constantTimeEqual } from "../shared/crypto.js";
+import { redactSecrets } from "../shared/redact.js";
 
 const supportedProtocolVersions = new Set(["2024-11-05", "2025-03-26", "2025-06-18"]);
 
@@ -48,10 +49,17 @@ function previewArgs(value: unknown): { inputBytes: number; preview: unknown } {
     return { inputBytes: 0, preview: "[unserializable]" };
   }
   const inputBytes = Buffer.byteLength(serialized, "utf8");
-  if (serialized.length > maxArgsPreviewChars) {
-    return { inputBytes, preview: `${serialized.slice(0, maxArgsPreviewChars)}...[truncated ${serialized.length} chars]` };
+  const redacted = redactSecrets(value);
+  let redactedSerialized: string;
+  try {
+    redactedSerialized = JSON.stringify(redacted) ?? "";
+  } catch {
+    return { inputBytes, preview: "[unserializable]" };
   }
-  return { inputBytes, preview: value };
+  if (redactedSerialized.length > maxArgsPreviewChars) {
+    return { inputBytes, preview: `${redactedSerialized.slice(0, maxArgsPreviewChars)}...[truncated ${redactedSerialized.length} chars]` };
+  }
+  return { inputBytes, preview: redacted };
 }
 
 function getBearerToken(header: string | undefined): string | undefined {

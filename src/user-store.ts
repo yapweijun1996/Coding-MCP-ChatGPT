@@ -562,6 +562,9 @@ export function getPublicShareBasePathForUser(user: PublicUser | undefined): str
 export async function disableUser(userId: string): Promise<PublicUser> {
   const user = await getUserRecordById(userId);
   if (!user) throw new Error("User not found.");
+  if (user.role === "admin" && user.status === "active" && (await countActiveAdmins()) <= 1) {
+    throw new Error("Cannot remove or demote the last active admin.");
+  }
   user.status = "disabled";
   await upsertUser(user);
   return toPublicUser(user, await getProjectRootForUser(user.id));
@@ -570,9 +573,20 @@ export async function disableUser(userId: string): Promise<PublicUser> {
 export async function updateUserRole(userId: string, role: UserRole): Promise<PublicUser> {
   const user = await getUserRecordById(userId);
   if (!user) throw new Error("User not found.");
+  if (user.role === "admin" && user.status === "active" && role !== "admin" && (await countActiveAdmins()) <= 1) {
+    throw new Error("Cannot remove or demote the last active admin.");
+  }
   user.role = role;
   await upsertUser(user);
   return toPublicUser(user, await getProjectRootForUser(user.id));
+}
+
+async function countActiveAdmins(): Promise<number> {
+  if (pool) {
+    const rows = await query<{ count: string }>("select count(*)::text as count from users where role = 'admin' and status = 'active'");
+    return Number(rows[0]?.count ?? 0);
+  }
+  return state.users.filter((user) => user.role === "admin" && user.status === "active").length;
 }
 
 async function hasAnyAdmin(): Promise<boolean> {

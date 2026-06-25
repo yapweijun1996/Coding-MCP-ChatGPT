@@ -71,6 +71,48 @@ test("recordTelemetry truncates oversized args", async () => {
   }
 });
 
+test("recordTelemetry redacts sensitive args before persistence", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "telemetry-"));
+  try {
+    initializeTelemetry(root);
+    const time = "2026-06-20T11:30:00.000Z";
+    recordTelemetry({
+      id: "secret",
+      time,
+      method: "tools/call",
+      toolName: "upsert_env_config_entry",
+      ok: false,
+      args: {
+        projectId: "project_12345678",
+        inputTokens: 123,
+        password: "pw_should_not_persist",
+        token: "tok_should_not_persist",
+        nested: { apiKey: "key_should_not_persist" },
+        entry: {
+          secret: true,
+          value: "sk_live_should_not_persist",
+          safeDefault: "placeholder_should_not_persist"
+        }
+      }
+    });
+    await waitForFile(root);
+    const raw = await readFile(telemetryDayFilePath(time), "utf8");
+    assert.doesNotMatch(raw, /pw_should_not_persist|tok_should_not_persist|key_should_not_persist|sk_live_should_not_persist|placeholder_should_not_persist/);
+    const event = JSON.parse(raw.trim().split("\n").at(-1) as string);
+    assert.equal(event.args.projectId, "project_12345678");
+    assert.equal(event.args.inputTokens, 123);
+    assert.equal(event.args.password, "[redacted]");
+    assert.equal(event.args.token, "[redacted]");
+    assert.equal(event.args.nested.apiKey, "[redacted]");
+    assert.equal(event.args.entry.secret, "[redacted]");
+    assert.equal(event.args.entry.value, "[redacted]");
+    assert.equal(event.args.entry.safeDefault, "[redacted]");
+  } finally {
+    initializeTelemetry("");
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("recordTelemetry is a no-op (no throw) when telemetry is not initialized", async () => {
   initializeTelemetry("");
   assert.equal(isTelemetryEnabled(), false);

@@ -914,7 +914,11 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
   api.post("/users/:userId/disable", asyncRoute(async (req, res) => {
     const user = res.locals.currentUser as PublicUser;
     if (!requireAdmin(user, res)) return;
-    ok(res, { user: await disableUser(req.params.userId) });
+    try {
+      ok(res, { user: await disableUser(req.params.userId) });
+    } catch (error) {
+      fail(res, 400, error instanceof Error ? error.message : "User disable failed.");
+    }
   }));
 
   api.post("/users/:userId/role", asyncRoute(async (req, res) => {
@@ -925,7 +929,11 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       fail(res, 400, "Invalid role.");
       return;
     }
-    ok(res, { user: await updateUserRole(req.params.userId, role) });
+    try {
+      ok(res, { user: await updateUserRole(req.params.userId, role) });
+    } catch (error) {
+      fail(res, 400, error instanceof Error ? error.message : "User role update failed.");
+    }
   }));
 
   api.get("/registration-settings", asyncRoute(async (_req, res) => {
