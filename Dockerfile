@@ -14,7 +14,7 @@ RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src
 COPY admin-ui ./admin-ui
-RUN npm run build
+RUN NODE_OPTIONS=--max-old-space-size=2048 npm run build
 
 FROM mcr.microsoft.com/playwright:v1.61.0-noble AS runtime
 

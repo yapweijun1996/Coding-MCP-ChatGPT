@@ -86,6 +86,7 @@ export interface ToolDefinition {
 
 export interface ToolContext {
   publicBaseUrl: string;
+  contentBaseUrl?: string;
   workspaceRoot: string;
   commandTimeoutMs: number;
   shareRoot: string;
@@ -4263,7 +4264,7 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
 
     if (name === "publish_project") {
       const input = publishProjectInputSchema.parse(rawInput);
-      const project = await publishProject(ctx.projectRoot, input.projectId, ctx.publicBaseUrl, input.entryFile, { shareBasePath: ctx.publicShareBasePath });
+      const project = await publishProject(ctx.projectRoot, input.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, input.entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
       return {
         ok: true,
         summary: `Published project ${input.projectId}.`,

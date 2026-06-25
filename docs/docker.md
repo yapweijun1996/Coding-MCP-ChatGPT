@@ -71,5 +71,6 @@ Set these in `.env.docker` for the public domain:
 
 ```bash
 PUBLIC_BASE_URL=https://gmb01.xyz
+CONTENT_BASE_URL=https://content.gmb01.xyz
 KB_MCP_OAUTH_ISSUER=https://gmb01.xyz
 ```

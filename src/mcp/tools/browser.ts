@@ -131,7 +131,7 @@ export async function createBrowserSessionSnapshot(session: BrowserSession): Pro
 }
 
 async function buildScreenshotArtifact(
-  ctx: { publicBaseUrl: string; shareRoot: string; userId?: string },
+  ctx: { publicBaseUrl: string; contentBaseUrl?: string; shareRoot: string; userId?: string },
   sessionId: string,
   step: number,
   label: string,
@@ -169,7 +169,7 @@ async function getPageSnapshot(session: BrowserSession, screenshotUrl?: string):
 async function screenshotAndRespond(
   session: BrowserSession,
   label: string,
-  ctx: { publicBaseUrl: string; shareRoot: string },
+  ctx: { publicBaseUrl: string; contentBaseUrl?: string; shareRoot: string },
   summary: string,
   extraLogs: string[] = []
 ): Promise<ToolResult> {

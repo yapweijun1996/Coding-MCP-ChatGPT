@@ -38,6 +38,10 @@ if (process.argv.includes("--version")) {
 }
 const out = process.argv[process.argv.indexOf("-F") + 1];
 const midi = process.argv.find((arg) => arg.endsWith(".mid"));
+if (process.env.FAKE_FLUIDSYNTH_INVALID_RIFF) {
+  fs.writeFileSync(out, Buffer.concat([Buffer.from("RIFF", "ascii"), Buffer.from([0x04, 0x00, 0x00, 0x00]), Buffer.from("sfbk", "ascii")]));
+  process.exit(0);
+}
 if (process.env.EXPECT_MIDI_STATUS_HEX && midi) {
   const status = Number.parseInt(process.env.EXPECT_MIDI_STATUS_HEX, 16);
   const bytes = fs.readFileSync(midi);
@@ -990,6 +994,22 @@ test("export_music_project fails when requested encoded formats are missing", as
       outputAudioPath: "music/format-gate.wav",
       sampleRate: 12000
     }, ctx);
+    const encodedOnlyResult = await render!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/format-gate.json",
+      outputFormats: ["mp3"],
+      outputAudioPath: "music/encoded-only.mp3",
+      outputReportPath: "music/encoded-only-report.json",
+      sampleRate: 12000
+    }, ctx);
+    assert.equal(encodedOnlyResult.ok, true);
+    const encodedOnlyPayload = encodedOnlyResult.structuredContent as { fullMixPath: string; renderReport: { requestedFormats: string[]; renderedFormats: string[] } };
+    assert.equal(encodedOnlyPayload.fullMixPath, "music/encoded-only.wav");
+    assert.deepEqual(encodedOnlyPayload.renderReport.requestedFormats, ["mp3"]);
+    assert.deepEqual(encodedOnlyPayload.renderReport.renderedFormats, ["wav"]);
+    const encodedOnlyWav = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/encoded-only.wav"));
+    assert.equal(encodedOnlyWav.subarray(0, 4).toString("ascii"), "RIFF");
+    assert.equal(encodedOnlyWav.subarray(8, 12).toString("ascii"), "WAVE");
 
     const result = await exportProject!.handler({
       projectId: project.id,
@@ -1006,6 +1026,39 @@ test("export_music_project fails when requested encoded formats are missing", as
     assert.deepEqual(payload.licenseWarnings, []);
     assert.ok(payload.unsupportedFormats.some((warning) => warning.includes("MP3")));
     assert.ok(payload.productionGateWarnings.some((warning) => warning.includes("preview_only")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("music WAV processing tools reject invalid WAV inputs", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-invalid-wav-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Invalid WAV", createdByClientId: "producer" });
+    const normalize = getToolModule("normalize_music_loudness");
+    const master = getToolModule("apply_music_mix_master_chain");
+    assert.ok(normalize);
+    assert.ok(master);
+
+    await writeProjectAsset(ctx.projectRoot, project.id, "music/bad.wav", Buffer.from("not-a-real-wav", "utf8"), "audio/wav");
+
+    await assert.rejects(
+      normalize!.handler({
+        projectId: project.id,
+        audioPath: "music/bad.wav",
+        outputAudioPath: "music/bad-normalized.wav"
+      }, ctx),
+      /must be a readable PCM WAV file/
+    );
+    await assert.rejects(
+      master!.handler({
+        projectId: project.id,
+        audioPath: "music/bad.wav",
+        outputAudioPath: "music/bad-master.wav"
+      }, ctx),
+      /must be a readable PCM WAV file/
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1111,7 +1164,23 @@ test("render_midi_with_soundfont blocks missing renderer and unsafe packs", asyn
       assert.deepEqual(stemsPayload.stemPaths, {});
       assert.equal(stemsPayload.qualityTier, "preview_only");
       assert.equal(stemsPayload.productionReady, false);
+
+      process.env.FAKE_FLUIDSYNTH_INVALID_RIFF = "1";
+      const invalidRendererResult = await soundfontRender!.handler({
+        projectId: project.id,
+        compositionManifestPath: "music/soundfont-gate.json",
+        soundfontPackId: "ready_pd",
+        outputReportPath: "music/invalid-renderer-report.json"
+      }, ctx);
+      delete process.env.FAKE_FLUIDSYNTH_INVALID_RIFF;
+      assert.equal(invalidRendererResult.ok, false);
+      assert.ok(invalidRendererResult.errors.some((error) => error.includes("must be a readable PCM WAV file")));
+      const invalidRendererPayload = invalidRendererResult.structuredContent as { qualityTier: string; productionReady: boolean; fullMixPath?: string };
+      assert.equal(invalidRendererPayload.qualityTier, "preview_only");
+      assert.equal(invalidRendererPayload.productionReady, false);
+      assert.equal(invalidRendererPayload.fullMixPath, undefined);
     } finally {
+      delete process.env.FAKE_FLUIDSYNTH_INVALID_RIFF;
       process.env.PATH = readyOldPathForInputValidation;
     }
     const emptyBin = path.join(root, "empty-bin");

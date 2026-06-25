@@ -2817,7 +2817,7 @@ export const projectTools: ToolModule[] = [
         };
       }
 
-      const published = await publishProject(ctx.projectRoot, project.id, ctx.publicBaseUrl, validation.entryFile, { shareBasePath: ctx.publicShareBasePath });
+      const published = await publishProject(ctx.projectRoot, project.id, ctx.contentBaseUrl ?? ctx.publicBaseUrl, validation.entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
       let browserInspection: Record<string, unknown> | undefined;
       let inspectionReportUrl: string | undefined;
       if (parsed.browserValidation) {
@@ -2930,7 +2930,7 @@ export const projectTools: ToolModule[] = [
     schema: screenshotProjectInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof screenshotProjectInputSchema>;
-      const published = await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile, { shareBasePath: ctx.publicShareBasePath });
+      const published = await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
       const results = await inspectWebpageUrl(published.publishedUrl!, {
         viewports: parsed.viewports,
         waitUntil: "networkidle",
@@ -2949,7 +2949,7 @@ export const projectTools: ToolModule[] = [
           contentType: screenshot.contentType,
           content: screenshot.buffer
         });
-        const screenshotUrl = makeArtifactUrl(ctx.publicBaseUrl, artifact.id, artifact.filename);
+        const screenshotUrl = makeArtifactUrl(ctx.contentBaseUrl ?? ctx.publicBaseUrl, artifact.id, artifact.filename);
         result.screenshotUrl = screenshotUrl;
         screenshotUrls.push(screenshotUrl);
       }
@@ -3060,7 +3060,7 @@ export const projectTools: ToolModule[] = [
         }
 
         if (parsed.browserValidation) {
-          const published = await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, validation.entryFile, { shareBasePath: ctx.publicShareBasePath });
+          const published = await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, validation.entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
           attempt.publishedUrl = published.publishedUrl;
           const browserResults = await inspectWebpageUrl(published.publishedUrl!, {
             viewports: ["desktop", "tablet", "mobile"],
@@ -3271,7 +3271,7 @@ export const projectTools: ToolModule[] = [
     schema: publishProjectInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof publishProjectInputSchema>;
-      const project = await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile, { shareBasePath: ctx.publicShareBasePath });
+      const project = await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
       return { ok: true, summary: `Published project ${parsed.projectId}.`, jobId: parsed.projectId, previewUrl: project.publishedUrl, shareUrl: project.publishedUrl, artifacts: [project.entryFile], logs: [JSON.stringify(project, null, 2)], errors: [] };
     }
   },
@@ -3293,7 +3293,7 @@ export const projectTools: ToolModule[] = [
     schema: validateProjectInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof validateProjectInputSchema>;
-      const report = await publishProjectAndReport(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.entryFile, { shareBasePath: ctx.publicShareBasePath });
+      const report = await publishProjectAndReport(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
       return {
         ok: report.ok,
         summary: report.summary,

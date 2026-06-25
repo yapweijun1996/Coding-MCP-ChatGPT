@@ -103,7 +103,7 @@ async function cleanupExpiredVisibleBrowserControl(): Promise<void> {
 }
 
 export function registerMcpRoutes(app: express.Express, config: ServerConfig): void {
-  const { publicBaseUrl, projectRoot, workspaceRoot, shareRoot, artifactRoot, feedbackRoot, commandTimeoutMs, devToken } = config;
+  const { publicBaseUrl, contentBaseUrl, projectRoot, workspaceRoot, shareRoot, artifactRoot, feedbackRoot, commandTimeoutMs, devToken } = config;
 
   function unauthorized(res: express.Response): undefined {
     res
@@ -233,6 +233,7 @@ export function registerMcpRoutes(app: express.Express, config: ServerConfig): v
       try {
         const result = await callTool(name, toolArgs, {
           publicBaseUrl,
+          contentBaseUrl,
           workspaceRoot: auth.workspaceRoot,
           commandTimeoutMs,
           shareRoot,

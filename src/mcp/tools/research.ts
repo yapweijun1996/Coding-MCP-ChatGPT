@@ -302,7 +302,7 @@ export const researchTools: ToolModule[] = [
     schema: projectIdSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof projectIdSchema>;
-      const report = await publishResearchReport(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, { shareBasePath: ctx.publicShareBasePath });
+      const report = await publishResearchReport(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
       return {
         ok: report.ok,
         summary: report.summary,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, request } from "node:http";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +15,7 @@ process.env.ADMIN_PASSCODE = "test-admin-passcode";
 process.env.ADMIN_EMAIL = "admin@example.test";
 process.env.ADMIN_PASSWORD = "test-admin-password";
 process.env.PUBLIC_BASE_URL = "https://example.test";
+process.env.CONTENT_BASE_URL = "https://content.example.test";
 process.env.WORKSPACE_ROOT = path.join(root, "workspace");
 process.env.SHARE_ROOT = path.join(root, "shares");
 process.env.ARTIFACT_ROOT = path.join(root, "artifacts");
@@ -22,6 +23,7 @@ process.env.PROJECT_ROOT = path.join(root, "projects");
 process.env.USERS_ROOT = path.join(root, "users");
 process.env.USER_STATE_PATH = path.join(root, "state", "users-state.json");
 process.env.SKILL_STATE_PATH = path.join(root, "state", "skill-state.json");
+process.env.TOOL_STATE_PATH = path.join(root, "state", "tool-state.json");
 process.env.SITE_STATE_PATH = path.join(root, "state", "site-state.json");
 process.env.OAUTH_STATE_PATH = path.join(root, "state", "oauth-state.json");
 process.env.ADMIN_UI_DIST = path.join(root, "missing-admin-dist");
@@ -38,6 +40,29 @@ async function withServer<T>(fn: (baseUrl: string) => Promise<T>): Promise<T> {
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+}
+
+async function requestWithHost(baseUrl: string, pathname: string, host: string, headers: Record<string, string> = {}): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }> {
+  const url = new URL(pathname, baseUrl);
+  return new Promise((resolve, reject) => {
+    const req = request({
+      hostname: url.hostname,
+      port: url.port,
+      path: `${url.pathname}${url.search}`,
+      method: "GET",
+      headers: { Host: host, ...headers }
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => resolve({
+        status: res.statusCode ?? 0,
+        headers: res.headers,
+        body: Buffer.concat(chunks).toString("utf8")
+      }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 async function login(baseUrl: string): Promise<{ cookie: string; csrfToken: string }> {
@@ -63,6 +88,12 @@ test("admin API protects session endpoints and enforces CSRF", async () => {
     const anonymousSession = await fetch(`${baseUrl}/admin/api/session`);
     assert.equal(anonymousSession.status, 200);
     assert.equal((await anonymousSession.json() as { authenticated: boolean }).authenticated, false);
+
+    const malformedCookieSession = await fetch(`${baseUrl}/admin/api/session`, {
+      headers: { Cookie: "coding_mcp_session=%E0%A4%A" }
+    });
+    assert.equal(malformedCookieSession.status, 200);
+    assert.equal((await malformedCookieSession.json() as { authenticated: boolean }).authenticated, false);
 
     const protectedRead = await fetch(`${baseUrl}/admin/api/overview`);
     assert.equal(protectedRead.status, 401);
@@ -123,17 +154,26 @@ test("profile username controls public username share URLs", async () => {
       createdByClientId: "test-client"
     });
     await writeProjectFile(userProjectRoot, project.id, "index.html", "<!doctype html><html><head><title>Named</title></head><body>Named</body></html>");
-    const initiallyPublished = await publishProject(userProjectRoot, project.id, "https://example.test", "index.html");
+    const initiallyPublished = await publishProject(userProjectRoot, project.id, "https://content.example.test", "index.html", { privateBaseUrl: "https://example.test" });
     assert.equal(initiallyPublished.publishedUrl, `https://example.test/share/${project.id}/index.html`);
     assert.equal(initiallyPublished.shareAccess, "private");
 
     const anonymousPrivateShare = await fetch(`${baseUrl}/share/${project.id}/index.html`);
     assert.equal(anonymousPrivateShare.status, 404);
     assert.equal(anonymousPrivateShare.headers.get("cache-control"), "private, no-store");
+    const malformedCookiePrivateShare = await fetch(`${baseUrl}/share/${project.id}/index.html`, {
+      headers: { Cookie: "coding_mcp_session=%E0%A4%A" }
+    });
+    assert.equal(malformedCookiePrivateShare.status, 404);
     const signedInPrivateShare = await fetch(`${baseUrl}/share/${project.id}/index.html`, { headers: { Cookie: cookie } });
     assert.equal(signedInPrivateShare.status, 200);
     assert.equal(signedInPrivateShare.headers.get("cache-control"), "private, no-store");
     assert.equal(signedInPrivateShare.headers.get("vary"), "Cookie");
+    const appHostPrivateShare = await requestWithHost(baseUrl, `/share/${project.id}/index.html`, "example.test", { Cookie: cookie });
+    assert.equal(appHostPrivateShare.status, 200);
+    const appHostPrivateShareCsp = String(appHostPrivateShare.headers["content-security-policy"] ?? "");
+    assert.match(appHostPrivateShareCsp, /sandbox/);
+    assert.doesNotMatch(appHostPrivateShareCsp, /allow-same-origin/);
 
     const invalidProfile = await fetch(`${baseUrl}/admin/api/profile`, {
       method: "POST",
@@ -161,6 +201,8 @@ test("profile username controls public username share URLs", async () => {
 
     const namedShare = await fetch(`${baseUrl}/@demo_user/share/${project.id}/index.html`);
     assert.equal(namedShare.status, 404);
+    const signedInNamedShare = await requestWithHost(baseUrl, `/@demo_user/share/${project.id}/index.html`, "example.test", { Cookie: cookie });
+    assert.equal(signedInNamedShare.status, 200);
 
     // Private published projects do not appear on the per-user public index.
     const userIndex = await fetch(`${baseUrl}/@demo_user`);
@@ -175,13 +217,30 @@ test("profile username controls public username share URLs", async () => {
       body: JSON.stringify({ shareAccess: "anyone_with_link" })
     });
     assert.equal(makePublic.status, 200);
-    const publicBody = await makePublic.json() as { project: { shareAccess?: string } };
+    const publicBody = await makePublic.json() as { project: { publishedUrl?: string; shareAccess?: string } };
     assert.equal(publicBody.project.shareAccess, "anyone_with_link");
+    assert.equal(publicBody.project.publishedUrl, `https://content.example.test/@demo_user/share/${project.id}/index.html`);
+
+    const appHostShare = await requestWithHost(baseUrl, `/share/${project.id}/index.html`, "example.test");
+    assert.equal(appHostShare.status, 302);
+    assert.equal(appHostShare.headers.location, `https://content.example.test/@demo_user/share/${project.id}/index.html`);
+
+    const contentHostShare = await requestWithHost(baseUrl, `/share/${project.id}/index.html`, "content.example.test");
+    assert.equal(contentHostShare.status, 200);
+    const shareCsp = String(contentHostShare.headers["content-security-policy"] ?? "");
+    assert.match(shareCsp, /sandbox/);
+    assert.match(shareCsp, /allow-same-origin/);
+    assert.match(shareCsp, /allow-forms/);
+    assert.match(shareCsp, /allow-downloads/);
+    assert.doesNotMatch(shareCsp, /form-action 'none'/);
+
+    const contentHostAdmin = await requestWithHost(baseUrl, "/admin/api/session", "content.example.test");
+    assert.equal(contentHostAdmin.status, 404);
 
     const publicNamedShare = await fetch(`${baseUrl}/@demo_user/share/${project.id}/index.html`);
     assert.equal(publicNamedShare.status, 200);
     assert.match(publicNamedShare.headers.get("cache-control") ?? "", /public/);
-    assert.match(await publicNamedShare.text(), /rel="canonical" href="https:\/\/example\.test\/@demo_user\/share\//);
+    assert.match(await publicNamedShare.text(), /rel="canonical" href="https:\/\/content\.example\.test\/@demo_user\/share\//);
 
     const publicUserIndex = await fetch(`${baseUrl}/@demo_user`);
     assert.equal(publicUserIndex.status, 200);
@@ -287,7 +346,9 @@ test("site homepage serves at root and set_homepage is admin-gated", async () =>
     const home = await fetch(`${baseUrl}/`);
     assert.equal(home.status, 200);
     assert.match(await home.text(), /HOMEPAGE_MARKER/);
-    assert.ok((home.headers.get("content-security-policy") ?? "").includes("form-action 'self'"));
+    const homepageCsp = home.headers.get("content-security-policy") ?? "";
+    assert.match(homepageCsp, /sandbox/);
+    assert.doesNotMatch(homepageCsp, /allow-same-origin/);
 
     const css = await fetch(`${baseUrl}/styles.css`);
     assert.equal(css.status, 200);

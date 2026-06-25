@@ -8,15 +8,17 @@ import { callTool } from "../src/mcp/router.js";
 import type { ToolContext } from "../src/mcp/types.js";
 import { skillRegistry } from "../src/skills/registry.js";
 import { initializeSkillState, isSkillEnabled, resetSkillStateForTests, setSkillEnabled } from "../src/skills/state.js";
-import { getToolAccess, isToolEffectivelyEnabled, resetToolStatesForTests, setToolEnabled } from "../src/tool-state.js";
+import { getToolAccess, initializeToolState, isToolEffectivelyEnabled, resetToolStatesForTests, setToolEnabled } from "../src/tool-state.js";
 
 async function withIsolatedSkillState<T>(run: (statePath: string) => Promise<T> | T): Promise<T> {
   const root = await mkdtemp(path.join(tmpdir(), "coding-mcp-skills-"));
   const statePath = path.join(root, "skill-state.json");
+  const toolStatePath = path.join(root, "tool-state.json");
   try {
     initializeSkillState(statePath);
     resetSkillStateForTests(statePath);
-    resetToolStatesForTests();
+    initializeToolState(toolStatePath);
+    resetToolStatesForTests(toolStatePath);
     return await run(statePath);
   } finally {
     resetSkillStateForTests();
@@ -93,6 +95,27 @@ test("raw tool override can still disable a tool inside an enabled skill", async
     assert.equal(access.skillEnabled, true);
     assert.equal(access.access, "blocked_by_tool");
     assert.equal(isToolEffectivelyEnabled("deliver_static_project"), false);
+  });
+});
+
+test("raw tool override persists admin toggles", async () => {
+  await withIsolatedSkillState(async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "coding-mcp-tools-"));
+    const statePath = path.join(root, "tool-state.json");
+    try {
+      initializeToolState(statePath);
+      assert.equal(isToolEffectivelyEnabled("deliver_static_project"), true);
+      setToolEnabled("deliver_static_project", false);
+      assert.equal(isToolEffectivelyEnabled("deliver_static_project"), false);
+
+      initializeToolState(statePath);
+      const access = getToolAccess("deliver_static_project");
+      assert.equal(access.toolEnabled, false);
+      assert.equal(access.access, "blocked_by_tool");
+    } finally {
+      resetToolStatesForTests();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -193,6 +193,7 @@ export interface OverviewResult extends ApiResult {
 
 export interface SettingsResult extends ApiResult {
   publicBaseUrl: string;
+  contentBaseUrl: string;
   workspaceRoot: string;
   projectRoot: string;
   shareRoot: string;

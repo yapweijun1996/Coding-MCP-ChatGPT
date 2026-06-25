@@ -263,6 +263,7 @@ export interface ProjectTaskGraph {
 export interface PublishProjectOptions {
   shareBasePath?: string;
   shareAccess?: ProjectShareAccess;
+  privateBaseUrl?: string;
 }
 
 export const maxProjectFileBytes = 1024 * 1024;
@@ -1497,11 +1498,13 @@ export async function publishProject(projectRoot: string, projectId: string, pub
 
     const safeEntryFile = assertSafeProjectFilePath(entryFile ?? metadata.entryFile);
     await stat(resolveProjectFilePath(projectRoot, projectId, safeEntryFile));
-    const publishedUrl = makeProjectPublicUrl(publicBaseUrl, options.shareBasePath, projectId, safeEntryFile);
+    const shareAccess = options.shareAccess ?? metadata.shareAccess ?? "private";
+    const urlBase = shareAccess === "private" && options.privateBaseUrl ? options.privateBaseUrl : publicBaseUrl;
+    const publishedUrl = makeProjectPublicUrl(urlBase, options.shareBasePath, projectId, safeEntryFile);
     const updated = addHistory({
       ...metadata,
       status: "published" as ProjectStatus,
-      shareAccess: options.shareAccess ?? metadata.shareAccess ?? "private",
+      shareAccess,
       entryFile: safeEntryFile,
       publishedUrl
     }, {
@@ -1582,14 +1585,20 @@ export async function setProjectStatus(projectRoot: string, projectId: string, s
 export async function setProjectShareAccess(
   projectRoot: string,
   projectId: string,
-  shareAccess: ProjectShareAccess
+  shareAccess: ProjectShareAccess,
+  options: Pick<PublishProjectOptions, "privateBaseUrl" | "shareBasePath"> & { publicBaseUrl?: string } = {}
 ): Promise<ProjectMetadata> {
   return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
     const metadata = await getProject(projectRoot, projectId);
     if (metadata.status === "deleted") throw new Error("Cannot update a deleted project.");
+    const urlBase = shareAccess === "private" && options.privateBaseUrl ? options.privateBaseUrl : options.publicBaseUrl;
+    const publishedUrl = metadata.status === "published" && urlBase
+      ? makeProjectPublicUrl(urlBase, options.shareBasePath, projectId, metadata.entryFile)
+      : metadata.publishedUrl;
     const updated = addHistory({
       ...metadata,
-      shareAccess
+      shareAccess,
+      publishedUrl
     }, {
       toolName: "set_project_share_access",
       ok: true,

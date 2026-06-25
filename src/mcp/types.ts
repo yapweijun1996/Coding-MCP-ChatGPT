@@ -20,6 +20,7 @@ export interface ToolDefinition {
 
 export interface ToolContext {
   publicBaseUrl: string;
+  contentBaseUrl?: string;
   workspaceRoot: string;
   commandTimeoutMs: number;
   shareRoot: string;

@@ -10,6 +10,7 @@ export interface ServerConfig {
   port: number;
   host: string;
   publicBaseUrl: string;
+  contentBaseUrl: string;
   workspaceRoot: string;
   shareRoot: string;
   artifactRoot: string;
@@ -21,6 +22,7 @@ export interface ServerConfig {
   usersRoot: string;
   userStatePath: string;
   skillStatePath: string;
+  toolStatePath: string;
   siteStatePath: string;
   blogStatePath: string;
   commandTimeoutMs: number;
@@ -32,11 +34,13 @@ export interface ServerConfig {
 
 function resolveConfig(): ServerConfig {
   const publicBaseUrl = process.env.PUBLIC_BASE_URL ?? "https://gmb01.xyz";
+  const contentBaseUrl = process.env.CONTENT_BASE_URL ?? publicBaseUrl;
   const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
   return {
     port: Number.parseInt(process.env.PORT ?? "6859", 10),
     host: process.env.HOST ?? "127.0.0.1",
     publicBaseUrl,
+    contentBaseUrl,
     workspaceRoot,
     shareRoot: process.env.SHARE_ROOT ?? `${workspaceRoot}/.shares`,
     artifactRoot: process.env.ARTIFACT_ROOT ?? `${workspaceRoot}/.artifacts`,
@@ -48,6 +52,7 @@ function resolveConfig(): ServerConfig {
     usersRoot: process.env.USERS_ROOT ?? `${workspaceRoot}/.users`,
     userStatePath: process.env.USER_STATE_PATH ?? `${workspaceRoot}/.state/users-state.json`,
     skillStatePath: process.env.SKILL_STATE_PATH ?? `${workspaceRoot}/.state/skill-state.json`,
+    toolStatePath: process.env.TOOL_STATE_PATH ?? `${workspaceRoot}/.state/tool-state.json`,
     siteStatePath: process.env.SITE_STATE_PATH ?? `${workspaceRoot}/.state/site-state.json`,
     blogStatePath: process.env.BLOG_STATE_PATH ?? `${workspaceRoot}/.state/blog-state.json`,
     commandTimeoutMs: Number.parseInt(process.env.COMMAND_TIMEOUT_MS ?? "30000", 10),

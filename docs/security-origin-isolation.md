@@ -53,34 +53,28 @@ A **subdomain is sufficient** given the Origin check already in place:
   stronger (makes the request cross-*site*, so `SameSite=Lax` also blocks it) and
   is the recommended target if DNS/TLS cost allows.
 
-### Implementation steps
+### Current implementation
 
-1. **Add `CONTENT_BASE_URL` env** (default to `PUBLIC_BASE_URL` so existing
-   single-origin deploys keep working until DNS is ready).
-2. **Route published/share content by host.** Either:
-   - run a second Express listener / vhost that only mounts the
-     `/share`, `/@:username/share`, `/artifact` routes and static published files, or
-   - keep one process but `return 404` for content routes when
-     `req.hostname === PUBLIC_BASE_URL` host, and `404` for OAuth/admin routes when
-     `req.hostname === CONTENT_BASE_URL` host.
-3. **Generate published URLs against `CONTENT_BASE_URL`.** Update
-   `makeProjectPublicUrl` (`src/projects/store.ts:319`) and every canonical-URL
-   builder in `src/server.ts` (lines ~489, 517, 533) to use the content host.
-4. **Set the session cookie host-only on the app host only** (already the case —
-   keep it; do **not** add a `Domain=.gmb01.xyz` attribute, which would leak the
-   cookie to the content subdomain).
-5. **Keep the Origin check** in `/oauth/approve` (it now also blocks the
-   cross-subdomain POST).
-6. **Add a strict CSP** on content responses as belt-and-suspenders, e.g.
-   `Content-Security-Policy: sandbox allow-scripts; form-action 'none';`
-   so even on the content origin a published page cannot POST to form endpoints.
-7. **Cloudflare / reverse proxy:** add the new hostname, TLS cert, and a route to
-   the same backend (see `docs/cloudflare.md`).
+1. `CONTENT_BASE_URL` controls generated project/share/artifact URLs. It defaults
+   to `PUBLIC_BASE_URL` for local development and old single-origin deployments.
+2. When `CONTENT_BASE_URL` and `PUBLIC_BASE_URL` have different hosts, the content
+   host rejects app-only routes such as `/admin`, `/mcp`, `/authorize`, `/token`,
+   `/blog`, `/health`, and `/outcome`.
+3. App-host `/share/*` and `/@:username/share/*` requests redirect to the content
+   host for backward compatibility.
+4. Published project/share/artifact HTML is served with a sandbox CSP that does
+   not include `allow-same-origin`.
+5. The admin session cookie remains host-only. Do **not** add a `Domain=.gmb01.xyz`
+   attribute, because that would leak the cookie to the content subdomain.
+6. The Origin check in `/oauth/approve` remains required and blocks cross-subdomain
+   approval attempts.
+7. Cloudflare / reverse proxy must route both hostnames to the same backend (see
+   `docs/cloudflare.md`).
 
 ### Cutover notes
 
-- Existing published URLs on the main origin will need redirects
-  (`301 gmb01.xyz/share/* → content.gmb01.xyz/share/*`) for backward compatibility.
+- Existing published URLs on the main origin redirect to the content host for
+  backward compatibility.
 - The OAuth discovery documents (`/.well-known/...`) must keep pointing
   `authorization_servers` / `resource` at `PUBLIC_BASE_URL`, not the content host.
 

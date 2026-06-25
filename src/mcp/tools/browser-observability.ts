@@ -14,6 +14,7 @@ import {
 
 type ToolContext = {
   publicBaseUrl: string;
+  contentBaseUrl?: string;
   shareRoot: string;
   artifactRoot: string;
   userId?: string;
@@ -318,7 +319,7 @@ async function makeImageArtifact(ctx: ToolContext, filename: string, image: Buff
     contentType: "image/png",
     content: image
   });
-  return makeArtifactUrl(ctx.publicBaseUrl, artifact.id, artifact.filename);
+  return makeArtifactUrl(ctx.contentBaseUrl ?? ctx.publicBaseUrl, artifact.id, artifact.filename);
 }
 
 async function makeJsonArtifact(ctx: ToolContext, filename: string, payload: unknown): Promise<string> {
@@ -328,7 +329,7 @@ async function makeJsonArtifact(ctx: ToolContext, filename: string, payload: unk
     contentType: "application/json",
     content: Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, "utf8")
   });
-  return makeArtifactUrl(ctx.publicBaseUrl, artifact.id, artifact.filename);
+  return makeArtifactUrl(ctx.contentBaseUrl ?? ctx.publicBaseUrl, artifact.id, artifact.filename);
 }
 
 async function makeShareArtifact(ctx: ToolContext, filename: string, title: string, body: string): Promise<string> {

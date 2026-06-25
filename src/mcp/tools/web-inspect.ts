@@ -213,7 +213,7 @@ function artifactRoot(ctx: ToolContext): string {
 
 async function saveArtifactUrl(ctx: ToolContext, filename: string, contentType: string, content: Buffer | string): Promise<string> {
   const artifact = await createArtifact({ artifactRoot: artifactRoot(ctx), filename, contentType, content });
-  return makeArtifactUrl(ctx.publicBaseUrl, artifact.id, artifact.filename);
+  return makeArtifactUrl(ctx.contentBaseUrl ?? ctx.publicBaseUrl, artifact.id, artifact.filename);
 }
 
 function resultWithoutImages(result: ViewportResult): Omit<ViewportResult, "screenshotDataUrl"> {

@@ -480,7 +480,7 @@ async function copyPublishedDist(ctx: ToolContext, projectId: string, distRoot: 
   }
   const validation = await validateProject(ctx.projectRoot, projectId, entryFile);
   if (!validation.ok) throw new Error(`Published dist validation failed: ${validation.errors.join("; ")}`);
-  const published = await publishProject(ctx.projectRoot, projectId, ctx.publicBaseUrl, entryFile, { shareBasePath: ctx.publicShareBasePath });
+  const published = await publishProject(ctx.projectRoot, projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
   const report = { projectId, publishedUrl: published.publishedUrl, entryFile, files: written, validation };
   await appendProjectTaskHistory(ctx.projectRoot, projectId, {
     toolName: "publish_project_workspace",
@@ -845,7 +845,7 @@ export const projectDevTools: ToolModule[] = [
         }
         if (!videoPath) throw new Error("Playwright did not produce a video file.");
         const webmArtifact = await createArtifact({ artifactRoot: ctx.artifactRoot, filename: `${parsed.projectId}-recording.webm`, contentType: "video/webm", content: await readFile(videoPath) });
-        const webmArtifactUrl = makeArtifactUrl(ctx.publicBaseUrl, webmArtifact.id, webmArtifact.filename);
+        const webmArtifactUrl = makeArtifactUrl(ctx.contentBaseUrl ?? ctx.publicBaseUrl, webmArtifact.id, webmArtifact.filename);
         let artifactUrl = webmArtifactUrl;
         let format = "webm";
         const artifacts = [webmArtifactUrl];
@@ -855,7 +855,7 @@ export const projectDevTools: ToolModule[] = [
             const mp4Path = path.join(videoDir, `${parsed.projectId}-recording.mp4`);
             await maybeConvertWebmToMp4(videoPath, mp4Path, Math.max(30000, parsed.durationMs * 3));
             const mp4Artifact = await createArtifact({ artifactRoot: ctx.artifactRoot, filename: `${parsed.projectId}-recording.mp4`, contentType: "video/mp4", content: await readFile(mp4Path) });
-            artifactUrl = makeArtifactUrl(ctx.publicBaseUrl, mp4Artifact.id, mp4Artifact.filename);
+            artifactUrl = makeArtifactUrl(ctx.contentBaseUrl ?? ctx.publicBaseUrl, mp4Artifact.id, mp4Artifact.filename);
             artifacts.unshift(artifactUrl);
             format = "mp4";
           } catch (error) {

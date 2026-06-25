@@ -672,11 +672,59 @@ function addFinding(findings: AudioFinding[], severity: AudioFinding["severity"]
   findings.push({ severity, category, message, suggestedFix });
 }
 
+type PcmWavInfo = { sampleRate: number; bitDepth: number; channelCount: number; dataOffset: number; dataBytes: number };
+
+function parsePcmWav(buffer?: Buffer): { ok: true; info: PcmWavInfo } | { ok: false; reason: string } {
+  if (!buffer || buffer.length < 44) return { ok: false, reason: "Audio file is too small to be a PCM WAV." };
+  if (buffer.subarray(0, 4).toString("ascii") !== "RIFF" || buffer.subarray(8, 12).toString("ascii") !== "WAVE") {
+    return { ok: false, reason: "Audio file is not a RIFF/WAVE container." };
+  }
+  let offset = 12;
+  let format: { audioFormat: number; channelCount: number; sampleRate: number; bitDepth: number } | undefined;
+  let data: { offset: number; bytes: number } | undefined;
+  while (offset + 8 <= buffer.length) {
+    const id = buffer.subarray(offset, offset + 4).toString("ascii");
+    const size = buffer.readUInt32LE(offset + 4);
+    const chunkDataOffset = offset + 8;
+    const nextOffset = chunkDataOffset + size + (size % 2);
+    if (chunkDataOffset + size > buffer.length) return { ok: false, reason: `WAV chunk ${id} extends past end of file.` };
+    if (id === "fmt ") {
+      if (size < 16) return { ok: false, reason: "WAV fmt chunk is too short." };
+      format = {
+        audioFormat: buffer.readUInt16LE(chunkDataOffset),
+        channelCount: buffer.readUInt16LE(chunkDataOffset + 2),
+        sampleRate: buffer.readUInt32LE(chunkDataOffset + 4),
+        bitDepth: buffer.readUInt16LE(chunkDataOffset + 14)
+      };
+    } else if (id === "data") {
+      data = { offset: chunkDataOffset, bytes: size };
+      break;
+    }
+    offset = nextOffset;
+  }
+  if (!format) return { ok: false, reason: "WAV fmt chunk is missing." };
+  if (format.audioFormat !== 1) return { ok: false, reason: "Only PCM WAV audio is supported." };
+  if (format.bitDepth !== 16) return { ok: false, reason: `Unsupported WAV bit depth ${format.bitDepth}; expected 16-bit PCM.` };
+  if (format.channelCount < 1 || format.channelCount > 8) return { ok: false, reason: `Unsupported WAV channel count ${format.channelCount}.` };
+  if (format.sampleRate < 8000 || format.sampleRate > 192000) return { ok: false, reason: `Unsupported WAV sample rate ${format.sampleRate}.` };
+  if (!data) return { ok: false, reason: "WAV data chunk is missing." };
+  if (data.bytes === 0) return { ok: false, reason: "WAV data chunk is empty." };
+  return { ok: true, info: { sampleRate: format.sampleRate, bitDepth: format.bitDepth, channelCount: format.channelCount, dataOffset: data.offset, dataBytes: data.bytes } };
+}
+
+function assertPcmWav(buffer: Buffer, label: string): PcmWavInfo {
+  const parsed = parsePcmWav(buffer);
+  if (!parsed.ok) throw new Error(`${label} must be a readable PCM WAV file: ${parsed.reason}`);
+  return parsed.info;
+}
+
 function wavAnalysis(buffer?: Buffer) {
-  if (!buffer || buffer.subarray(0, 4).toString("ascii") !== "RIFF") {
+  const parsed = parsePcmWav(buffer);
+  if (!parsed.ok) {
     return {
       readable: false,
       format: "unknown",
+      formatError: parsed.reason,
       durationSeconds: 0,
       sampleRate: 0,
       bitDepth: 0,
@@ -698,12 +746,10 @@ function wavAnalysis(buffer?: Buffer) {
       endNearZero: true
     };
   }
-  const channelCount = buffer.readUInt16LE(22);
-  const sampleRate = buffer.readUInt32LE(24);
-  const bitDepth = buffer.readUInt16LE(34);
+  const { channelCount, sampleRate, bitDepth, dataOffset, dataBytes } = parsed.info;
+  const wav = buffer as Buffer;
   const bytesPerSample = Math.max(1, bitDepth / 8);
-  const dataOffset = 44;
-  const frameCount = Math.max(0, Math.floor((buffer.length - dataOffset) / Math.max(1, bytesPerSample * channelCount)));
+  const frameCount = Math.max(0, Math.floor(dataBytes / Math.max(1, bytesPerSample * channelCount)));
   const samples: number[] = [];
   let peak = 0;
   let rmsSum = 0;
@@ -718,7 +764,7 @@ function wavAnalysis(buffer?: Buffer) {
     let mono = 0;
     for (let channel = 0; channel < channelCount; channel += 1) {
       const offset = dataOffset + (frame * channelCount + channel) * bytesPerSample;
-      const value = bitDepth === 16 ? buffer.readInt16LE(offset) / 32768 : 0;
+      const value = bitDepth === 16 ? wav.readInt16LE(offset) / 32768 : 0;
       mono += value;
     }
     mono /= Math.max(1, channelCount);
@@ -1383,9 +1429,11 @@ function buildMusicRevisionPlan(parsed: z.infer<typeof processMusicRevisionFeedb
 function audioStats(buffer: Buffer) {
   let peak = 0;
   let rms = 0;
-  if (buffer.subarray(0, 4).toString("ascii") !== "RIFF") return { peak, rms, sampleCount: 0 };
-  const sampleCount = Math.max(0, Math.floor((buffer.length - 44) / 2));
-  for (let offset = 44; offset + 1 < buffer.length; offset += 2) {
+  const wav = parsePcmWav(buffer);
+  if (!wav.ok) return { peak, rms, sampleCount: 0 };
+  const sampleCount = Math.max(0, Math.floor(wav.info.dataBytes / 2));
+  const endOffset = wav.info.dataOffset + wav.info.dataBytes;
+  for (let offset = wav.info.dataOffset; offset + 1 < endOffset; offset += 2) {
     const value = buffer.readInt16LE(offset) / 32768;
     peak = Math.max(peak, Math.abs(value));
     rms += value * value;
@@ -1394,10 +1442,12 @@ function audioStats(buffer: Buffer) {
 }
 
 function normalizeWav(buffer: Buffer, targetRms: number) {
+  const wav = assertPcmWav(buffer, "audioPath");
   const before = audioStats(buffer);
   const output = Buffer.from(buffer);
   const gain = before.rms > 0 ? Math.min(4, targetRms / before.rms) : 1;
-  for (let offset = 44; offset + 1 < output.length; offset += 2) {
+  const endOffset = wav.dataOffset + wav.dataBytes;
+  for (let offset = wav.dataOffset; offset + 1 < endOffset; offset += 2) {
     const next = Math.max(-32767, Math.min(32767, Math.round(output.readInt16LE(offset) * gain)));
     output.writeInt16LE(next, offset);
   }
@@ -1405,9 +1455,11 @@ function normalizeWav(buffer: Buffer, targetRms: number) {
 }
 
 function limitWav(buffer: Buffer, ceiling: number) {
+  const wav = assertPcmWav(buffer, "audioPath");
   const output = Buffer.from(buffer);
   let limitedSamples = 0;
-  for (let offset = 44; offset + 1 < output.length; offset += 2) {
+  const endOffset = wav.dataOffset + wav.dataBytes;
+  for (let offset = wav.dataOffset; offset + 1 < endOffset; offset += 2) {
     const value = output.readInt16LE(offset) / 32768;
     const limited = Math.max(-ceiling, Math.min(ceiling, value));
     if (limited !== value) limitedSamples += 1;
@@ -1622,8 +1674,14 @@ async function writeSoundfontRenderFailure(ctx: ToolContext, parsed: z.infer<typ
 async function fluidSynthRender(soundfontPath: string, midiPath: string, outputPath: string, sampleRate: number, timeout: number) {
   await execFileAsync("fluidsynth", ["-ni", soundfontPath, midiPath, "-F", outputPath, "-r", String(sampleRate)], { timeout, maxBuffer: 1024 * 1024 });
   const output = await readFile(outputPath);
-  if (output.subarray(0, 4).toString("ascii") !== "RIFF") throw new Error("FluidSynth did not produce a valid WAV file.");
+  assertPcmWav(output, "FluidSynth output");
   return output;
+}
+
+function wavFallbackOutputPath(outputAudioPath: string) {
+  return path.extname(outputAudioPath).toLowerCase() === ".wav"
+    ? outputAudioPath
+    : `${outputAudioPath.replace(/\.[^/.]+$/, "")}.wav`;
 }
 
 function compositionWithSingleTrack(composition: Composition, track: string): Composition {
@@ -2342,7 +2400,7 @@ async function handleAssembleMusicSession(input: unknown, ctx: ToolContext) {
   const session = buildMusicSession(tracks, parsed);
   const manifestFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(session, null, 2)}\n`);
   const htmlFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputHtmlPath, renderSessionHtml(session));
-  const published = parsed.publish ? await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.outputHtmlPath, { shareBasePath: ctx.publicShareBasePath }) : undefined;
+  const published = parsed.publish ? await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.outputHtmlPath, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath }) : undefined;
   const structuredContent = { ...session, sessionManifestPath: manifestFile.path, sessionPagePath: htmlFile.path, publishedUrl: published?.publishedUrl };
   return {
     ok: session.warnings.length === 0,
@@ -2441,7 +2499,7 @@ export const musicWorkflowTools: ToolModule[] = [
       });
       const html = renderAuditionHtml(title, variations, parsed.allowDownloads);
       const htmlFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputHtmlPath, html);
-      const published = parsed.publish ? await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.outputHtmlPath, { shareBasePath: ctx.publicShareBasePath }) : undefined;
+      const published = parsed.publish ? await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.outputHtmlPath, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath }) : undefined;
       const selectedVersionWorkflow = {
         nextTool: "extend_music_arrangement",
         instructions: "Use the chosen version manifestPath as compositionManifestPath, then optionally run normalize_music_loudness and export_music_project.",
@@ -2644,7 +2702,7 @@ export const musicWorkflowTools: ToolModule[] = [
       const packageReportFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPackageReportPath, `${JSON.stringify(packageReport, null, 2)}\n`);
       const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Music Project Export</title><style>body{font-family:system-ui;margin:32px;max-width:960px}li{margin:8px 0}.warn{color:#9a3412}.ok{color:#166534}</style></head><body><h1>Music Project Export</h1><p>Generated original production music handoff.</p><h2>Download package</h2><ul><li><a href="${escapeHtml(readmeFile.path)}">README</a></li><li><a href="${escapeHtml(packageReportFile.path)}">Package report JSON</a></li><li><a href="${escapeHtml(playlistFile.path)}">Playlist metadata JSON</a></li>${fileInspection.exportedFiles.map((file) => `<li><a href="${escapeHtml(file.path)}">${escapeHtml(file.path)}</a> - ${escapeHtml(file.role)}</li>`).join("")}</ul><h2>Checks</h2><p class="${packageReport.missingFiles.length || packageReport.licenseWarnings.length || packageReport.productionGateWarnings.length ? "warn" : "ok"}">Missing files: ${packageReport.missingFiles.length}; license warnings: ${packageReport.licenseWarnings.length}; unsupported formats: ${packageReport.unsupportedFormats.length}; production gate warnings: ${packageReport.productionGateWarnings.length}</p><h2>Tracks</h2><ul>${tracks.map((track) => `<li>${escapeHtml(track.title)} - ${Math.round(track.durationSeconds / 60)} min, ${escapeHtml(track.key)}, ${track.tempo} BPM</li>`).join("")}</ul><h2>Session</h2><pre>${escapeHtml(JSON.stringify(session ?? {}, null, 2))}</pre></body></html>`;
       const htmlFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputHtmlPath, html);
-      const published = parsed.publish ? await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.outputHtmlPath, { shareBasePath: ctx.publicShareBasePath }) : undefined;
+      const published = parsed.publish ? await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.outputHtmlPath, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath }) : undefined;
       const manifest = { projectId: parsed.projectId, packageName, projectManifestPath: parsed.projectManifestPath, demoManifestPath: parsed.demoManifestPath, sessionManifestPath: parsed.sessionManifestPath, trackManifestPaths: parsed.trackManifestPaths, selectedVersionIds: parsed.selectedVersionIds, requestedExports: parsed.exports, demoUrl: demo?.publishedUrl, exportPagePath: htmlFile.path, publishedUrl: published?.publishedUrl, readmePath: readmeFile.path, packageReportPath: packageReportFile.path, playlistPath: playlistFile.path, exportedFiles: fileInspection.exportedFiles, missingFiles: fileInspection.missingFiles, brokenAudioReferences: fileInspection.brokenAudioReferences, largeFiles: fileInspection.largeFiles, unsupportedFormats, licenseWarnings, productionGateWarnings, renderReportPaths: parsed.renderReportPaths, resolvedRenderReports: productionGate.resolvedReports, naming, tracks, sessionSummary: session ? { targetDurationMinutes: session.targetDurationMinutes, slots: Array.isArray(session.schedule) ? session.schedule.length : 0 } : undefined, license: licenseManifest ?? { output: "generated_original", dependencies: ["Built-in safe synth unless external assets are added later."] }, packageNotes: ["ZIP/MP3/OGG export requires a verified archive/encoder step.", "ZIP bundle creation can be completed with export package archive tools after this music package manifest passes checks.", "MP3/OGG exports require verified encoded files; this tool reports missing encoded formats instead of fabricating them.", "Production export requires production_candidate render evidence from render_midi_with_soundfont."] };
       const manifestFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
       const blockingErrors = [
@@ -2843,13 +2901,15 @@ export const musicWorkflowTools: ToolModule[] = [
       const artifacts: string[] = [];
       let fullMixPath: string | undefined;
       const stemPaths: Record<string, string> = {};
-      if (parsed.outputFormats.includes("wav")) {
+      const needsWavFallback = parsed.outputFormats.some((format) => format !== "wav");
+      if (parsed.outputFormats.includes("wav") || needsWavFallback) {
         const audio = wavBuffer(composition, parsed.sampleRate, { instrumentMap: resolvedInstrumentMap, renderPreset: parsed.renderPreset });
-        const file = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputAudioPath, audio, "audio/wav");
+        const outputAudioPath = parsed.outputFormats.includes("wav") ? parsed.outputAudioPath : wavFallbackOutputPath(parsed.outputAudioPath);
+        const file = await writeProjectAsset(ctx.projectRoot, parsed.projectId, outputAudioPath, audio, "audio/wav");
         fullMixPath = file.path;
         artifacts.push(file.path);
       }
-      for (const unsupported of parsed.outputFormats.filter((format) => format !== "wav")) warnings.push(`${unsupported.toUpperCase()} output requires a verified encoder; WAV rendered instead.`);
+      for (const unsupported of parsed.outputFormats.filter((format) => format !== "wav")) warnings.push(`${unsupported.toUpperCase()} output requires a verified encoder; WAV preview rendered instead at ${fullMixPath}.`);
       if (parsed.stems) {
         for (const track of Object.keys(composition.tracks)) {
           const stemAudio = wavBuffer(composition, parsed.sampleRate, { instrumentMap: resolvedInstrumentMap, renderPreset: parsed.renderPreset, trackFilter: track });

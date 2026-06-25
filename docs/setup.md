@@ -46,8 +46,10 @@ export KB_MCP_HTTP_KEY=<高熵静态密钥，可选>
 export ADMIN_SESSION_SECRET=<随机字符串>
 export MCP_DEV_TOKEN=<本地验证用-token>
 export PUBLIC_BASE_URL=https://gmb01.xyz
+export CONTENT_BASE_URL=https://content.gmb01.xyz
 export WORKSPACE_ROOT=/Users/yapweijun/Documents/GitHub/Coding-MCP-ChatGPT
 export SHARE_ROOT=/Users/yapweijun/Documents/GitHub/Coding-MCP-ChatGPT/.shares
+export TOOL_STATE_PATH=/Users/yapweijun/Documents/GitHub/Coding-MCP-ChatGPT/.state/tool-state.json
 export COMMAND_TIMEOUT_MS=30000
 ```
 

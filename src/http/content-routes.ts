@@ -26,9 +26,37 @@ import {
 } from "../user-store.js";
 import { asyncRoute } from "./util.js";
 
-const homepageCsp = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https:; base-uri 'none'; form-action 'self';";
+const strictProjectContentCsp = "sandbox allow-scripts allow-popups allow-modals; form-action 'none';";
+const contentHostProjectCsp = "sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads; base-uri 'none'; form-action 'self';";
 const blogCsp = "default-src 'self' 'unsafe-inline' data: https:; base-uri 'none'; form-action 'self';";
 const sessionCookieName = "coding_mcp_session";
+
+function configuredHost(value: string): string {
+  try {
+    return new URL(value).host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function requestHost(req: express.Request): string {
+  return (req.get("host") ?? "").toLowerCase();
+}
+
+function sameConfiguredHost(req: express.Request, baseUrl: string): boolean {
+  const host = configuredHost(baseUrl);
+  return Boolean(host && requestHost(req) === host);
+}
+
+function configuredHostsAreSeparate(publicBaseUrl: string, contentBaseUrl: string): boolean {
+  const publicHost = configuredHost(publicBaseUrl);
+  const contentHost = configuredHost(contentBaseUrl);
+  return Boolean(publicHost && contentHost && publicHost !== contentHost);
+}
+
+function contentUrl(config: ServerConfig, pathAndQuery: string): string {
+  return `${config.contentBaseUrl.replace(/\/$/, "")}${pathAndQuery.startsWith("/") ? pathAndQuery : `/${pathAndQuery}`}`;
+}
 
 function parseCookies(header: string | undefined): Record<string, string> {
   const cookies: Record<string, string> = {};
@@ -36,7 +64,11 @@ function parseCookies(header: string | undefined): Record<string, string> {
   for (const part of header.split(";")) {
     const [rawName, ...rawValue] = part.trim().split("=");
     if (!rawName || rawValue.length === 0) continue;
-    cookies[rawName] = decodeURIComponent(rawValue.join("="));
+    try {
+      cookies[rawName] = decodeURIComponent(rawValue.join("="));
+    } catch {
+      continue;
+    }
   }
   return cookies;
 }
@@ -81,7 +113,7 @@ function injectCanonicalLink(html: string, canonicalUrl: string): string {
   return `${link}\n${html}`;
 }
 
-async function sendPublishedProjectFile(req: express.Request, res: express.Response, root: string, projectId: string, filename: string, canonicalUrl?: string, requireShareAccess = true): Promise<boolean> {
+async function sendPublishedProjectFile(req: express.Request, res: express.Response, root: string, projectId: string, filename: string, canonicalUrl?: string, requireShareAccess = true, htmlCsp = strictProjectContentCsp): Promise<boolean> {
   const project = await getProject(root, projectId);
   if (project.status !== "published") return false;
   if (requireShareAccess && !await canViewPublishedProject(req, root, project.shareAccess)) {
@@ -92,7 +124,10 @@ async function sendPublishedProjectFile(req: express.Request, res: express.Respo
   }
   const contentType = getProjectFileContentType(filename);
   setShareCacheHeaders(res, project.shareAccess, !requireShareAccess);
-  if (canonicalUrl && contentType === "text/html") res.setHeader("Link", `<${canonicalUrl}>; rel="canonical"`);
+  if (contentType === "text/html") {
+    res.setHeader("Content-Security-Policy", htmlCsp);
+    if (canonicalUrl) res.setHeader("Link", `<${canonicalUrl}>; rel="canonical"`);
+  }
   if (isProjectTextFilePath(filename)) {
     const content = await readProjectFile(root, project.id, filename, 1024 * 1024);
     res.type(contentType).send(contentType === "text/html" && canonicalUrl ? injectCanonicalLink(content, canonicalUrl) : content);
@@ -138,9 +173,27 @@ function renderDefaultLanding(): string {
 }
 
 export function registerContentRoutes(app: express.Express, config: ServerConfig): void {
-  const { publicBaseUrl, artifactRoot } = config;
+  const { publicBaseUrl, contentBaseUrl, artifactRoot } = config;
+  const hasSeparateContentHost = configuredHostsAreSeparate(publicBaseUrl, contentBaseUrl);
+
+  function isAppHostRequest(req: express.Request): boolean {
+    return hasSeparateContentHost && sameConfiguredHost(req, publicBaseUrl);
+  }
+
+  function redirectAppHostToContent(req: express.Request, res: express.Response): boolean {
+    if (!isAppHostRequest(req)) return false;
+    res.redirect(302, contentUrl(config, req.originalUrl));
+    return true;
+  }
+
+  function projectHtmlCspForRequest(req: express.Request): string {
+    return hasSeparateContentHost && sameConfiguredHost(req, contentBaseUrl)
+      ? contentHostProjectCsp
+      : strictProjectContentCsp;
+  }
 
   async function serveHomepageFile(req: express.Request, res: express.Response, relativePath?: string): Promise<boolean> {
+    if (isAppHostRequest(req)) return false;
     const home = getHomepage();
     if (!home.homeProjectId || !home.homeOwnerUserId) return false;
     try {
@@ -148,8 +201,7 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
       const project = await getProject(root, home.homeProjectId);
       if (project.status !== "published") return false;
       const filename = relativePath && relativePath !== "/" ? relativePath.replace(/^\/+/, "") : project.entryFile;
-      res.setHeader("Content-Security-Policy", homepageCsp);
-      return await sendPublishedProjectFile(req, res, root, home.homeProjectId, filename, `${publicBaseUrl.replace(/\/$/, "")}/`, false);
+      return await sendPublishedProjectFile(req, res, root, home.homeProjectId, filename, `${contentBaseUrl.replace(/\/$/, "")}/`, false, projectHtmlCspForRequest(req));
     } catch {
       return false;
     }
@@ -169,11 +221,12 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
   });
 
   app.get(["/share", "/share/"], asyncRoute(async (req, res) => {
+    if (redirectAppHostToContent(req, res)) return;
     try {
       const roots = await getAllProjectRoots();
       const projects = (await Promise.all(roots.map((root) => listProjects(root, false).catch(() => [])))).flat().filter((project) => project.status === "published" && project.shareAccess === "anyone_with_link");
       res.type("html").send(renderPublicSharePage({
-        publicBaseUrl,
+        publicBaseUrl: contentBaseUrl,
         projects,
         locale: getPublicShareLocale(req)
       }));
@@ -199,6 +252,7 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
   });
 
   app.get("/@:username", asyncRoute(async (req, res) => {
+    if (redirectAppHostToContent(req, res)) return;
     try {
       const user = await getUserByUsername(req.params.username);
       if (!user?.username || !user.publicShareUsernameEnabled || !user.projectRoot) {
@@ -207,7 +261,7 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
       }
       const projects = (await listProjects(user.projectRoot, false)).filter((project) => project.status === "published" && project.shareAccess === "anyone_with_link");
       res.type("html").send(renderPublicSharePage({
-        publicBaseUrl,
+        publicBaseUrl: contentBaseUrl,
         projects,
         locale: getPublicShareLocale(req)
       }));
@@ -223,8 +277,13 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
         res.status(404).type("text/plain").send("Share not found.");
         return;
       }
-      const canonicalUrl = `${publicBaseUrl.replace(/\/$/, "")}/@${user.username}/share/${req.params.shareId}/${req.params.filename}`;
-      if (await sendPublishedProjectFile(req, res, user.projectRoot, req.params.shareId, req.params.filename, canonicalUrl)) return;
+      const canonicalUrl = `${contentBaseUrl.replace(/\/$/, "")}/@${user.username}/share/${req.params.shareId}/${req.params.filename}`;
+      const project = await getProject(user.projectRoot, req.params.shareId);
+      if (isAppHostRequest(req) && project.shareAccess === "anyone_with_link") {
+        res.redirect(302, canonicalUrl);
+        return;
+      }
+      if (await sendPublishedProjectFile(req, res, user.projectRoot, req.params.shareId, req.params.filename, canonicalUrl, true, projectHtmlCspForRequest(req))) return;
     } catch {
       // Fall through to 404.
     }
@@ -237,8 +296,13 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
         try {
           const owner = await getUserByProjectRoot(root);
           const canonicalBase = getPublicShareBasePathForUser(owner);
-          const canonicalUrl = `${publicBaseUrl.replace(/\/$/, "")}${canonicalBase}/${req.params.shareId}/${req.params.filename}`;
-          if (await sendPublishedProjectFile(req, res, root, req.params.shareId, req.params.filename, canonicalUrl)) return;
+          const canonicalUrl = `${contentBaseUrl.replace(/\/$/, "")}${canonicalBase}/${req.params.shareId}/${req.params.filename}`;
+          const project = await getProject(root, req.params.shareId);
+          if (isAppHostRequest(req) && project.shareAccess === "anyone_with_link") {
+            res.redirect(302, canonicalUrl);
+            return;
+          }
+          if (await sendPublishedProjectFile(req, res, root, req.params.shareId, req.params.filename, canonicalUrl, true, projectHtmlCspForRequest(req))) return;
         } catch {
           continue;
         }
@@ -256,11 +320,15 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
       res.status(404).type("text/plain").send("Share not found.");
       return;
     }
-    res.setHeader("Content-Security-Policy", "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; base-uri 'none'; form-action 'self';");
+    res.setHeader("Content-Security-Policy", strictProjectContentCsp);
     res.type("html").send(artifact.html);
   }));
 
   app.get("/artifact/:artifactId/:filename(*)", asyncRoute(async (req, res) => {
+    if (isAppHostRequest(req)) {
+      res.status(404).type("text/plain").send("Artifact not found.");
+      return;
+    }
     try {
       const artifact = await readArtifact(artifactRoot, req.params.artifactId, req.params.filename);
       if (!artifact) {
@@ -271,7 +339,7 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
       // document loads in an opaque origin (no allow-same-origin) so it cannot reach
       // admin-origin storage or make credentialed same-origin requests on this shared
       // origin. (The session cookie is already HttpOnly, so this guards the rest.)
-      res.setHeader("Content-Security-Policy", "sandbox allow-scripts allow-popups allow-forms allow-modals;");
+      res.setHeader("Content-Security-Policy", strictProjectContentCsp);
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.type(artifact.record.contentType).send(artifact.content);
     } catch {

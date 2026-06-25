@@ -49,6 +49,18 @@ export interface ProjectPageData {
   error?: string;
 }
 
+function publicContentUrl(baseUrl: string, project: ProjectSummary): string {
+  const fallbackPath = `/share/${project.id}/${project.entryFile}`;
+  const normalizedBase = baseUrl.replace(/\/$/, "");
+  if (!project.publishedUrl) return `${normalizedBase}${fallbackPath}`;
+  try {
+    const published = new URL(project.publishedUrl);
+    return `${normalizedBase}${published.pathname}${published.search}${published.hash}`;
+  } catch {
+    return `${normalizedBase}${fallbackPath}`;
+  }
+}
+
 function escapeHtml(value: string | number | boolean | null | undefined): string {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -619,7 +631,7 @@ export function renderAdminPage(data: AdminPageData): string {
 export function renderPublicSharePage(data: PublicSharePageData): string {
   const copy = publicShareCopy[data.locale];
   const projectCards = data.projects.map((project) => {
-    const previewUrl = project.publishedUrl ?? `${data.publicBaseUrl.replace(/\/$/, "")}/share/${project.id}/${project.entryFile}`;
+    const previewUrl = publicContentUrl(data.publicBaseUrl, project);
     const updated = formatPublicDate(project.updatedAt, data.locale);
     return `<article class="public-card">
       <h2 class="public-title"><a href="${escapeHtml(previewUrl)}" target="_blank" rel="noreferrer">${escapeHtml(project.title)}</a></h2>

@@ -689,7 +689,7 @@ export const webRebuildTools: ToolModule[] = [
       let browserInspection: Record<string, unknown> | undefined;
 
       if (validation.ok && parsed.publish) {
-        const published = await publishProject(ctx.projectRoot, project.id, ctx.publicBaseUrl, "index.html", { shareBasePath: ctx.publicShareBasePath });
+        const published = await publishProject(ctx.projectRoot, project.id, ctx.contentBaseUrl ?? ctx.publicBaseUrl, "index.html", { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
         publishedUrl = published.publishedUrl;
       }
 
@@ -921,7 +921,7 @@ export const webRebuildTools: ToolModule[] = [
         };
       }
 
-      const published = await publishProject(ctx.projectRoot, project.id, ctx.publicBaseUrl, "index.html", { shareBasePath: ctx.publicShareBasePath });
+      const published = await publishProject(ctx.projectRoot, project.id, ctx.contentBaseUrl ?? ctx.publicBaseUrl, "index.html", { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
       let inspectionReportUrl: string | undefined;
       let browserInspection: Record<string, unknown> | undefined;
       if (parsed.browserValidation) {

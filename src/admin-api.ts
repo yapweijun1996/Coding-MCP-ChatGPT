@@ -61,11 +61,16 @@ import {
 interface AdminApiConfig {
   adminPasscode: string;
   publicBaseUrl: string;
+  contentBaseUrl: string;
   projectRoot: string;
   workspaceRoot: string;
   shareRoot: string;
   artifactRoot: string;
   feedbackRoot: string;
+}
+
+function projectPublishBaseUrl(config: AdminApiConfig, shareAccess: "private" | "anyone_with_link" | undefined): string {
+  return shareAccess === "anyone_with_link" ? config.contentBaseUrl : config.publicBaseUrl;
 }
 
 type SortDirection = "asc" | "desc";
@@ -88,7 +93,11 @@ function parseCookies(header: string | undefined): Record<string, string> {
   for (const part of header.split(";")) {
     const [rawName, ...rawValue] = part.trim().split("=");
     if (!rawName || rawValue.length === 0) continue;
-    cookies[rawName] = decodeURIComponent(rawValue.join("="));
+    try {
+      cookies[rawName] = decodeURIComponent(rawValue.join("="));
+    } catch {
+      continue;
+    }
   }
   return cookies;
 }
@@ -585,7 +594,11 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       if (status !== "published" && status !== "private" && status !== "draft") throw new Error("Invalid project status.");
       const root = await findProjectRoot(req, user, req.params.projectId);
       const owner = await getUserByProjectRoot(root);
-      const project = await setProjectStatus(root, req.params.projectId, status, config.publicBaseUrl, { shareBasePath: getPublicShareBasePathForUser(owner) });
+      const current = await getProject(root, req.params.projectId);
+      const project = await setProjectStatus(root, req.params.projectId, status, projectPublishBaseUrl(config, current.shareAccess), {
+        privateBaseUrl: config.publicBaseUrl,
+        shareBasePath: getPublicShareBasePathForUser(owner)
+      });
       recordActivity({ userId: user.id, clientId: "admin", method: "admin/projects/status", toolName: req.params.projectId, ok: true, summary: `Set project ${req.params.projectId} to ${status}.` });
       ok(res, { project });
     } catch (error) {
@@ -600,7 +613,12 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       const shareAccess = readBodyString(req, "shareAccess");
       if (shareAccess !== "private" && shareAccess !== "anyone_with_link") throw new Error("Invalid project share access.");
       const root = await findProjectRoot(req, user, req.params.projectId);
-      const project = await setProjectShareAccess(root, req.params.projectId, shareAccess);
+      const owner = await getUserByProjectRoot(root);
+      const project = await setProjectShareAccess(root, req.params.projectId, shareAccess, {
+        publicBaseUrl: config.contentBaseUrl,
+        privateBaseUrl: config.publicBaseUrl,
+        shareBasePath: getPublicShareBasePathForUser(owner)
+      });
       recordActivity({ userId: user.id, clientId: "admin", method: "admin/projects/share-access", toolName: req.params.projectId, ok: true, summary: `Set project ${req.params.projectId} share access to ${shareAccess}.` });
       ok(res, { project });
     } catch (error) {
@@ -897,7 +915,10 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       const shareBasePath = getPublicShareBasePathForUser(updated);
       const publishedProjects = (await listProjects(projectRoot, true)).filter((project) => project.status === "published");
       for (const project of publishedProjects) {
-        await setProjectStatus(projectRoot, project.id, "published", config.publicBaseUrl, { shareBasePath });
+        await setProjectStatus(projectRoot, project.id, "published", projectPublishBaseUrl(config, project.shareAccess), {
+          privateBaseUrl: config.publicBaseUrl,
+          shareBasePath
+        });
       }
       ok(res, { user: updated, updatedProjectCount: publishedProjects.length });
     } catch (error) {
@@ -957,6 +978,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     const user = res.locals.currentUser as PublicUser;
     ok(res, {
       publicBaseUrl: config.publicBaseUrl,
+      contentBaseUrl: config.contentBaseUrl,
       workspaceRoot: config.workspaceRoot,
       projectRoot: user.role === "admin" ? config.projectRoot : await getProjectRootForUser(user.id),
       shareRoot: config.shareRoot,

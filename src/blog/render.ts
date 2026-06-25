@@ -1,6 +1,6 @@
 import type { BlogPost, BlogTheme } from "./store.js";
 import { renderMarkdown, escapeBlogHtml as escapeHtml } from "./markdown.js";
-import { sanitizeBlogHtml } from "./sanitize-html.js";
+import { sanitizeBlogCss, sanitizeBlogHtml } from "./sanitize-html.js";
 
 function renderBody(post: BlogPost): string {
   return post.format === "html" ? sanitizeBlogHtml(post.content) : renderMarkdown(post.content);
@@ -37,6 +37,9 @@ function formatDate(iso: string | null): string {
 
 function shell(theme: BlogTheme, bodyInner: string, pageTitle: string, metaDescription?: string): string {
   const title = escapeHtml(theme.title || "Blog");
+  const headerHtml = theme.headerHtml ? sanitizeBlogHtml(theme.headerHtml) : `<a href="/blog/"><h1 class="blog-title">${title}</h1></a>`;
+  const footerHtml = theme.footerHtml ? sanitizeBlogHtml(theme.footerHtml) : "";
+  const themeCss = sanitizeBlogCss(theme.css || "");
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -45,13 +48,13 @@ function shell(theme: BlogTheme, bodyInner: string, pageTitle: string, metaDescr
 <title>${escapeHtml(pageTitle)}</title>
 ${metaDescription ? `<meta name="description" content="${escapeHtml(metaDescription)}">` : ""}
 <link rel="alternate" type="application/rss+xml" title="${title}" href="/blog/rss.xml">
-<style>${baseCss}\n${theme.css || ""}</style>
+<style>${baseCss}\n${themeCss}</style>
 </head>
 <body>
 <div class="blog-wrap">
-<header class="blog-header">${theme.headerHtml || `<a href="/blog/"><h1 class="blog-title">${title}</h1></a>`}</header>
+<header class="blog-header">${headerHtml}</header>
 ${bodyInner}
-${theme.footerHtml ? `<footer class="blog-footer">${theme.footerHtml}</footer>` : ""}
+${footerHtml ? `<footer class="blog-footer">${footerHtml}</footer>` : ""}
 </div>
 </body>
 </html>`;

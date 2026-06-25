@@ -13,6 +13,7 @@ import { initializeBlogStore } from "./blog/store.js";
 import { initializeSiteState } from "./site/store.js";
 import { initializeSkillState } from "./skills/state.js";
 import { initializeTelemetry } from "./telemetry/store.js";
+import { initializeToolState } from "./tool-state.js";
 import { initializeJobStore } from "./jobs/store.js";
 import { initializeShareStore } from "./share/store.js";
 import { getUserByEmail, initializeUserStore } from "./user-store.js";
@@ -23,6 +24,7 @@ export const app = express();
 // first request never races a half-initialized store. ---
 initializeOAuthState(config.oauthConfig.statePath);
 initializeSkillState(config.skillStatePath);
+initializeToolState(config.toolStatePath);
 initializeSiteState(config.siteStatePath);
 initializeTelemetry(config.telemetryRoot);
 initializeJobStore(config.jobsRoot, config.jobRetentionDays);
@@ -44,6 +46,27 @@ if (legacyUser) assignUnownedClientsToUser(legacyUser.id);
 app.use(express.json({ limit: "40mb" }));
 app.use(express.urlencoded({ extended: false, limit: "64kb" }));
 
+function configuredHost(value: string): string {
+  try {
+    return new URL(value).host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+const publicHost = configuredHost(config.publicBaseUrl);
+const contentHost = configuredHost(config.contentBaseUrl);
+const hasSeparateContentHost = Boolean(publicHost && contentHost && publicHost !== contentHost);
+const appOnlyPath = /^\/(?:admin|mcp|authorize|oauth\/approve|token|register|revoke|\.well-known|blog|health|outcome)(?:\/|$)/;
+
+app.use((req, res, next) => {
+  if (hasSeparateContentHost && req.get("host")?.toLowerCase() === contentHost && appOnlyPath.test(req.path)) {
+    res.status(404).type("text/plain").send("Not found.");
+    return;
+  }
+  next();
+});
+
 // --- Route groups. Registration order matters in Express: the content catch-all
 // (`/:asset(*)`) must be registered last, and the admin SPA fallback must precede it. ---
 registerOAuthRoutes(app, config);
@@ -52,6 +75,7 @@ registerMcpRoutes(app, config);
 registerAdminApi(app, {
   adminPasscode: config.adminPasscode,
   publicBaseUrl: config.publicBaseUrl,
+  contentBaseUrl: config.contentBaseUrl,
   projectRoot: config.projectRoot,
   workspaceRoot: config.workspaceRoot,
   shareRoot: config.shareRoot,

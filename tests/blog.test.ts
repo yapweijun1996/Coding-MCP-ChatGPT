@@ -21,6 +21,7 @@ process.env.PROJECT_ROOT = path.join(root, "projects");
 process.env.USERS_ROOT = path.join(root, "users");
 process.env.USER_STATE_PATH = path.join(root, "state", "users-state.json");
 process.env.SKILL_STATE_PATH = path.join(root, "state", "skill-state.json");
+process.env.TOOL_STATE_PATH = path.join(root, "state", "tool-state.json");
 process.env.SITE_STATE_PATH = path.join(root, "state", "site-state.json");
 process.env.BLOG_STATE_PATH = path.join(root, "state", "blog-state.json");
 process.env.OAUTH_STATE_PATH = path.join(root, "state", "oauth-state.json");
@@ -131,7 +132,12 @@ test("blog store upserts, lists, fetches, and deletes posts (file mode)", async 
 
 test("blog routes render index and post, and gate writes to admins", async () => {
   await initializeBlogStore({ statePath: process.env.BLOG_STATE_PATH! });
-  await setBlogTheme({ title: "Acme Blog" });
+  await setBlogTheme({
+    title: "Acme Blog",
+    headerHtml: '<h1>Acme Blog</h1><script>alert(1)</script>',
+    footerHtml: '<p onclick="alert(1)">Footer</p>',
+    css: "@import url(https://evil.test/x.css); body { position: fixed; }"
+  });
 
   const publishTool = blogTools.find((tool) => tool.definition.name === "publish_blog_post");
   assert.ok(publishTool);
@@ -159,6 +165,7 @@ test("blog routes render index and post, and gate writes to admins", async () =>
     assert.match(indexHtml, /Acme Blog/);
     assert.match(indexHtml, /Hello Blog/);
     assert.match(indexHtml, /href="\/blog\/hello-blog"/);
+    assert.doesNotMatch(indexHtml, /<script|alert\(1\)|onclick=|@import|position:\s*fixed/i);
 
     const postRes = await fetch(`${baseUrl}/blog/hello-blog`);
     assert.equal(postRes.status, 200);

@@ -78,6 +78,12 @@ function sanitizeStyle(raw: string): string {
   return raw;
 }
 
+export function sanitizeBlogCss(raw: string): string {
+  if (raw.includes("\\")) return "";
+  if (/(javascript:|expression\s*\(|url\s*\(|@import|behavior\s*:|-moz-binding|position\s*:\s*(fixed|absolute|sticky))/i.test(raw)) return "";
+  return raw;
+}
+
 function parseAttributes(tag: string, attrString: string): string {
   const out: string[] = [];
   const attrRe = /([a-zA-Z_:][\w:.-]*)(?:\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
