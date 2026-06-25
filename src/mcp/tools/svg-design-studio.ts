@@ -428,7 +428,7 @@ function fitTextToBox(options: {
   const fontSize = options.minFontSize;
   const maxChars = Math.max(1, Math.floor(options.width / (fontSize * ratio)));
   const maxLines = options.wrap ? lineLimitForBox(options.height, fontSize) : 1;
-  let lines = options.wrap ? wrapText(options.text, maxChars, maxLines) : [options.text];
+  const lines = options.wrap ? wrapText(options.text, maxChars, maxLines) : [options.text];
   let truncated = false;
   if (options.truncate && lines.length) {
     const lastIndex = lines.length - 1;

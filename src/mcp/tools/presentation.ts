@@ -239,10 +239,6 @@ function escapeHtml(value: string | undefined): string {
     .replaceAll('"', "&quot;");
 }
 
-function cssString(value: string): string {
-  return JSON.stringify(value);
-}
-
 function jsonForScript(value: unknown): string {
   return JSON.stringify(value).replaceAll("<", "\\u003c");
 }

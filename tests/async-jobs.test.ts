@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { getToolModule } from "../src/mcp/registry.js";
-import { saveJob, getJob, updateJob, type JobRecord } from "../src/jobs/store.js";
+import { saveJob, getJob, type JobRecord } from "../src/jobs/store.js";
 import { skillRegistry } from "../src/skills/registry.js";
 import type { ToolContext } from "../src/mcp/types.js";
 

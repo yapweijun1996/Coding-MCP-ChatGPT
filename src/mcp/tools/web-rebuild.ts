@@ -612,7 +612,7 @@ function visualSimilarityReport(input: DesignConversionInput, components: string
 }
 
 function withoutScreenshots(results: Awaited<ReturnType<typeof inspectWebpageUrl>>) {
-  return results.map(({ screenshotDataUrl, ...result }) => result);
+  return results.map(({ screenshotDataUrl: _screenshotDataUrl, ...result }) => result);
 }
 
 export const webRebuildTools: ToolModule[] = [
@@ -797,7 +797,7 @@ export const webRebuildTools: ToolModule[] = [
         sourceUrl: capture.sourceUrl,
         finalUrl: capture.finalUrl,
         reportUrl,
-        pages: capture.pages.map(({ screenshotDataUrl, visibleText, ...page }) => ({ ...page, visibleTextSample: visibleText.slice(0, 1200) })),
+        pages: capture.pages.map(({ screenshotDataUrl: _screenshotDataUrl, visibleText, ...page }) => ({ ...page, visibleTextSample: visibleText.slice(0, 1200) })),
         resources: capture.resources,
         forms: capture.forms,
         interactions: capture.interactions,

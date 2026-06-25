@@ -108,7 +108,6 @@ export interface PublishResearchReportResult {
 
 const researchMetadataPath = "research/research.json";
 const researchEvidencePath = "research/evidence/inspections.json";
-const researchSourcePrefix = "research/sources/source_";
 const researchSourcePattern = /^research\/sources\/source_(\d{3,})\.json$/;
 const reportMarkdownPath = "report.md";
 const reportHtmlPath = "report.html";
@@ -474,7 +473,7 @@ export async function validateResearchManifest(projectRoot: string, projectId: s
   const warnings: string[] = [];
   const errors: string[] = [];
   let sources: ResearchSource[] = [];
-  let report = await getReportStatus(projectRoot, projectId);
+  const report = await getReportStatus(projectRoot, projectId);
 
   try {
     await readResearchMetadata(projectRoot, projectId);
