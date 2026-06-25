@@ -336,6 +336,7 @@ const exportMusicProjectInputSchema = z.object({
   midiPaths: z.array(z.string().min(1).max(240)).max(80).optional().default([]),
   stemPaths: z.array(z.string().min(1).max(240)).max(120).optional().default([]),
   chordChartPaths: z.array(z.string().min(1).max(240)).max(40).optional().default([]),
+  renderReportPaths: z.array(z.string().min(1).max(240)).max(80).optional().default([]),
   licenseManifestPath: z.string().min(1).max(240).optional(),
   version: z.string().min(1).max(80).optional(),
   bpm: z.number().int().min(20).max(300).optional(),
@@ -551,13 +552,14 @@ function varLen(value: number) {
   return bytes;
 }
 
-function midiBuffer(composition: Composition) {
+function midiBuffer(composition: Composition, options: { channelMap?: Record<string, number> } = {}) {
   const ppq = 480;
   const events: Array<{ tick: number; bytes: number[] }> = [];
   const pushText = (type: number, text: string) => events.push({ tick: 0, bytes: [0xff, type, ...varLen(Buffer.byteLength(text)), ...Buffer.from(text, "utf8")] });
   pushText(0x03, composition.title);
   events.push({ tick: 0, bytes: [0xff, 0x51, 0x03, ...Buffer.from([(60000000 / composition.tempo) >> 16 & 255, (60000000 / composition.tempo) >> 8 & 255, (60000000 / composition.tempo) & 255])] });
-  const channelFor = (track: string) => track === "drums" ? 9 : Math.abs([...track].reduce((sum, ch) => sum + ch.charCodeAt(0), 0)) % 8;
+  const defaultChannelFor = (track: string) => track === "drums" ? 9 : Math.abs([...track].reduce((sum, ch) => sum + ch.charCodeAt(0), 0)) % 8;
+  const channelFor = (track: string) => options.channelMap?.[track] ?? defaultChannelFor(track);
   for (const [track, notes] of Object.entries(composition.tracks)) {
     for (const note of notes) {
       const channel = channelFor(track);
@@ -1136,10 +1138,11 @@ function buildUnsupportedMusicExportWarnings(exports: string[], files: Array<{ p
   return warnings;
 }
 
-async function findProductionRenderGateWarnings(ctx: ToolContext, projectId: string, renderedAudioPaths: string[]) {
+async function findProductionRenderGateWarnings(ctx: ToolContext, projectId: string, renderedAudioPaths: string[], renderReportPaths: string[] = []) {
   const warnings: string[] = [];
   const reports: Array<Record<string, unknown> & { reportPath: string }> = [];
-  for (const candidate of ["music/soundfont-render-report.json", "music/render-report.json", "music/mastering-report.json"]) {
+  const reportCandidates = [...new Set([...renderReportPaths, "music/soundfont-render-report.json", "music/render-report.json", "music/mastering-report.json"])];
+  for (const candidate of reportCandidates) {
     try {
       const parsed = JSON.parse(await readProjectFile(ctx.projectRoot, projectId, candidate, 2 * 1024 * 1024)) as Record<string, unknown>;
       reports.push({ ...parsed, reportPath: candidate });
@@ -1162,7 +1165,18 @@ async function findProductionRenderGateWarnings(ctx: ToolContext, projectId: str
     const blockingReasons = Array.isArray(report.blockingReasons) ? report.blockingReasons : Array.isArray(nested?.blockingReasons) ? nested.blockingReasons : [];
     for (const reason of blockingReasons) warnings.push(`Production gate: ${audioPath}: ${String(reason)}`);
   }
-  return Array.from(new Set(warnings));
+  const resolvedReports = reports.map((report) => {
+    const nested = report.renderReport as Record<string, unknown> | undefined;
+    return {
+      reportPath: report.reportPath,
+      renderer: String(report.renderer ?? nested?.renderer ?? "unknown"),
+      qualityTier: String(report.qualityTier ?? nested?.qualityTier ?? "unknown"),
+      productionReady: report.productionReady ?? nested?.productionReady ?? false,
+      fullMixPath: typeof report.fullMixPath === "string" ? report.fullMixPath : undefined,
+      masteredAudioPath: typeof report.masteredAudioPath === "string" ? report.masteredAudioPath : undefined
+    };
+  });
+  return { warnings: Array.from(new Set(warnings)), resolvedReports };
 }
 
 function renderMusicExportReadme(manifest: {
@@ -2550,7 +2564,7 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "export_music_project", description: "Export a production music project package with tracks, sessions, stems, MIDI, chord charts, license checks, README, playlist metadata, and optional public listening/download page.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, projectManifestPath: { type: "string" }, packageName: { type: "string" }, selectedVersionIds: { type: "array", items: { type: "string" } }, exports: { type: "array", items: { type: "string" } }, renderedAudioPaths: { type: "array", items: { type: "string" } }, midiPaths: { type: "array", items: { type: "string" } }, stemPaths: { type: "array", items: { type: "string" } }, chordChartPaths: { type: "array", items: { type: "string" } }, licenseManifestPath: { type: "string" }, version: { type: "string" }, bpm: { type: "number" }, key: { type: "string" }, durationSeconds: { type: "number" }, demoManifestPath: { type: "string" }, sessionManifestPath: { type: "string" }, trackManifestPaths: { type: "array", items: { type: "string" } }, publish: { type: "boolean" }, outputHtmlPath: { type: "string" }, outputManifestPath: { type: "string" }, outputReadmePath: { type: "string" }, outputPackageReportPath: { type: "string" }, outputPlaylistPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "export_music_project", description: "Export a production music project package with tracks, sessions, stems, MIDI, chord charts, license checks, README, playlist metadata, and optional public listening/download page.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, projectManifestPath: { type: "string" }, packageName: { type: "string" }, selectedVersionIds: { type: "array", items: { type: "string" } }, exports: { type: "array", items: { type: "string" } }, renderedAudioPaths: { type: "array", items: { type: "string" } }, midiPaths: { type: "array", items: { type: "string" } }, stemPaths: { type: "array", items: { type: "string" } }, chordChartPaths: { type: "array", items: { type: "string" } }, renderReportPaths: { type: "array", items: { type: "string" } }, licenseManifestPath: { type: "string" }, version: { type: "string" }, bpm: { type: "number" }, key: { type: "string" }, durationSeconds: { type: "number" }, demoManifestPath: { type: "string" }, sessionManifestPath: { type: "string" }, trackManifestPaths: { type: "array", items: { type: "string" } }, publish: { type: "boolean" }, outputHtmlPath: { type: "string" }, outputManifestPath: { type: "string" }, outputReadmePath: { type: "string" }, outputPackageReportPath: { type: "string" }, outputPlaylistPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: exportMusicProjectInputSchema,
     handler: async (input, ctx) => {
@@ -2593,7 +2607,8 @@ export const musicWorkflowTools: ToolModule[] = [
       const fileInspection = await inspectProjectExportFiles(ctx, parsed.projectId, inputFiles);
       const unsupportedFormats = buildUnsupportedMusicExportWarnings(parsed.exports, fileInspection.exportedFiles);
       const licenseWarnings = collectMusicLicenseWarnings(licenseManifest);
-      const productionGateWarnings = await findProductionRenderGateWarnings(ctx, parsed.projectId, parsed.renderedAudioPaths);
+      const productionGate = await findProductionRenderGateWarnings(ctx, parsed.projectId, parsed.renderedAudioPaths, parsed.renderReportPaths);
+      const productionGateWarnings = productionGate.warnings;
       const playlist = {
         projectId: parsed.projectId,
         packageName,
@@ -2618,6 +2633,8 @@ export const musicWorkflowTools: ToolModule[] = [
         unsupportedFormats,
         licenseWarnings,
         productionGateWarnings,
+        renderReportPaths: parsed.renderReportPaths,
+        resolvedRenderReports: productionGate.resolvedReports,
         userFacingReadmePath: parsed.outputReadmePath,
         playlistPath: parsed.outputPlaylistPath
       };
@@ -2628,7 +2645,7 @@ export const musicWorkflowTools: ToolModule[] = [
       const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Music Project Export</title><style>body{font-family:system-ui;margin:32px;max-width:960px}li{margin:8px 0}.warn{color:#9a3412}.ok{color:#166534}</style></head><body><h1>Music Project Export</h1><p>Generated original production music handoff.</p><h2>Download package</h2><ul><li><a href="${escapeHtml(readmeFile.path)}">README</a></li><li><a href="${escapeHtml(packageReportFile.path)}">Package report JSON</a></li><li><a href="${escapeHtml(playlistFile.path)}">Playlist metadata JSON</a></li>${fileInspection.exportedFiles.map((file) => `<li><a href="${escapeHtml(file.path)}">${escapeHtml(file.path)}</a> - ${escapeHtml(file.role)}</li>`).join("")}</ul><h2>Checks</h2><p class="${packageReport.missingFiles.length || packageReport.licenseWarnings.length || packageReport.productionGateWarnings.length ? "warn" : "ok"}">Missing files: ${packageReport.missingFiles.length}; license warnings: ${packageReport.licenseWarnings.length}; unsupported formats: ${packageReport.unsupportedFormats.length}; production gate warnings: ${packageReport.productionGateWarnings.length}</p><h2>Tracks</h2><ul>${tracks.map((track) => `<li>${escapeHtml(track.title)} - ${Math.round(track.durationSeconds / 60)} min, ${escapeHtml(track.key)}, ${track.tempo} BPM</li>`).join("")}</ul><h2>Session</h2><pre>${escapeHtml(JSON.stringify(session ?? {}, null, 2))}</pre></body></html>`;
       const htmlFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputHtmlPath, html);
       const published = parsed.publish ? await publishProject(ctx.projectRoot, parsed.projectId, ctx.publicBaseUrl, parsed.outputHtmlPath, { shareBasePath: ctx.publicShareBasePath }) : undefined;
-      const manifest = { projectId: parsed.projectId, packageName, projectManifestPath: parsed.projectManifestPath, demoManifestPath: parsed.demoManifestPath, sessionManifestPath: parsed.sessionManifestPath, trackManifestPaths: parsed.trackManifestPaths, selectedVersionIds: parsed.selectedVersionIds, requestedExports: parsed.exports, demoUrl: demo?.publishedUrl, exportPagePath: htmlFile.path, publishedUrl: published?.publishedUrl, readmePath: readmeFile.path, packageReportPath: packageReportFile.path, playlistPath: playlistFile.path, exportedFiles: fileInspection.exportedFiles, missingFiles: fileInspection.missingFiles, brokenAudioReferences: fileInspection.brokenAudioReferences, largeFiles: fileInspection.largeFiles, unsupportedFormats, licenseWarnings, productionGateWarnings, naming, tracks, sessionSummary: session ? { targetDurationMinutes: session.targetDurationMinutes, slots: Array.isArray(session.schedule) ? session.schedule.length : 0 } : undefined, license: licenseManifest ?? { output: "generated_original", dependencies: ["Built-in safe synth unless external assets are added later."] }, packageNotes: ["ZIP/MP3/OGG export requires a verified archive/encoder step.", "ZIP bundle creation can be completed with export package archive tools after this music package manifest passes checks.", "MP3/OGG exports require verified encoded files; this tool reports missing encoded formats instead of fabricating them.", "Production export requires production_candidate render evidence from render_midi_with_soundfont."] };
+      const manifest = { projectId: parsed.projectId, packageName, projectManifestPath: parsed.projectManifestPath, demoManifestPath: parsed.demoManifestPath, sessionManifestPath: parsed.sessionManifestPath, trackManifestPaths: parsed.trackManifestPaths, selectedVersionIds: parsed.selectedVersionIds, requestedExports: parsed.exports, demoUrl: demo?.publishedUrl, exportPagePath: htmlFile.path, publishedUrl: published?.publishedUrl, readmePath: readmeFile.path, packageReportPath: packageReportFile.path, playlistPath: playlistFile.path, exportedFiles: fileInspection.exportedFiles, missingFiles: fileInspection.missingFiles, brokenAudioReferences: fileInspection.brokenAudioReferences, largeFiles: fileInspection.largeFiles, unsupportedFormats, licenseWarnings, productionGateWarnings, renderReportPaths: parsed.renderReportPaths, resolvedRenderReports: productionGate.resolvedReports, naming, tracks, sessionSummary: session ? { targetDurationMinutes: session.targetDurationMinutes, slots: Array.isArray(session.schedule) ? session.schedule.length : 0 } : undefined, license: licenseManifest ?? { output: "generated_original", dependencies: ["Built-in safe synth unless external assets are added later."] }, packageNotes: ["ZIP/MP3/OGG export requires a verified archive/encoder step.", "ZIP bundle creation can be completed with export package archive tools after this music package manifest passes checks.", "MP3/OGG exports require verified encoded files; this tool reports missing encoded formats instead of fabricating them.", "Production export requires production_candidate render evidence from render_midi_with_soundfont."] };
       const manifestFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
       const blockingErrors = [
         ...fileInspection.missingFiles.map((filePath) => `Missing export file: ${filePath}`),
@@ -2707,6 +2724,13 @@ export const musicWorkflowTools: ToolModule[] = [
       if (!fluidSynthCapability.ok) {
         return writeSoundfontRenderFailure(ctx, parsed, ["FluidSynth is not available in this runtime; render remains preview_only until a production renderer is installed."], { rendererMetadata: { fluidSynthCapability, ffmpegCapability } });
       }
+      const hasChannelMap = Object.keys(parsed.channelMap).length > 0;
+      if (!parsed.compositionManifestPath && hasChannelMap) {
+        return writeSoundfontRenderFailure(ctx, parsed, ["channelMap requires compositionManifestPath; this tool does not rewrite channels in externally supplied MIDI files."], { rendererMetadata: { fluidSynthCapability, ffmpegCapability }, channelMap: parsed.channelMap, channelMapApplied: false });
+      }
+      if (!parsed.compositionManifestPath && parsed.stems) {
+        return writeSoundfontRenderFailure(ctx, parsed, ["stems require compositionManifestPath so the renderer can isolate tracks; midiPath-only rendering cannot safely produce stems."], { rendererMetadata: { fluidSynthCapability, ffmpegCapability }, stemPaths: {}, stemCount: 0 });
+      }
 
       const soundfont = await resolveProductionSoundfont(ctx, parsed);
       if (!soundfont.ok) {
@@ -2721,7 +2745,7 @@ export const musicWorkflowTools: ToolModule[] = [
         const tempDir = path.join(ctx.artifactRoot, `music-render-${parsed.projectId}-${Date.now()}`);
         await mkdir(tempDir, { recursive: true });
         midiAbsolutePath = path.join(tempDir, "full.mid");
-        await writeFile(midiAbsolutePath, midiBuffer(composition));
+        await writeFile(midiAbsolutePath, midiBuffer(composition, { channelMap: parsed.channelMap }));
         temporaryFiles.push(tempDir);
       } else {
         midiAbsolutePath = await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, parsed.midiPath!);
@@ -2741,7 +2765,7 @@ export const musicWorkflowTools: ToolModule[] = [
           for (const track of Object.keys(composition.tracks)) {
             const stemMidiPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.mid`);
             const stemWavPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.wav`);
-            await writeFile(stemMidiPath, midiBuffer(compositionWithSingleTrack(composition!, track)));
+            await writeFile(stemMidiPath, midiBuffer(compositionWithSingleTrack(composition!, track), { channelMap: parsed.channelMap }));
             const stemWav = await fluidSynthRender(soundfont.absolutePath, stemMidiPath, stemWavPath, parsed.sampleRate, ctx.commandTimeoutMs);
             const stemFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, `${parsed.outputStemDirectory}/${slugifyMusicExportPart(track)}.wav`, stemWav, "audio/wav");
             stemPaths[track] = stemFile.path;
@@ -2772,6 +2796,7 @@ export const musicWorkflowTools: ToolModule[] = [
             version: soundfont.pack.version
           },
           channelMap: parsed.channelMap,
+          channelMapApplied: hasChannelMap,
           renderReport: {
             durationSeconds: composition?.durationSeconds,
             sampleRate: parsed.sampleRate,
@@ -2780,6 +2805,7 @@ export const musicWorkflowTools: ToolModule[] = [
             renderedFormats: ["wav"],
             peakLevel: stats.peak,
             rms: stats.rms,
+            stemCount: Object.keys(stemPaths).length,
             fileSizes: Object.fromEntries(await Promise.all(artifacts.map(async (artifact) => {
               const bytes = await readFile(await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, artifact));
               return [artifact, bytes.length];

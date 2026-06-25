@@ -37,6 +37,15 @@ if (process.argv.includes("--version")) {
   process.exit(0);
 }
 const out = process.argv[process.argv.indexOf("-F") + 1];
+const midi = process.argv.find((arg) => arg.endsWith(".mid"));
+if (process.env.EXPECT_MIDI_STATUS_HEX && midi) {
+  const status = Number.parseInt(process.env.EXPECT_MIDI_STATUS_HEX, 16);
+  const bytes = fs.readFileSync(midi);
+  if (!bytes.includes(status)) {
+    console.error("Expected MIDI status byte 0x" + process.env.EXPECT_MIDI_STATUS_HEX + " in " + midi);
+    process.exit(9);
+  }
+}
 const sampleRate = 8000;
 const frames = sampleRate / 4;
 const pcm = Buffer.alloc(frames * 2);
@@ -79,9 +88,10 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     const licenseManifest = getToolModule("build_music_license_manifest");
     const packManager = getToolModule("manage_jazz_instrument_packs");
     const soundfontRender = getToolModule("render_midi_with_soundfont");
+    const exportProject = getToolModule("export_music_project");
     const exportAssets = getToolModule("export_music_assets");
     const audition = getToolModule("audition_music_variations");
-    for (const [name, tool] of Object.entries({ styleBrief, compose, edit, render, harmony, drums, inspect, licenseManifest, packManager, soundfontRender, exportAssets, audition })) assert.ok(tool, `${name} registered`);
+    for (const [name, tool] of Object.entries({ styleBrief, compose, edit, render, harmony, drums, inspect, licenseManifest, packManager, soundfontRender, exportProject, exportAssets, audition })) assert.ok(tool, `${name} registered`);
 
     const briefResult = await styleBrief!.handler({
       projectId: project.id,
@@ -424,6 +434,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
 
     const oldPath = process.env.PATH;
     process.env.PATH = `${await installFakeFluidSynth(root)}:${oldPath}`;
+    const oldExpectedStatus = process.env.EXPECT_MIDI_STATUS_HEX;
     try {
       const soundfontResult = await soundfontRender!.handler({
         projectId: project.id,
@@ -440,13 +451,16 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
         fullMixPath: string;
         stemPaths: Record<string, string>;
         soundfont: { packId: string; computedSha256: string };
-        renderReport: { renderedFormats: string[]; peakLevel: number; rms: number };
+        channelMapApplied: boolean;
+        renderReport: { renderedFormats: string[]; peakLevel: number; rms: number; stemCount: number };
       };
       assert.equal(soundfontPayload.renderer, "fluidsynth");
       assert.equal(soundfontPayload.qualityTier, "production_candidate");
       assert.equal(soundfontPayload.productionReady, true);
       assert.equal(soundfontPayload.fullMixPath, "music/rendered-soundfont.wav");
+      assert.equal(soundfontPayload.channelMapApplied, false);
       assert.ok(Object.keys(soundfontPayload.stemPaths).length > 0);
+      assert.equal(soundfontPayload.renderReport.stemCount, Object.keys(soundfontPayload.stemPaths).length);
       assert.equal(soundfontPayload.soundfont.packId, "upright_bass_apache");
       assert.equal(soundfontPayload.soundfont.computedSha256, createHash("sha256").update(pianoSf2).digest("hex"));
       assert.deepEqual(soundfontPayload.renderReport.renderedFormats, ["wav"]);
@@ -454,8 +468,64 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
       assert.ok(soundfontPayload.renderReport.rms > 0);
       const rendered = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, soundfontPayload.fullMixPath));
       assert.equal(rendered.subarray(0, 4).toString("ascii"), "RIFF");
+
+      process.env.EXPECT_MIDI_STATUS_HEX = "91";
+      const mappedSoundfontResult = await soundfontRender!.handler({
+        projectId: project.id,
+        compositionManifestPath: "music/edited-composition-manifest.json",
+        soundfontPackId: "upright_bass_apache",
+        channelMap: { piano: 1 },
+        stems: false,
+        sampleRate: 8000,
+        outputAudioPath: "music/mapped-soundfont.wav",
+        outputReportPath: "music/custom-soundfont-report.json"
+      }, ctx);
+      assert.equal(mappedSoundfontResult.ok, true);
+      const mappedPayload = mappedSoundfontResult.structuredContent as { fullMixPath: string; renderReportPath: string; channelMapApplied: boolean; renderReport: { stemCount: number } };
+      assert.equal(mappedPayload.fullMixPath, "music/mapped-soundfont.wav");
+      assert.equal(mappedPayload.renderReportPath, "music/custom-soundfont-report.json");
+      assert.equal(mappedPayload.channelMapApplied, true);
+      assert.equal(mappedPayload.renderReport.stemCount, 0);
+
+      const defaultGateResult = await exportProject!.handler({
+        projectId: project.id,
+        projectManifestPath: "music/edited-composition-manifest.json",
+        exports: ["single_track_wav", "project_manifest"],
+        renderedAudioPaths: ["music/rendered-soundfont.wav"],
+        publish: false,
+        outputHtmlPath: "music/default-gate.html",
+        outputManifestPath: "music/default-gate-export.json",
+        outputReadmePath: "music/default-gate/README.md",
+        outputPackageReportPath: "music/default-gate/package-report.json",
+        outputPlaylistPath: "music/default-gate/playlist.json"
+      }, ctx);
+      assert.equal(defaultGateResult.ok, true);
+      const defaultGatePayload = defaultGateResult.structuredContent as { productionGateWarnings: string[]; resolvedRenderReports: Array<{ reportPath: string; qualityTier: string }> };
+      assert.deepEqual(defaultGatePayload.productionGateWarnings, []);
+      assert.ok(defaultGatePayload.resolvedRenderReports.some((report) => report.reportPath === "music/soundfont-render-report.json" && report.qualityTier === "production_candidate"));
+
+      const customGateResult = await exportProject!.handler({
+        projectId: project.id,
+        projectManifestPath: "music/edited-composition-manifest.json",
+        exports: ["single_track_wav", "project_manifest"],
+        renderedAudioPaths: ["music/mapped-soundfont.wav"],
+        renderReportPaths: ["music/custom-soundfont-report.json"],
+        publish: false,
+        outputHtmlPath: "music/custom-gate.html",
+        outputManifestPath: "music/custom-gate-export.json",
+        outputReadmePath: "music/custom-gate/README.md",
+        outputPackageReportPath: "music/custom-gate/package-report.json",
+        outputPlaylistPath: "music/custom-gate/playlist.json"
+      }, ctx);
+      assert.equal(customGateResult.ok, true);
+      const customGatePayload = customGateResult.structuredContent as { renderReportPaths: string[]; productionGateWarnings: string[]; resolvedRenderReports: Array<{ reportPath: string; fullMixPath?: string }> };
+      assert.deepEqual(customGatePayload.renderReportPaths, ["music/custom-soundfont-report.json"]);
+      assert.deepEqual(customGatePayload.productionGateWarnings, []);
+      assert.ok(customGatePayload.resolvedRenderReports.some((report) => report.reportPath === "music/custom-soundfont-report.json" && report.fullMixPath === "music/mapped-soundfont.wav"));
     } finally {
       process.env.PATH = oldPath;
+      if (oldExpectedStatus === undefined) delete process.env.EXPECT_MIDI_STATUS_HEX;
+      else process.env.EXPECT_MIDI_STATUS_HEX = oldExpectedStatus;
     }
 
     const exportResult = await exportAssets!.handler({
@@ -1010,6 +1080,40 @@ test("render_midi_with_soundfont blocks missing renderer and unsafe packs", asyn
         redistributionAllowed: true
       }]
     }, ctx);
+    const readyOldPathForInputValidation = process.env.PATH;
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${readyOldPathForInputValidation}`;
+    try {
+      const channelMapMidiOnly = await soundfontRender!.handler({
+        projectId: project.id,
+        midiPath: "music/soundfont-gate.mid",
+        soundfontPackId: "ready_pd",
+        channelMap: { piano: 1 },
+        outputReportPath: "music/midi-only-channel-map-report.json"
+      }, ctx);
+      assert.equal(channelMapMidiOnly.ok, false);
+      assert.ok(channelMapMidiOnly.errors.some((error) => error.includes("channelMap requires compositionManifestPath")));
+      const channelMapPayload = channelMapMidiOnly.structuredContent as { channelMapApplied: boolean; qualityTier: string; productionReady: boolean };
+      assert.equal(channelMapPayload.channelMapApplied, false);
+      assert.equal(channelMapPayload.qualityTier, "preview_only");
+      assert.equal(channelMapPayload.productionReady, false);
+
+      const stemsMidiOnly = await soundfontRender!.handler({
+        projectId: project.id,
+        midiPath: "music/soundfont-gate.mid",
+        soundfontPackId: "ready_pd",
+        stems: true,
+        outputReportPath: "music/midi-only-stems-report.json"
+      }, ctx);
+      assert.equal(stemsMidiOnly.ok, false);
+      assert.ok(stemsMidiOnly.errors.some((error) => error.includes("stems require compositionManifestPath")));
+      const stemsPayload = stemsMidiOnly.structuredContent as { stemCount: number; stemPaths: Record<string, string>; qualityTier: string; productionReady: boolean };
+      assert.equal(stemsPayload.stemCount, 0);
+      assert.deepEqual(stemsPayload.stemPaths, {});
+      assert.equal(stemsPayload.qualityTier, "preview_only");
+      assert.equal(stemsPayload.productionReady, false);
+    } finally {
+      process.env.PATH = readyOldPathForInputValidation;
+    }
     const emptyBin = path.join(root, "empty-bin");
     await mkdir(emptyBin, { recursive: true });
     const oldPath = process.env.PATH;
