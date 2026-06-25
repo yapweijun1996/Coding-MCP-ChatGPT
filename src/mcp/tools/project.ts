@@ -32,7 +32,7 @@ import {
   writeProjectAsset,
   writeProjectFile
 } from "../../projects/store.js";
-import type { ProjectManifest, ProjectStatus, ProjectSummary, ProjectTaskEvidenceLink, ProjectTaskHistoryItem, ProjectTaskPriority, ProjectTaskStatus, ReviewFinding } from "../../projects/store.js";
+import type { ProjectManifest, ProjectStatus, ProjectSummary, ProjectTaskEvidenceLink, ProjectTaskGraphNode, ProjectTaskHistoryItem, ProjectTaskItem, ProjectTaskPriority, ProjectTaskStatus, ReviewFinding } from "../../projects/store.js";
 import { makeShareUrl } from "../result.js";
 import type { ToolModule } from "../types.js";
 import { inspectWebpageUrl, renderWebpageInspectionReport, summarizeBrowserInspection } from "./web-inspect.js";
@@ -161,7 +161,14 @@ const projectTaskPrioritySchema = z.enum(["low", "medium", "high", "urgent"]);
 const listProjectTasksInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   status: projectTaskStatusSchema.optional(),
-  priority: projectTaskPrioritySchema.optional()
+  priority: projectTaskPrioritySchema.optional(),
+  sortBy: z.enum(["rank", "status", "updated"]).optional().default("rank")
+});
+
+const rankProjectTasksInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  includeDone: z.boolean().optional().default(false),
+  maxResults: z.number().int().min(1).max(200).optional().default(50)
 });
 
 const projectTaskIdInputSchema = z.object({
@@ -201,7 +208,16 @@ const executeProjectTaskQueueStepInputSchema = z.object({
   stopOnValidationFailure: z.boolean().optional().default(true),
   bindEvidence: z.boolean().optional().default(true),
   changedFiles: z.array(z.string().min(1).max(300)).max(100).optional().default([]),
-  completionNote: z.string().max(1000).optional().default("")
+  completionNote: z.string().max(1000).optional().default(""),
+  completionSummary: z.string().max(2000).optional()
+});
+
+const summarizeProjectTaskCompletionInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  taskId: z.string().regex(/^task_\d{3,}$/),
+  completionSummary: z.string().max(2000).optional(),
+  changedFiles: z.array(z.string().min(1).max(300)).max(100).optional().default([]),
+  includeLatestValidation: z.boolean().optional().default(true)
 });
 
 const getProjectResumeStateInputSchema = z.object({
@@ -217,6 +233,10 @@ const upsertProjectTaskInputSchema = z.object({
   priority: projectTaskPrioritySchema.optional().default("medium"),
   notes: z.string().max(4000).optional().default(""),
   progress: z.number().int().min(0).max(100).optional().default(0),
+  blockedReason: z.string().max(1000).optional(),
+  unblockRequirement: z.string().max(1000).optional(),
+  completionSummary: z.string().max(2000).optional(),
+  completedFiles: z.array(z.string().min(1).max(300)).max(100).optional(),
   dependsOn: z.array(z.string().regex(/^task_\d{3,}$/)).max(100).optional().default([]),
   evidence: z.array(z.object({
     label: z.string().min(1).max(160),
@@ -226,6 +246,18 @@ const upsertProjectTaskInputSchema = z.object({
     filePath: z.string().min(1).max(300).optional(),
     note: z.string().max(1000).optional()
   })).max(50).optional().default([])
+});
+
+const setProjectTaskBlockerInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  taskId: z.string().regex(/^task_\d{3,}$/),
+  blockedReason: z.string().max(1000).optional(),
+  unblockRequirement: z.string().max(1000).optional(),
+  clear: z.boolean().optional().default(false),
+  statusWhenCleared: z.enum(["todo", "doing"]).optional().default("todo")
+}).refine((value) => value.clear || Boolean(value.blockedReason?.trim() || value.unblockRequirement?.trim()), {
+  message: "blockedReason or unblockRequirement is required unless clear=true.",
+  path: ["blockedReason"]
 });
 
 const projectTaskEvidenceSchema = z.object({
@@ -420,6 +452,108 @@ function feedbackSearchText(finding: ReviewFinding): string {
 
 function taskPriorityWeight(priority: ProjectTaskPriority): number {
   return { urgent: 0, high: 1, medium: 2, low: 3 }[priority];
+}
+
+function taskDependencyState(task: ProjectTaskGraphNode): "doing" | "ready" | "blocked" | "done" {
+  if (task.status === "done") return "done";
+  if (task.blocked) return "blocked";
+  if (task.status === "doing") return "doing";
+  return "ready";
+}
+
+function taskDependencyWeight(task: ProjectTaskGraphNode): number {
+  return { doing: 0, ready: 1, blocked: 2, done: 3 }[taskDependencyState(task)];
+}
+
+function taskRiskScore(task: ProjectTaskGraphNode): number {
+  const text = `${task.title}\n${task.notes}`.toLowerCase();
+  const riskTerms = [
+    "security", "auth", "permission", "payment", "billing", "data", "migration", "deploy",
+    "release", "production", "rollback", "regression", "error", "failure", "blocked", "risk",
+    "breaking", "critical", "outage", "privacy", "compliance"
+  ];
+  const keywordScore = riskTerms.reduce((score, term) => score + (text.includes(term) ? 8 : 0), 0);
+  const dependencyImpact = Math.min(task.dependents.length * 6, 30);
+  const blockedRisk = task.blocked ? 12 : 0;
+  const staleProgressRisk = task.status === "doing" && task.progress < 50 ? 6 : 0;
+  const missingEvidenceRisk = task.status !== "done" && task.evidence.length === 0 ? 4 : 0;
+  return Math.min(100, keywordScore + dependencyImpact + blockedRisk + staleProgressRisk + missingEvidenceRisk);
+}
+
+function rankedTaskSummary(task: ProjectTaskGraphNode, rank: number, byId: Map<string, ProjectTaskGraphNode>) {
+  const dependencyState = taskDependencyState(task);
+  const priorityWeight = taskPriorityWeight(task.priority);
+  const riskScore = taskRiskScore(task);
+  return {
+    rank,
+    id: task.id,
+    title: task.title,
+    status: task.status,
+    priority: task.priority,
+    progress: task.progress,
+    dependencyState,
+    priorityWeight,
+    riskScore,
+    blockedBy: task.blockedBy.map((id) => taskLabel(byId.get(id) ?? { id, title: "unknown" })),
+    blockedReason: task.blockedReason,
+    unblockRequirement: task.unblockRequirement,
+    blockedAt: task.blockedAt,
+    blockedReasons: task.blockedReasons,
+    completionSummary: task.completionSummary,
+    completedFiles: task.completedFiles ?? [],
+    completionValidation: task.completionValidation,
+    completedAt: task.completedAt,
+    dependents: task.dependents,
+    evidenceCount: task.evidence.length,
+    updatedAt: task.updatedAt,
+    sortReasons: [
+      `dependency=${dependencyState}`,
+      `priority=${task.priority}`,
+      `risk=${riskScore}`,
+      task.dependents.length ? `unblocks=${task.dependents.length}` : "unblocks=0"
+    ]
+  };
+}
+
+function sortRankedProjectTasks<T extends ProjectTaskGraphNode>(tasks: T[]): T[] {
+  return tasks.slice().sort((left, right) => {
+    return taskDependencyWeight(left) - taskDependencyWeight(right)
+      || taskPriorityWeight(left.priority) - taskPriorityWeight(right.priority)
+      || taskRiskScore(right) - taskRiskScore(left)
+      || right.dependents.length - left.dependents.length
+      || left.progress - right.progress
+      || right.updatedAt.localeCompare(left.updatedAt);
+  });
+}
+
+function validationSnapshot(validation: Awaited<ReturnType<typeof validateProject>> | undefined): ProjectTaskItem["completionValidation"] | undefined {
+  if (!validation) return undefined;
+  return {
+    ok: validation.ok,
+    status: validation.status,
+    checkedAt: validation.checkedAt,
+    entryFile: validation.entryFile,
+    errors: validation.errors,
+    warnings: validation.warnings
+  };
+}
+
+function buildCompletionSummary(input: {
+  task: { title: string; notes: string };
+  completionSummary?: string;
+  completionNote?: string;
+  changedFiles: string[];
+  validation?: Awaited<ReturnType<typeof validateProject>>;
+}): string {
+  if (input.completionSummary?.trim()) return input.completionSummary.trim();
+  const parts = [`Completed ${input.task.title}.`];
+  const completionNote = input.completionNote?.trim();
+  if (completionNote) parts.push(completionNote);
+  if (input.changedFiles.length) parts.push(`Changed files: ${input.changedFiles.join(", ")}.`);
+  if (input.validation) {
+    parts.push(`Validation ${input.validation.ok ? "passed" : "failed"} (${input.validation.status}) for ${input.validation.entryFile}: ${input.validation.errors.length} error(s), ${input.validation.warnings.length} warning(s).`);
+  }
+  return parts.join(" ");
 }
 
 function sortResumeCandidates<T extends { priority: ProjectTaskPriority; updatedAt: string; progress: number }>(tasks: T[]): T[] {
@@ -1347,6 +1481,10 @@ export const projectTools: ToolModule[] = [
           priority: { type: "string", enum: ["low", "medium", "high", "urgent"] },
           notes: { type: "string" },
           progress: { type: "number", minimum: 0, maximum: 100 },
+          blockedReason: { type: "string", description: "Why this task is explicitly blocked. Used when status=blocked." },
+          unblockRequirement: { type: "string", description: "What must happen to unblock this task. Used when status=blocked." },
+          completionSummary: { type: "string", description: "Short completion summary. Used when status=done." },
+          completedFiles: { type: "array", items: { type: "string" }, description: "Files changed while completing this task." },
           dependsOn: { type: "array", items: { type: "string" }, description: "Task ids that must be done before this task can start." },
           evidence: {
             type: "array",
@@ -1381,6 +1519,129 @@ export const projectTools: ToolModule[] = [
         artifacts: [task.id, ...task.evidence.flatMap((item) => [item.url, item.artifact].filter((value): value is string => Boolean(value)))],
         structuredContent: { task },
         logs: [JSON.stringify(task, null, 2)],
+        errors: []
+      };
+    }
+  },
+  {
+    definition: {
+      name: "summarize_project_task_completion",
+      description: "Complete a project task with a durable completion summary, changed files, latest validation snapshot, and evidence links.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          taskId: { type: "string", description: "Existing task id such as task_001." },
+          completionSummary: { type: "string" },
+          changedFiles: { type: "array", items: { type: "string" } },
+          includeLatestValidation: { type: "boolean" }
+        },
+        required: ["projectId", "taskId"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: summarizeProjectTaskCompletionInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = summarizeProjectTaskCompletionInputSchema.parse(input);
+      const [existing, manifest] = await Promise.all([
+        getProjectTask(ctx.projectRoot, parsed.projectId, parsed.taskId),
+        getProjectManifest(ctx.projectRoot, parsed.projectId)
+      ]);
+      const validation = parsed.includeLatestValidation ? manifest.lastValidation : undefined;
+      const completionSummary = buildCompletionSummary({
+        task: existing,
+        completionSummary: parsed.completionSummary,
+        completionNote: "",
+        changedFiles: parsed.changedFiles,
+        validation
+      });
+      const evidence: ProjectTaskEvidenceLink[] = parsed.changedFiles.map((filePath) => ({ label: `Completed file: ${filePath}`, kind: "changed_file", filePath }));
+      if (validation) {
+        evidence.push({
+          label: `Completion validation: ${validation.status}`,
+          kind: "validation",
+          note: `${validation.ok ? "Passed" : "Failed"} at ${validation.checkedAt}; ${validation.errors.length} error(s), ${validation.warnings.length} warning(s).`,
+          recordedAt: validation.checkedAt
+        });
+      }
+      const task = await upsertProjectTask(ctx.projectRoot, parsed.projectId, {
+        taskId: existing.id,
+        title: existing.title,
+        status: "done",
+        priority: existing.priority,
+        notes: existing.notes,
+        progress: 100,
+        dependsOn: existing.dependsOn,
+        evidence: existing.evidence,
+        completionSummary,
+        completedFiles: parsed.changedFiles,
+        completionValidation: validationSnapshot(validation)
+      });
+      if (evidence.length) await recordProjectTaskEvidence(ctx.projectRoot, parsed.projectId, task.id, evidence);
+      const refreshed = await getProjectTask(ctx.projectRoot, parsed.projectId, task.id);
+      const summary = {
+        taskId: refreshed.id,
+        title: refreshed.title,
+        completionSummary: refreshed.completionSummary,
+        completedFiles: refreshed.completedFiles ?? [],
+        completionValidation: refreshed.completionValidation,
+        completedAt: refreshed.completedAt,
+        evidenceAdded: evidence
+      };
+      return {
+        ok: true,
+        summary: `Completed project task ${refreshed.id}: ${refreshed.title}.`,
+        jobId: parsed.projectId,
+        artifacts: [refreshed.id, ...parsed.changedFiles],
+        structuredContent: { task: refreshed, completion: summary },
+        logs: [JSON.stringify(summary, null, 2)],
+        errors: []
+      };
+    }
+  },
+  {
+    definition: {
+      name: "set_project_task_blocker",
+      description: "Set or clear the explicit blocked reason and unblock requirement for one project task.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          taskId: { type: "string", description: "Existing task id such as task_001." },
+          blockedReason: { type: "string" },
+          unblockRequirement: { type: "string" },
+          clear: { type: "boolean" },
+          statusWhenCleared: { type: "string", enum: ["todo", "doing"] }
+        },
+        required: ["projectId", "taskId"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: setProjectTaskBlockerInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = setProjectTaskBlockerInputSchema.parse(input);
+      const existing = await getProjectTask(ctx.projectRoot, parsed.projectId, parsed.taskId);
+      const task = await upsertProjectTask(ctx.projectRoot, parsed.projectId, {
+        taskId: existing.id,
+        title: existing.title,
+        status: parsed.clear ? parsed.statusWhenCleared : "blocked",
+        priority: existing.priority,
+        notes: existing.notes,
+        progress: existing.progress,
+        dependsOn: existing.dependsOn,
+        evidence: existing.evidence,
+        blockedReason: parsed.clear ? "" : parsed.blockedReason,
+        unblockRequirement: parsed.clear ? "" : parsed.unblockRequirement
+      });
+      return {
+        ok: true,
+        summary: parsed.clear ? `Cleared blocker for project task ${task.id}.` : `Set blocker for project task ${task.id}.`,
+        jobId: parsed.projectId,
+        artifacts: [task.id],
+        structuredContent: { task, blocker: { blockedReason: task.blockedReason, unblockRequirement: task.unblockRequirement, blockedAt: task.blockedAt } },
+        logs: [JSON.stringify({ task, clear: parsed.clear }, null, 2)],
         errors: []
       };
     }
@@ -1733,8 +1994,8 @@ export const projectTools: ToolModule[] = [
         projectId: parsed.projectId,
         lanes: {
           ready: ready.map((task) => ({ id: task.id, title: task.title, priority: task.priority, progress: task.progress })),
-          blocked: blocked.map((task) => ({ id: task.id, title: task.title, priority: task.priority, blockedBy: task.blockedBy.map((id) => taskLabel(byId.get(id) ?? { id, title: "unknown" })) })),
-          done: done.map((task) => ({ id: task.id, title: task.title, completedAt: task.completedAt }))
+          blocked: blocked.map((task) => ({ id: task.id, title: task.title, priority: task.priority, blockedReason: task.blockedReason, unblockRequirement: task.unblockRequirement, blockedReasons: task.blockedReasons, blockedBy: task.blockedBy.map((id) => taskLabel(byId.get(id) ?? { id, title: "unknown" })) })),
+          done: done.map((task) => ({ id: task.id, title: task.title, completionSummary: task.completionSummary, completedFiles: task.completedFiles ?? [], completionValidation: task.completionValidation, completedAt: task.completedAt }))
         },
         chains,
         mermaid: renderTaskMermaid(graph),
@@ -1775,6 +2036,14 @@ export const projectTools: ToolModule[] = [
         status: task.status,
         priority: task.priority,
         progress: task.progress,
+        blockedReason: task.blockedReason,
+        unblockRequirement: task.unblockRequirement,
+        blockedAt: task.blockedAt,
+        blockedReasons: task.blockedReasons,
+        completionSummary: task.completionSummary,
+        completedFiles: task.completedFiles ?? [],
+        completionValidation: task.completionValidation,
+        completedAt: task.completedAt,
         blockedBy: task.blockedBy.map((id) => taskLabel(byId.get(id) ?? { id, title: "unknown" })),
         dependents: task.dependents,
         evidenceCount: task.evidence.length,
@@ -1877,6 +2146,10 @@ export const projectTools: ToolModule[] = [
         status: task.status,
         priority: task.priority,
         progress: task.progress,
+        blockedReason: task.blockedReason,
+        unblockRequirement: task.unblockRequirement,
+        blockedAt: task.blockedAt,
+        blockedReasons: task.blockedReasons,
         blockedBy: task.blockedBy.map((id) => taskLabel(byId.get(id) ?? { id, title: "unknown" })),
         dependsOn: task.dependsOn,
         evidenceCount: task.evidence.length,
@@ -1967,7 +2240,7 @@ export const projectTools: ToolModule[] = [
         const result = {
           projectId: parsed.projectId,
           action: parsed.action,
-          selected: { id: selected.id, title: selected.title, status: selected.status, blockedBy: selected.blockedBy },
+          selected: { id: selected.id, title: selected.title, status: selected.status, blockedReason: selected.blockedReason, unblockRequirement: selected.unblockRequirement, blockedReasons: selected.blockedReasons, blockedBy: selected.blockedBy },
           stopReason: "selected_task_blocked",
           nextActions: [`Unblock ${taskLabel(selected)} by completing ${selected.blockedBy.map((id) => taskLabel(byId.get(id) ?? { id, title: "unknown" })).join(", ")}.`]
         };
@@ -2039,7 +2312,9 @@ export const projectTools: ToolModule[] = [
           notes: [selected.notes, parsed.completionNote, `Validation failed: ${validationResult.errors.join("; ")}`].filter(Boolean).join("\n"),
           progress: selected.progress,
           dependsOn: selected.dependsOn,
-          evidence: selected.evidence
+          evidence: selected.evidence,
+          blockedReason: `Static project validation failed: ${validationResult.errors.join("; ")}`,
+          unblockRequirement: "Fix validation errors, rerun validation, then clear this blocker."
         });
         if (parsed.bindEvidence && evidence.length > 0) await recordProjectTaskEvidence(ctx.projectRoot, parsed.projectId, blocked.id, evidence);
         const result = {
@@ -2070,7 +2345,16 @@ export const projectTools: ToolModule[] = [
         notes: [selected.notes, parsed.completionNote].filter(Boolean).join("\n"),
         progress: 100,
         dependsOn: selected.dependsOn,
-        evidence: selected.evidence
+        evidence: selected.evidence,
+        completionSummary: buildCompletionSummary({
+          task: selected,
+          completionSummary: parsed.completionSummary,
+          completionNote: parsed.completionNote,
+          changedFiles: parsed.changedFiles,
+          validation: validationResult
+        }),
+        completedFiles: parsed.changedFiles,
+        completionValidation: validationSnapshot(validationResult)
       });
       if (parsed.bindEvidence && evidence.length > 0) await recordProjectTaskEvidence(ctx.projectRoot, parsed.projectId, completed.id, evidence);
       const refreshed = await getProjectTaskGraph(ctx.projectRoot, parsed.projectId);
@@ -2139,6 +2423,10 @@ export const projectTools: ToolModule[] = [
           progress: task.progress,
           updatedAt: task.updatedAt,
           blocked: task.blocked,
+          blockedReason: task.blockedReason,
+          unblockRequirement: task.unblockRequirement,
+          blockedAt: task.blockedAt,
+          blockedReasons: task.blockedReasons,
           blockedBy: task.blockedBy.map((id) => taskLabel(byId.get(id) ?? { id, title: "unknown" }))
         }));
       const recentActivity = activity.taskHistory.slice(-parsed.historyLimit).reverse();
@@ -2158,6 +2446,10 @@ export const projectTools: ToolModule[] = [
           notes: resumeTask.notes,
           dependsOn: resumeTask.dependsOn,
           blockedBy: resumeTask.blockedBy,
+          blockedReason: resumeTask.blockedReason,
+          unblockRequirement: resumeTask.unblockRequirement,
+          blockedAt: resumeTask.blockedAt,
+          blockedReasons: resumeTask.blockedReasons,
           evidence: resumeTask.evidence,
           updatedAt: resumeTask.updatedAt
         } : undefined,
@@ -2186,14 +2478,67 @@ export const projectTools: ToolModule[] = [
   },
   {
     definition: {
+      name: "rank_project_tasks",
+      description: "Auto-rank project tasks by dependency readiness, priority, inferred risk, dependency impact, progress, and recency.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          includeDone: { type: "boolean" },
+          maxResults: { type: "number" }
+        },
+        required: ["projectId"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: rankProjectTasksInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = rankProjectTasksInputSchema.parse(input);
+      const graph = await getProjectTaskGraph(ctx.projectRoot, parsed.projectId);
+      const byId = new Map(graph.nodes.map((task) => [task.id, task]));
+      const ranked = sortRankedProjectTasks(graph.nodes.filter((task) => parsed.includeDone || task.status !== "done"))
+        .slice(0, parsed.maxResults)
+        .map((task, index) => rankedTaskSummary(task, index + 1, byId));
+      const top = ranked[0];
+      const result = {
+        projectId: parsed.projectId,
+        ranked,
+        counts: {
+          ready: ranked.filter((task) => task.dependencyState === "ready" || task.dependencyState === "doing").length,
+          blocked: ranked.filter((task) => task.dependencyState === "blocked").length,
+          done: ranked.filter((task) => task.dependencyState === "done").length,
+          total: ranked.length
+        },
+        sorting: ["dependency readiness", "priority", "inferred risk", "dependency impact", "progress", "updatedAt"],
+        nextActions: top
+          ? top.dependencyState === "blocked"
+            ? [`Unblock ${top.id}: ${top.title}.`]
+            : [`Work on ${top.id}: ${top.title}.`]
+          : ["No tasks available to rank."]
+      };
+      return {
+        ok: graph.cycles.length === 0,
+        summary: top ? `Top ranked task is ${top.id}: ${top.title}.` : "No project tasks to rank.",
+        jobId: parsed.projectId,
+        artifacts: ranked.map((task) => task.id),
+        structuredContent: result,
+        logs: [JSON.stringify(result, null, 2)],
+        errors: graph.cycles.map((cycle) => `Cycle: ${cycle.join(" -> ")}`)
+      };
+    }
+  },
+  {
+    definition: {
       name: "list_project_tasks",
-      description: "List persistent project tasks, sorted by active status, priority, and update time.",
+      description: "List persistent project tasks, default-ranked by dependency readiness, priority, inferred risk, dependency impact, and update time.",
       inputSchema: {
         type: "object",
         properties: {
           projectId: { type: "string" },
           status: { type: "string", enum: ["todo", "doing", "blocked", "done"] },
-          priority: { type: "string", enum: ["low", "medium", "high", "urgent"] }
+          priority: { type: "string", enum: ["low", "medium", "high", "urgent"] },
+          sortBy: { type: "string", enum: ["rank", "status", "updated"] }
         },
         required: ["projectId"],
         additionalProperties: false
@@ -2203,10 +2548,23 @@ export const projectTools: ToolModule[] = [
     schema: listProjectTasksInputSchema,
     handler: async (input, ctx) => {
       const parsed = listProjectTasksInputSchema.parse(input);
-      const tasks = await listProjectTasks(ctx.projectRoot, parsed.projectId, {
-        status: parsed.status as ProjectTaskStatus | undefined,
-        priority: parsed.priority as ProjectTaskPriority | undefined
+      const graph = await getProjectTaskGraph(ctx.projectRoot, parsed.projectId);
+      const byId = new Map(graph.nodes.map((task) => [task.id, task]));
+      const filtered = graph.nodes.filter((task) => {
+        return (!parsed.status || task.status === parsed.status)
+          && (!parsed.priority || task.priority === parsed.priority);
       });
+      const tasks = parsed.sortBy === "rank"
+        ? sortRankedProjectTasks(filtered)
+        : parsed.sortBy === "updated"
+          ? filtered.slice().sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+          : filtered.slice().sort((left, right) => {
+            const statusRank: Record<ProjectTaskStatus, number> = { doing: 0, blocked: 1, todo: 2, done: 3 };
+            return statusRank[left.status] - statusRank[right.status]
+              || taskPriorityWeight(left.priority) - taskPriorityWeight(right.priority)
+              || right.updatedAt.localeCompare(left.updatedAt);
+          });
+      const ranked = tasks.map((task, index) => rankedTaskSummary(task, index + 1, byId));
       const counts = tasks.reduce((acc, task) => {
         acc[task.status] = (acc[task.status] ?? 0) + 1;
         return acc;
@@ -2216,8 +2574,8 @@ export const projectTools: ToolModule[] = [
         summary: `Listed ${tasks.length} project task(s).`,
         jobId: parsed.projectId,
         artifacts: tasks.map((task) => task.id),
-        structuredContent: { tasks, counts, total: tasks.length },
-        logs: [JSON.stringify({ tasks, counts }, null, 2)],
+        structuredContent: { tasks, ranked, counts, total: tasks.length, sortBy: parsed.sortBy },
+        logs: [JSON.stringify({ tasks, ranked, counts, sortBy: parsed.sortBy }, null, 2)],
         errors: []
       };
     }

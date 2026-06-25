@@ -58,6 +58,16 @@ type SmokeStep =
   | { action: "waitForUrl"; url: string; timeoutMs?: number }
   | { action: "waitForSelector"; selector: string; timeoutMs?: number };
 
+type RecordedInteractionStep =
+  | { action: "click"; selector: string; label?: string; timestampMs?: number; timeoutMs?: number }
+  | { action: "fill"; selector: string; value: string; label?: string; timestampMs?: number; timeoutMs?: number }
+  | { action: "select"; selector: string; value: string; label?: string; timestampMs?: number; timeoutMs?: number }
+  | { action: "press"; key: string; selector?: string; label?: string; timestampMs?: number; timeoutMs?: number }
+  | { action: "scroll"; x?: number; y?: number; label?: string; timestampMs?: number }
+  | { action: "wait"; ms: number; label?: string; timestampMs?: number }
+  | { action: "assert"; text: string; label?: string; timestampMs?: number; timeoutMs?: number }
+  | { action: "screenshot"; label?: string; timestampMs?: number };
+
 type AxeImpact = "minor" | "moderate" | "serious" | "critical";
 type AxeViolation = {
   id?: string;
@@ -156,6 +166,106 @@ const runSmokeFlowSchema = z.object({
   path: ["sessionId"]
 });
 
+const storageExpectationSchema = z.object({
+  key: z.string().min(1).max(300),
+  value: z.string().max(8000).optional(),
+  contains: z.string().max(8000).optional()
+}).refine((value) => value.value !== undefined || value.contains !== undefined, {
+  message: "Either value or contains is required.",
+  path: ["value"]
+});
+
+const formPersistenceFieldSchema = z.object({
+  selector: z.string().min(1).max(500),
+  value: z.string().max(8000),
+  type: z.enum(["text", "select", "checkbox"]).optional().default("text"),
+  expectedAfterReload: z.string().max(8000).optional()
+});
+
+const testFormPersistenceSchema = z.object({
+  sessionId: z.string().min(1).optional(),
+  url: z.string().url().optional(),
+  fields: z.array(formPersistenceFieldSchema).min(1).max(30),
+  clickSelectors: z.array(z.string().min(1).max(500)).max(20).optional().default([]),
+  submitSelector: z.string().min(1).max(500).optional(),
+  seedLocalStorage: z.record(z.string(), z.string()).optional().default({}),
+  seedSessionStorage: z.record(z.string(), z.string()).optional().default({}),
+  resetStorage: z.boolean().optional().default(false),
+  expectedLocalStorage: z.array(storageExpectationSchema).max(40).optional().default([]),
+  expectedSessionStorage: z.array(storageExpectationSchema).max(40).optional().default([]),
+  expectedIndexedDbDatabases: z.array(z.string().min(1).max(200)).max(40).optional().default([]),
+  checkNewPageSameContext: z.boolean().optional().default(false),
+  timeoutMs: z.number().int().min(500).max(120000).optional().default(30000)
+}).refine((value) => Boolean(value.sessionId || value.url), {
+  message: "Either sessionId or url is required.",
+  path: ["sessionId"]
+});
+
+const recordedInteractionStepSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("click"), selector: z.string().min(1).max(500), label: z.string().min(1).max(160).optional(), timestampMs: z.number().int().min(0).optional(), timeoutMs: z.number().int().min(200).max(120000).optional() }),
+  z.object({ action: z.literal("fill"), selector: z.string().min(1).max(500), value: z.string().max(8000), label: z.string().min(1).max(160).optional(), timestampMs: z.number().int().min(0).optional(), timeoutMs: z.number().int().min(200).max(120000).optional() }),
+  z.object({ action: z.literal("select"), selector: z.string().min(1).max(500), value: z.string().max(1000), label: z.string().min(1).max(160).optional(), timestampMs: z.number().int().min(0).optional(), timeoutMs: z.number().int().min(200).max(120000).optional() }),
+  z.object({ action: z.literal("press"), key: z.string().min(1).max(80), selector: z.string().min(1).max(500).optional(), label: z.string().min(1).max(160).optional(), timestampMs: z.number().int().min(0).optional(), timeoutMs: z.number().int().min(200).max(120000).optional() }),
+  z.object({ action: z.literal("scroll"), x: z.number().int().optional().default(0), y: z.number().int().optional().default(600), label: z.string().min(1).max(160).optional(), timestampMs: z.number().int().min(0).optional() }),
+  z.object({ action: z.literal("wait"), ms: z.number().int().min(50).max(30000), label: z.string().min(1).max(160).optional(), timestampMs: z.number().int().min(0).optional() }),
+  z.object({ action: z.literal("assert"), text: z.string().min(1).max(1000), label: z.string().min(1).max(160).optional(), timestampMs: z.number().int().min(0).optional(), timeoutMs: z.number().int().min(200).max(120000).optional() }),
+  z.object({ action: z.literal("screenshot"), label: z.string().min(1).max(160).optional(), timestampMs: z.number().int().min(0).optional() })
+]);
+
+const recordInteractionFlowSchema = z.object({
+  title: z.string().min(1).max(160).optional().default("Interaction recording"),
+  url: z.string().url().optional(),
+  viewport: z.enum(["desktop", "tablet", "mobile"]).optional().default("desktop"),
+  steps: z.array(recordedInteractionStepSchema).min(1).max(80),
+  includeReplayHints: z.boolean().optional().default(true),
+  filenamePrefix: z.string().min(1).max(80).optional().default("interaction-recording")
+});
+
+const replayInteractionRecordingSchema = z.object({
+  sessionId: z.string().min(1).optional(),
+  url: z.string().url().optional(),
+  recording: z.object({
+    title: z.string().min(1).max(160).optional(),
+    url: z.string().url().optional(),
+    steps: z.array(recordedInteractionStepSchema).min(1).max(80)
+  }).optional(),
+  steps: z.array(recordedInteractionStepSchema).min(1).max(80).optional(),
+  captureScreenshots: z.boolean().optional().default(true),
+  captureConsole: z.boolean().optional().default(true),
+  captureNetwork: z.boolean().optional().default(true),
+  dryRun: z.boolean().optional().default(false),
+  timeoutMs: z.number().int().min(500).max(120000).optional().default(30000),
+  stopOnFailure: z.boolean().optional().default(true)
+}).refine((value) => Boolean(value.recording?.steps.length || value.steps?.length), {
+  message: "recording.steps or steps is required.",
+  path: ["recording"]
+}).refine((value) => value.dryRun || Boolean(value.sessionId || value.url || value.recording?.url), {
+  message: "sessionId, url, or recording.url is required unless dryRun=true.",
+  path: ["url"]
+});
+
+const profileWebPerformanceSchema = z.object({
+  sessionId: z.string().min(1).optional(),
+  url: z.string().url().optional(),
+  sampleMs: z.number().int().min(500).max(30000).optional().default(3000),
+  targetFps: z.number().int().min(15).max(144).optional().default(60),
+  longTaskThresholdMs: z.number().int().min(50).max(1000).optional().default(50),
+  captureScreenshot: z.boolean().optional().default(false),
+  captureTraceHints: z.boolean().optional().default(true),
+  sampleMetrics: z.object({
+    fpsSamples: z.array(z.number().min(0).max(240)).max(600).optional().default([]),
+    longTasks: z.array(z.object({ duration: z.number().min(0), name: z.string().optional().default("task"), startTime: z.number().min(0).optional().default(0) })).max(500).optional().default([]),
+    memoryTimeline: z.array(z.object({ usedJSHeapSize: z.number().min(0), totalJSHeapSize: z.number().min(0).optional(), timestampMs: z.number().min(0).optional() })).max(200).optional().default([]),
+    layoutShifts: z.array(z.object({ value: z.number().min(0), startTime: z.number().min(0).optional().default(0) })).max(500).optional().default([]),
+    resources: z.array(z.object({ name: z.string(), initiatorType: z.string().optional().default("resource"), duration: z.number().min(0), transferSize: z.number().min(0).optional().default(0) })).max(500).optional().default([]),
+    scripts: z.array(z.object({ name: z.string(), duration: z.number().min(0), transferSize: z.number().min(0).optional().default(0) })).max(200).optional().default([]),
+    selectorStats: z.array(z.object({ selector: z.string(), count: z.number().int().min(0), estimatedCost: z.number().min(0) })).max(200).optional().default([])
+  }).optional()
+}).refine((value) => Boolean(value.sessionId || value.url || value.sampleMetrics), {
+  message: "sessionId, url, or sampleMetrics is required.",
+  path: ["url"]
+});
+
 function escapeHtml(value: string): string {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -206,6 +316,16 @@ async function makeImageArtifact(ctx: ToolContext, filename: string, image: Buff
     filename,
     contentType: "image/png",
     content: image
+  });
+  return makeArtifactUrl(ctx.publicBaseUrl, artifact.id, artifact.filename);
+}
+
+async function makeJsonArtifact(ctx: ToolContext, filename: string, payload: unknown): Promise<string> {
+  const artifact = await createArtifact({
+    artifactRoot: ctx.artifactRoot,
+    filename,
+    contentType: "application/json",
+    content: Buffer.from(`${JSON.stringify(payload, null, 2)}\n`, "utf8")
   });
   return makeArtifactUrl(ctx.publicBaseUrl, artifact.id, artifact.filename);
 }
@@ -278,6 +398,245 @@ async function resolveSession(sessionId: string | undefined, url: string | undef
     throw new Error("Either sessionId or url is required.");
   }
   return openTemporarySession(url, 30000);
+}
+
+function interactionStepSummary(step: RecordedInteractionStep, index: number) {
+  if (step.action === "click") return `${index + 1}. click ${step.selector}`;
+  if (step.action === "fill") return `${index + 1}. fill ${step.selector}`;
+  if (step.action === "select") return `${index + 1}. select ${step.selector}=${step.value}`;
+  if (step.action === "press") return `${index + 1}. press ${step.key}${step.selector ? ` in ${step.selector}` : ""}`;
+  if (step.action === "scroll") return `${index + 1}. scroll x=${step.x ?? 0} y=${step.y ?? 0}`;
+  if (step.action === "wait") return `${index + 1}. wait ${step.ms}ms`;
+  if (step.action === "assert") return `${index + 1}. assert text ${step.text}`;
+  return `${index + 1}. screenshot ${step.label ?? ""}`.trim();
+}
+
+function normalizeRecordedSteps(steps: RecordedInteractionStep[]) {
+  return steps.map((step, index) => ({
+    id: `step_${String(index + 1).padStart(2, "0")}`,
+    ...step,
+    label: step.label ?? interactionStepSummary(step, index),
+    timestampMs: step.timestampMs ?? index * 1000
+  }));
+}
+
+function renderInteractionReport(title: string, rows: Array<Record<string, unknown>>, intro: string) {
+  return `<p>${escapeHtml(intro)}</p>${tableFromRows(rows)}`;
+}
+
+async function executeRecordedStep(page: Page, step: RecordedInteractionStep, timeoutMs: number) {
+  if (step.action === "click") await page.click(step.selector, { timeout: step.timeoutMs ?? timeoutMs });
+  else if (step.action === "fill") await page.fill(step.selector, step.value, { timeout: step.timeoutMs ?? timeoutMs });
+  else if (step.action === "select") await page.selectOption(step.selector, step.value, { timeout: step.timeoutMs ?? timeoutMs });
+  else if (step.action === "press") {
+    if (step.selector) await page.locator(step.selector).press(step.key, { timeout: step.timeoutMs ?? timeoutMs });
+    else await page.keyboard.press(step.key);
+  } else if (step.action === "scroll") await page.evaluate(({ x, y }) => window.scrollBy(x ?? 0, y ?? 0), { x: step.x ?? 0, y: step.y ?? 0 });
+  else if (step.action === "wait") await page.waitForTimeout(step.ms);
+  else if (step.action === "assert") await page.getByText(step.text).first().waitFor({ timeout: step.timeoutMs ?? timeoutMs });
+}
+
+type PersistenceAssertion = {
+  id: string;
+  ok: boolean;
+  message: string;
+  expected?: string;
+  actual?: string;
+};
+
+async function seedBrowserStorage(page: Page, local: Record<string, string>, session: Record<string, string>, reset: boolean) {
+  await page.evaluate(({ local, session, reset }) => {
+    if (reset) {
+      window.localStorage.clear();
+      window.sessionStorage.clear();
+    }
+    for (const [key, value] of Object.entries(local)) window.localStorage.setItem(key, value);
+    for (const [key, value] of Object.entries(session)) window.sessionStorage.setItem(key, value);
+  }, { local, session, reset });
+}
+
+async function fieldValue(page: Page, selector: string, type: z.infer<typeof formPersistenceFieldSchema>["type"]) {
+  return page.$eval(selector, (element, type) => {
+    const input = element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+    if (type === "checkbox") return String((input as HTMLInputElement).checked);
+    return String(input.value ?? "");
+  }, type);
+}
+
+async function fillPersistenceField(page: Page, field: z.infer<typeof formPersistenceFieldSchema>, timeoutMs: number) {
+  await page.waitForSelector(field.selector, { timeout: timeoutMs });
+  if (field.type === "select") await page.selectOption(field.selector, field.value, { timeout: timeoutMs });
+  else if (field.type === "checkbox") {
+    const desired = /^(true|1|yes|checked)$/i.test(field.value);
+    const checked = await page.isChecked(field.selector, { timeout: timeoutMs });
+    if (checked !== desired) await page.click(field.selector, { timeout: timeoutMs });
+  } else {
+    await page.fill(field.selector, field.value, { timeout: timeoutMs });
+  }
+}
+
+async function collectStorage(page: Page) {
+  return page.evaluate(`(async () => {
+    const collect = (store) => {
+      const rows = {};
+      for (let index = 0; index < store.length; index += 1) {
+        const key = store.key(index);
+        if (key) rows[key] = store.getItem(key) ?? "";
+      }
+      return rows;
+    };
+    const databases = typeof indexedDB.databases === "function"
+      ? await indexedDB.databases().then((items) => items.map((item) => item.name).filter((name) => !!name)).catch(() => [])
+      : [];
+    return { localStorage: collect(window.localStorage), sessionStorage: collect(window.sessionStorage), indexedDbDatabases: databases };
+  })()`) as Promise<{ localStorage: Record<string, string>; sessionStorage: Record<string, string>; indexedDbDatabases: string[] }>;
+}
+
+function storageAssertions(kind: "localStorage" | "sessionStorage", values: Record<string, string>, expectations: z.infer<typeof storageExpectationSchema>[]): PersistenceAssertion[] {
+  return expectations.map((expectation) => {
+    const actual = values[expectation.key];
+    const ok = expectation.value !== undefined ? actual === expectation.value : actual?.includes(expectation.contains ?? "") === true;
+    return { id: `${kind}:${expectation.key}`, ok, message: ok ? `${kind} ${expectation.key} matched.` : `${kind} ${expectation.key} mismatch.`, expected: expectation.value ?? `contains ${expectation.contains}`, actual };
+  });
+}
+
+async function assertPersistenceState(page: Page, input: z.infer<typeof testFormPersistenceSchema>, phase: string): Promise<{ phase: string; assertions: PersistenceAssertion[]; storage: Awaited<ReturnType<typeof collectStorage>> }> {
+  const assertions: PersistenceAssertion[] = [];
+  for (const field of input.fields) {
+    const expected = field.expectedAfterReload ?? field.value;
+    const actual = await fieldValue(page, field.selector, field.type).catch((error) => `__ERROR__ ${error instanceof Error ? error.message : "read failed"}`);
+    assertions.push({ id: `${phase}:field:${field.selector}`, ok: actual === expected, message: actual === expected ? `Field ${field.selector} persisted.` : `Field ${field.selector} did not persist.`, expected, actual });
+  }
+  const storage = await collectStorage(page);
+  assertions.push(...storageAssertions("localStorage", storage.localStorage, input.expectedLocalStorage));
+  assertions.push(...storageAssertions("sessionStorage", storage.sessionStorage, input.expectedSessionStorage));
+  for (const dbName of input.expectedIndexedDbDatabases) {
+    const ok = storage.indexedDbDatabases.includes(dbName);
+    assertions.push({ id: `indexedDB:${dbName}`, ok, message: ok ? `IndexedDB ${dbName} exists.` : `IndexedDB ${dbName} was not found.`, expected: dbName, actual: storage.indexedDbDatabases.join(", ") });
+  }
+  return { phase, assertions, storage };
+}
+
+function persistenceReportHtml(report: Record<string, unknown>) {
+  const phases = report.phases as Array<{ phase: string; assertions: PersistenceAssertion[] }> | undefined;
+  const rows = (phases ?? []).flatMap((phase) => phase.assertions.map((assertion) => ({ phase: phase.phase, ...assertion })));
+  return `<h1>Form Persistence Report</h1>${tableFromRows(rows)}<h2>Summary</h2><pre>${escapeHtml(JSON.stringify(report, null, 2))}</pre>`;
+}
+
+function percentile(values: number[], p: number) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
+  return Number(sorted[index].toFixed(2));
+}
+
+function profileFindings(input: { targetFps: number; longTaskThresholdMs: number; metrics: z.infer<typeof profileWebPerformanceSchema>["sampleMetrics"] }) {
+  const metrics = input.metrics ?? { fpsSamples: [], longTasks: [], memoryTimeline: [], layoutShifts: [], resources: [], scripts: [], selectorStats: [] };
+  const fpsSamples = metrics.fpsSamples ?? [];
+  const longTasks = (metrics.longTasks ?? []).filter((task) => task.duration >= input.longTaskThresholdMs);
+  const memoryTimeline = metrics.memoryTimeline ?? [];
+  const resources = metrics.resources ?? [];
+  const scripts = metrics.scripts ?? [];
+  const selectorStats = metrics.selectorStats ?? [];
+  const layoutShifts = metrics.layoutShifts ?? [];
+  const memoryGrowthBytes = memoryTimeline.length >= 2 ? memoryTimeline.at(-1)!.usedJSHeapSize - memoryTimeline[0].usedJSHeapSize : 0;
+  const fpsSummary = {
+    average: fpsSamples.length ? Number((fpsSamples.reduce((sum, value) => sum + value, 0) / fpsSamples.length).toFixed(2)) : undefined,
+    p10: fpsSamples.length ? percentile(fpsSamples, 10) : undefined,
+    min: fpsSamples.length ? Math.min(...fpsSamples) : undefined,
+    droppedFrameRatio: fpsSamples.length ? Number((fpsSamples.filter((fps) => fps < input.targetFps * 0.75).length / fpsSamples.length).toFixed(3)) : undefined
+  };
+  const paintResourcePattern = /image|img|css|font/i;
+  const paintCost = resources.filter((resource) => paintResourcePattern.test(resource.initiatorType)).reduce((sum, resource) => sum + resource.duration, 0);
+  const totalBlockingTime = longTasks.reduce((sum, task) => sum + Math.max(0, task.duration - 50), 0);
+  const findings: Array<{ severity: "high" | "medium" | "low"; category: string; message: string; suggestedFix: string }> = [];
+  if (fpsSummary.average !== undefined && fpsSummary.average < input.targetFps * 0.75) findings.push({ severity: "high", category: "fps", message: `Average FPS ${fpsSummary.average} is below target ${input.targetFps}.`, suggestedFix: "Reduce animation work, simplify WebGL/SVG effects, virtualize heavy DOM, or throttle expensive loops." });
+  if ((fpsSummary.droppedFrameRatio ?? 0) > 0.25) findings.push({ severity: "medium", category: "jank", message: `${Math.round((fpsSummary.droppedFrameRatio ?? 0) * 100)}% of FPS samples dropped below the jank threshold.`, suggestedFix: "Profile animation callbacks and move non-visual work out of the frame loop." });
+  if (longTasks.length) findings.push({ severity: totalBlockingTime > 300 ? "high" : "medium", category: "long_task", message: `${longTasks.length} long task(s), total blocking time ${Math.round(totalBlockingTime)}ms.`, suggestedFix: "Split long JavaScript work, defer non-critical initialization, and avoid synchronous layout reads after writes." });
+  if (memoryGrowthBytes > 10 * 1024 * 1024) findings.push({ severity: "medium", category: "memory", message: `JS heap grew by ${Math.round(memoryGrowthBytes / 1024 / 1024)}MB during the sample.`, suggestedFix: "Check retained objects, event listeners, caches, textures, and detached DOM nodes." });
+  const cls = layoutShifts.reduce((sum, shift) => sum + shift.value, 0);
+  if (cls > 0.1) findings.push({ severity: "medium", category: "layout", message: `Cumulative layout shift ${Number(cls.toFixed(3))} may indicate layout thrashing or unstable content.`, suggestedFix: "Reserve dimensions, batch DOM writes, and avoid measuring layout repeatedly during animation." });
+  if (paintCost > 1000) findings.push({ severity: "medium", category: "paint", message: `Paint-related resources consumed about ${Math.round(paintCost)}ms.`, suggestedFix: "Compress large images, reduce filters/shadows, and simplify SVG paint areas." });
+  const heavyScripts = scripts.filter((script) => script.duration > 200).sort((a, b) => b.duration - a.duration).slice(0, 8);
+  if (heavyScripts.length) findings.push({ severity: "medium", category: "script", message: `${heavyScripts.length} script resource(s) took more than 200ms.`, suggestedFix: "Code split, defer, cache, or replace expensive script bundles." });
+  const heavySelectors = selectorStats.filter((selector) => selector.estimatedCost > 1000 || selector.count > 1000).sort((a, b) => b.estimatedCost - a.estimatedCost).slice(0, 8);
+  if (heavySelectors.length) findings.push({ severity: "low", category: "selector", message: `${heavySelectors.length} selector(s) have high DOM fan-out or estimated query cost.`, suggestedFix: "Use scoped selectors, IDs/data attributes, or cache repeated query results." });
+  const score = Math.max(0, Math.min(100, 100 - findings.reduce((sum, finding) => sum + (finding.severity === "high" ? 25 : finding.severity === "medium" ? 12 : 5), 0)));
+  return {
+    score,
+    status: findings.some((finding) => finding.severity === "high") ? "poor" : findings.length ? "needs_attention" : "pass",
+    fpsSummary,
+    longTaskBreakdown: { count: longTasks.length, totalBlockingTime: Math.round(totalBlockingTime), worstTasks: longTasks.sort((a, b) => b.duration - a.duration).slice(0, 10) },
+    memoryTimeline,
+    memoryGrowthBytes,
+    layoutReport: { cumulativeLayoutShift: Number(cls.toFixed(3)), shifts: layoutShifts.slice(0, 20) },
+    paintReport: { estimatedPaintResourceMs: Math.round(paintCost), paintResources: resources.filter((resource) => paintResourcePattern.test(resource.initiatorType)).slice(0, 20) },
+    scriptHotspots: heavyScripts,
+    heavySelectors,
+    animationJankReport: { targetFps: input.targetFps, droppedFrameRatio: fpsSummary.droppedFrameRatio, samplesBelowTarget: fpsSamples.filter((fps) => fps < input.targetFps).length },
+    findings,
+    recommendations: [...new Set(findings.map((finding) => finding.suggestedFix))]
+  };
+}
+
+async function collectPerformanceSample(page: Page, sampleMs: number) {
+  return page.evaluate(async ({ sampleMs }) => {
+    const fpsSamples: number[] = [];
+    const longTasks: Array<{ name: string; duration: number; startTime: number }> = [];
+    const layoutShifts: Array<{ value: number; startTime: number }> = [];
+    const memoryTimeline: Array<{ usedJSHeapSize: number; totalJSHeapSize?: number; timestampMs: number }> = [];
+    const observers: PerformanceObserver[] = [];
+    const observe = (type: string, cb: (entry: PerformanceEntry) => void) => {
+      try {
+        const observer = new PerformanceObserver((list) => list.getEntries().forEach(cb));
+        observer.observe({ type, buffered: true });
+        observers.push(observer);
+      } catch {
+        // Unsupported browser performance entry type.
+      }
+    };
+    observe("longtask", (entry) => longTasks.push({ name: entry.name, duration: entry.duration, startTime: entry.startTime }));
+    observe("layout-shift", (entry) => {
+      const value = (entry as PerformanceEntry & { value?: number; hadRecentInput?: boolean }).value ?? 0;
+      const hadRecentInput = (entry as PerformanceEntry & { hadRecentInput?: boolean }).hadRecentInput ?? false;
+      if (!hadRecentInput) layoutShifts.push({ value, startTime: entry.startTime });
+    });
+    let last = performance.now();
+    let frames = 0;
+    let cancelled = false;
+    const frame = () => {
+      if (cancelled) return;
+      frames += 1;
+      const now = performance.now();
+      if (now - last >= 500) {
+        fpsSamples.push(Number(((frames * 1000) / (now - last)).toFixed(2)));
+        frames = 0;
+        last = now;
+      }
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+    const memoryTimer = window.setInterval(() => {
+      const perf = performance as Performance & { memory?: { usedJSHeapSize: number; totalJSHeapSize: number } };
+      if (perf.memory) memoryTimeline.push({ usedJSHeapSize: perf.memory.usedJSHeapSize, totalJSHeapSize: perf.memory.totalJSHeapSize, timestampMs: performance.now() });
+    }, 500);
+    await new Promise((resolve) => window.setTimeout(resolve, sampleMs));
+    cancelled = true;
+    window.clearInterval(memoryTimer);
+    observers.forEach((observer) => observer.disconnect());
+    const resources = performance.getEntriesByType("resource").map((entry) => {
+      const resource = entry as PerformanceResourceTiming;
+      return { name: resource.name, initiatorType: resource.initiatorType, duration: Number(resource.duration.toFixed(2)), transferSize: resource.transferSize ?? 0 };
+    });
+    const scripts = resources.filter((resource) => /script/i.test(resource.initiatorType) || /\.m?js(?:\?|$)/i.test(resource.name));
+    const selectorStats = ["*", "div", "svg *", "canvas", "table tr", "[data-state]", "[class]"].map((selector) => {
+      const start = performance.now();
+      const count = document.querySelectorAll(selector).length;
+      const estimatedCost = Number(((performance.now() - start) * Math.max(1, count)).toFixed(2));
+      return { selector, count, estimatedCost };
+    });
+    return { fpsSamples, longTasks, memoryTimeline, layoutShifts, resources, scripts, selectorStats };
+  }, { sampleMs });
 }
 
 async function collectDomSnapshot(page: Page, maxTextLength: number, collectHeadings: boolean): Promise<Omit<DomSnapshotResult, "sessionId">> {
@@ -790,6 +1149,335 @@ export const browserObservabilityTools: ToolModule[] = [
           logs: trimLogLines([`session=${session.id}`, `count=${records.length}`]),
           structuredContent: trimStructuredContent(sanitizeSecretLikeValue({ sessionId: session.id, records }) as Record<string, unknown>),
           errors: []
+        };
+      } finally {
+        await close();
+      }
+    }
+  },
+  {
+    definition: {
+      name: "profile_web_performance",
+      description: "Profile laggy web demos with FPS samples, long tasks, memory growth, layout shift, paint/resource cost, script hotspots, heavy selectors, and animation jank recommendations.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          url: { type: "string", format: "uri" },
+          sampleMs: { type: "number" },
+          targetFps: { type: "number" },
+          longTaskThresholdMs: { type: "number" },
+          captureScreenshot: { type: "boolean" },
+          captureTraceHints: { type: "boolean" },
+          sampleMetrics: { type: "object" }
+        },
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: false,
+    schema: profileWebPerformanceSchema,
+    handler: async (input, ctx) => {
+      const parsed = profileWebPerformanceSchema.parse(input);
+      const artifacts: string[] = [];
+      let sample = parsed.sampleMetrics;
+      let targetUrl = parsed.url;
+      let screenshot: string | undefined;
+      if (!sample) {
+        const { session, close } = await resolveSession(parsed.sessionId, parsed.url);
+        try {
+          targetUrl = session.page.url();
+          sample = await collectPerformanceSample(session.page, parsed.sampleMs);
+          if (parsed.captureScreenshot) {
+            const image = await session.page.screenshot({ type: "png", fullPage: true }).catch(() => undefined);
+            if (image) {
+              screenshot = await makeImageArtifact(ctx, safeArtifactFilename(`performance-${session.id}`, Date.now().toString(), "png"), image);
+              artifacts.push(screenshot);
+            }
+          }
+        } finally {
+          await close();
+        }
+      }
+      const analysis = profileFindings({ targetFps: parsed.targetFps, longTaskThresholdMs: parsed.longTaskThresholdMs, metrics: sample });
+      const report = {
+        url: targetUrl,
+        sampledAt: new Date().toISOString(),
+        sampleMs: parsed.sampleMs,
+        targetFps: parsed.targetFps,
+        screenshot,
+        ...analysis,
+        traceHints: parsed.captureTraceHints ? [
+          "For JavaScript hot spots, rerun inspect_webpage_plus with captureTrace=true and inspect the trace in Playwright Trace Viewer.",
+          "For WebGL scenes, compare draw calls, texture sizes, shader/material count, and requestAnimationFrame work per frame.",
+          "For large admin panels, verify list virtualization, memoized render paths, and scoped DOM queries."
+        ] : []
+      };
+      const jsonUrl = await makeJsonArtifact(ctx, safeArtifactFilename("web-performance", Date.now().toString(), "json"), report);
+      artifacts.push(jsonUrl);
+      const rows = [
+        { metric: "score", value: report.score },
+        { metric: "status", value: report.status },
+        { metric: "averageFps", value: report.fpsSummary.average ?? "n/a" },
+        { metric: "longTasks", value: report.longTaskBreakdown.count },
+        { metric: "memoryGrowthBytes", value: report.memoryGrowthBytes },
+        { metric: "cumulativeLayoutShift", value: report.layoutReport.cumulativeLayoutShift },
+        { metric: "scriptHotspots", value: report.scriptHotspots.length },
+        { metric: "heavySelectors", value: report.heavySelectors.length }
+      ];
+      const html = `${tableFromRows(rows)}<h3>Findings</h3>${tableFromRows(report.findings as Array<Record<string, unknown>>)}<h3>Recommendations</h3><ul>${report.recommendations.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+      const reportUrl = await makeShareArtifact(ctx, safeArtifactFilename("web-performance", `${Date.now()}-report`, "html"), "Web Performance Profile", html);
+      artifacts.push(reportUrl);
+      return {
+        ok: report.findings.every((finding) => finding.severity !== "high"),
+        summary: `Performance profile ${report.status} with score ${report.score}.`,
+        jobId: parsed.sessionId ?? targetUrl,
+        artifacts,
+        logs: trimLogLines([`score=${report.score}`, `status=${report.status}`, `findings=${report.findings.length}`]),
+        structuredContent: trimStructuredContent(sanitizeSecretLikeValue({ ...report, reportUrl, jsonUrl }) as Record<string, unknown>),
+        errors: report.findings.filter((finding) => finding.severity === "high").map((finding) => finding.message)
+      };
+    }
+  },
+  {
+    definition: {
+      name: "record_interaction_flow",
+      description: "Create a replayable UI interaction recording from clicks, inputs, scrolls, waits, assertions, and screenshots, with JSON and HTML artifacts for bug reproduction.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          url: { type: "string", format: "uri" },
+          viewport: { type: "string", enum: ["desktop", "tablet", "mobile"] },
+          steps: { type: "array" },
+          includeReplayHints: { type: "boolean" },
+          filenamePrefix: { type: "string" }
+        },
+        required: ["steps"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: false,
+    schema: recordInteractionFlowSchema,
+    handler: async (input, ctx) => {
+      const parsed = recordInteractionFlowSchema.parse(input);
+      const recordingId = `interaction_${Date.now().toString(36)}`;
+      const steps = normalizeRecordedSteps(parsed.steps);
+      const recording = {
+        version: 1,
+        recordingId,
+        title: parsed.title,
+        url: parsed.url,
+        viewport: parsed.viewport,
+        createdAt: new Date().toISOString(),
+        steps,
+        replayHints: parsed.includeReplayHints ? {
+          tool: "replay_interaction_recording",
+          captureScreenshots: true,
+          captureConsole: true,
+          captureNetwork: true
+        } : undefined
+      };
+      const jsonUrl = await makeJsonArtifact(ctx, safeArtifactFilename(parsed.filenamePrefix, recordingId, "json"), recording);
+      const rows = steps.map((step) => ({ id: step.id, action: step.action, label: step.label, selector: "selector" in step ? step.selector : "", value: "value" in step ? step.value : "", timestampMs: step.timestampMs }));
+      const reportUrl = await makeShareArtifact(ctx, safeArtifactFilename(parsed.filenamePrefix, `${recordingId}-report`, "html"), parsed.title, renderInteractionReport(parsed.title, rows, "Replayable interaction recording."));
+      return {
+        ok: true,
+        summary: `Recorded ${steps.length} interaction step(s).`,
+        jobId: recordingId,
+        artifacts: [jsonUrl, reportUrl],
+        logs: trimLogLines(steps.map((step, index) => interactionStepSummary(step, index))),
+        structuredContent: trimStructuredContent(sanitizeSecretLikeValue({ recordingId, recording, recordingArtifact: jsonUrl, reportUrl, replaySteps: steps }) as Record<string, unknown>),
+        errors: []
+      };
+    }
+  },
+  {
+    definition: {
+      name: "replay_interaction_recording",
+      description: "Replay recorded UI interactions and attach per-step screenshot, console, and network trace summaries; supports dry-run replay planning without opening a browser.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          url: { type: "string", format: "uri" },
+          recording: { type: "object" },
+          steps: { type: "array" },
+          captureScreenshots: { type: "boolean" },
+          captureConsole: { type: "boolean" },
+          captureNetwork: { type: "boolean" },
+          dryRun: { type: "boolean" },
+          timeoutMs: { type: "number" },
+          stopOnFailure: { type: "boolean" }
+        },
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: false,
+    schema: replayInteractionRecordingSchema,
+    handler: async (input, ctx) => {
+      const parsed = replayInteractionRecordingSchema.parse(input);
+      const steps = normalizeRecordedSteps((parsed.recording?.steps ?? parsed.steps) as RecordedInteractionStep[]);
+      const targetUrl = parsed.url ?? parsed.recording?.url;
+      const replayId = `replay_${Date.now().toString(36)}`;
+      if (parsed.dryRun) {
+        const dryRunSteps = steps.map((step, index) => ({
+          id: step.id,
+          action: step.action,
+          ok: true,
+          dryRun: true,
+          screenshot: parsed.captureScreenshots ? `planned-step-${index + 1}.png` : undefined,
+          consoleTrace: parsed.captureConsole ? [] : undefined,
+          networkTrace: parsed.captureNetwork ? [] : undefined,
+          logs: [interactionStepSummary(step, index)]
+        }));
+        const reportUrl = await makeShareArtifact(ctx, safeArtifactFilename("interaction-replay", `${replayId}-dry-run`, "html"), "Interaction Replay Dry Run", renderInteractionReport("Interaction Replay Dry Run", dryRunSteps as Array<Record<string, unknown>>, "Dry-run replay plan; no browser actions were executed."));
+        return { ok: true, summary: `Prepared dry-run replay for ${steps.length} step(s).`, jobId: replayId, artifacts: [reportUrl], logs: trimLogLines(dryRunSteps.map((step) => step.logs.join(" "))), structuredContent: trimStructuredContent(sanitizeSecretLikeValue({ replayId, dryRun: true, targetUrl, steps: dryRunSteps, reportUrl }) as Record<string, unknown>), errors: [] };
+      }
+      const { session, close } = await resolveSession(parsed.sessionId, targetUrl);
+      const page = session.page;
+      page.setDefaultTimeout(parsed.timeoutMs);
+      const networkEvents: Array<{ type: string; url: string; method?: string; status?: number; failure?: string }> = [];
+      const onRequestFailed = (request: Request) => networkEvents.push({ type: "requestfailed", url: request.url(), method: request.method(), failure: request.failure()?.errorText });
+      const onResponse = (response: Response) => {
+        if (response.status() >= 400) networkEvents.push({ type: "response", url: response.url(), status: response.status() });
+      };
+      if (parsed.captureNetwork) {
+        page.on("requestfailed", onRequestFailed);
+        page.on("response", onResponse);
+      }
+      const results: Array<Record<string, unknown>> = [];
+      const artifacts: string[] = [];
+      let failed = 0;
+      try {
+        for (const [index, step] of steps.entries()) {
+          const consoleStart = session.consoleEvents.length;
+          const networkStart = networkEvents.length;
+          const result: Record<string, unknown> = { id: step.id, action: step.action, label: step.label, ok: true, startAt: new Date().toISOString(), logs: [interactionStepSummary(step, index)] };
+          try {
+            if (step.action === "screenshot") {
+              // screenshot-only step; execution happens below.
+            } else {
+              await executeRecordedStep(page, step, parsed.timeoutMs);
+            }
+          } catch (error) {
+            failed += 1;
+            result.ok = false;
+            result.error = error instanceof Error ? error.message : "Replay step failed.";
+            if (parsed.stopOnFailure) {
+              result.stopReason = "stopOnFailure";
+            }
+          }
+          if (parsed.captureScreenshots) {
+            const image = await page.screenshot({ type: "png", fullPage: true }).catch(() => undefined);
+            if (image) {
+              const screenshot = await makeImageArtifact(ctx, safeArtifactFilename(`replay-${session.id}`, `${index + 1}-${Date.now()}`, "png"), image);
+              result.screenshot = screenshot;
+              artifacts.push(screenshot);
+            }
+          }
+          if (parsed.captureConsole) result.consoleTrace = session.consoleEvents.slice(consoleStart);
+          if (parsed.captureNetwork) result.networkTrace = networkEvents.slice(networkStart);
+          result.endAt = new Date().toISOString();
+          results.push(result);
+          if (result.ok === false && parsed.stopOnFailure) break;
+        }
+      } finally {
+        if (parsed.captureNetwork) {
+          page.off("requestfailed", onRequestFailed);
+          page.off("response", onResponse);
+        }
+        await close();
+      }
+      const reportUrl = await makeShareArtifact(ctx, safeArtifactFilename("interaction-replay", `${replayId}-report`, "html"), "Interaction Replay Report", renderInteractionReport("Interaction Replay Report", results, "Replay results with per-step traces."));
+      artifacts.push(reportUrl);
+      return { ok: failed === 0, summary: failed === 0 ? `Replayed ${results.length} interaction step(s).` : `Replay found ${failed} failed step(s).`, jobId: replayId, artifacts, logs: trimLogLines(results.map((step) => `${step.id} ${step.action} ok=${step.ok}`)), structuredContent: trimStructuredContent(sanitizeSecretLikeValue({ replayId, targetUrl: page.url(), steps: results, reportUrl }) as Record<string, unknown>), errors: failed ? [`${failed} replay step(s) failed.`] : [] };
+    }
+  },
+  {
+    definition: {
+      name: "test_form_persistence",
+      description: "Run built-in form persistence scenarios: seed/reset storage, fill fields, click/save/submit, reload, assert form values, localStorage/sessionStorage, IndexedDB databases, and optional same-context new page persistence.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          url: { type: "string", format: "uri" },
+          fields: { type: "array", items: { type: "object" } },
+          clickSelectors: { type: "array", items: { type: "string" } },
+          submitSelector: { type: "string" },
+          seedLocalStorage: { type: "object" },
+          seedSessionStorage: { type: "object" },
+          resetStorage: { type: "boolean" },
+          expectedLocalStorage: { type: "array", items: { type: "object" } },
+          expectedSessionStorage: { type: "array", items: { type: "object" } },
+          expectedIndexedDbDatabases: { type: "array", items: { type: "string" } },
+          checkNewPageSameContext: { type: "boolean" },
+          timeoutMs: { type: "number" }
+        },
+        required: ["fields"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: false,
+    schema: testFormPersistenceSchema,
+    handler: async (input, ctx) => {
+      const parsed = testFormPersistenceSchema.parse(input);
+      const { session, close } = await resolveSession(parsed.sessionId, parsed.url);
+      const phases: Array<{ phase: string; assertions: PersistenceAssertion[]; storage: Awaited<ReturnType<typeof collectStorage>> }> = [];
+      const screenshots: string[] = [];
+      try {
+        const page = session.page;
+        page.setDefaultTimeout(parsed.timeoutMs);
+        await seedBrowserStorage(page, parsed.seedLocalStorage, parsed.seedSessionStorage, parsed.resetStorage);
+        if (Object.keys(parsed.seedLocalStorage).length || Object.keys(parsed.seedSessionStorage).length || parsed.resetStorage) {
+          await page.reload({ waitUntil: "networkidle", timeout: parsed.timeoutMs });
+        }
+        for (const field of parsed.fields) await fillPersistenceField(page, field, parsed.timeoutMs);
+        for (const selector of parsed.clickSelectors) await page.click(selector, { timeout: parsed.timeoutMs });
+        if (parsed.submitSelector) await page.click(parsed.submitSelector, { timeout: parsed.timeoutMs });
+        await page.waitForTimeout(100);
+        phases.push(await assertPersistenceState(page, parsed, "after-fill"));
+        await page.reload({ waitUntil: "networkidle", timeout: parsed.timeoutMs });
+        await page.waitForTimeout(200);
+        phases.push(await assertPersistenceState(page, parsed, "after-reload"));
+        if (parsed.checkNewPageSameContext) {
+          const newPage = await page.context().newPage();
+          try {
+            await newPage.goto(page.url(), { waitUntil: "networkidle", timeout: parsed.timeoutMs });
+            await newPage.waitForTimeout(200);
+            phases.push(await assertPersistenceState(newPage, {
+              ...parsed,
+              fields: parsed.fields.filter((field) => field.type !== "checkbox"),
+              expectedSessionStorage: []
+            }, "new-page-same-context"));
+          } finally {
+            await newPage.close().catch(() => undefined);
+          }
+        }
+        const failedAssertions = phases.flatMap((phase) => phase.assertions).filter((assertion) => !assertion.ok);
+        if (failedAssertions.length) {
+          const image = await page.screenshot({ type: "png", fullPage: true }).catch(() => undefined);
+          if (image) screenshots.push(await makeImageArtifact(ctx, safeArtifactFilename(`form-persistence-${session.id}`, `failure-${Date.now()}`, "png"), image));
+        }
+        const report = sanitizeSecretLikeValue({
+          sessionId: session.id,
+          url: page.url(),
+          phases,
+          failedAssertions,
+          resetStorage: parsed.resetStorage,
+          seededLocalStorageKeys: Object.keys(parsed.seedLocalStorage),
+          seededSessionStorageKeys: Object.keys(parsed.seedSessionStorage)
+        }) as Record<string, unknown>;
+        const jsonUrl = await makeJsonArtifact(ctx, safeArtifactFilename("form-persistence", Date.now().toString(), "json"), report);
+        const reportUrl = await makeShareArtifact(ctx, safeArtifactFilename("form-persistence", `${Date.now()}-report`, "html"), "Form Persistence Report", persistenceReportHtml(report));
+        return {
+          ok: failedAssertions.length === 0,
+          summary: failedAssertions.length === 0 ? "Form persistence checks passed." : `Form persistence found ${failedAssertions.length} failed assertion(s).`,
+          jobId: session.id,
+          artifacts: [jsonUrl, reportUrl, ...screenshots],
+          logs: trimLogLines([`phases=${phases.length}`, `failedAssertions=${failedAssertions.length}`, `url=${page.url()}`]),
+          structuredContent: trimStructuredContent(report),
+          errors: failedAssertions.map((assertion) => assertion.message)
         };
       } finally {
         await close();

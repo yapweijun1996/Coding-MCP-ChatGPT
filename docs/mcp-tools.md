@@ -43,7 +43,7 @@ Enabled by default:
 - Code intelligence: `refactor_hints` for advisory oversized-file and mixed-responsibility refactor signals.
 - Browser validation: `inspect_webpage`.
 - Webpage rebuild workflow: `capture_webpage`, `analyze_webpage_capture`, `generate_improved_static_page`.
-- Presentation generation: `create_html_deck`, `create_pptx_deck`, `create_immersive_page`, `create_video_presentation`.
+- Presentation and media generation: `create_html_deck`, `create_pptx_deck`, `create_immersive_page`, `create_video_presentation`, `create_media_scene_timeline`, `add_media_captions`, `attach_media_voice_audio`, `preview_media_frames`, `export_media_project`.
 - Stable command checks backed by current package scripts: `run_command`, `run_typecheck`, `run_tests`, `run_build`.
 - Workspace and git tools delegated from the legacy implementation.
 
@@ -88,6 +88,58 @@ ChatGPT and other coding agents should use the persistent Project workflow for d
 
 `deliver_static_project` is the preferred delivery tool because it writes all files, validates local references, temporarily publishes, runs browser validation through Playwright, blocks on serious runtime/layout failures, and returns a structured report with the public `publishedUrl`.
 
+### Project workflow recipes
+
+Use these exact argument names when calling project tools. `projectId` is the persistent Project identifier used by follow-up tools. Many tool results also set `jobId` to the same value for compatibility with generic job UIs, but follow-up project calls should pass `projectId`.
+
+Preferred path for a complete static HTML/CSS/JS deliverable:
+
+```json
+{
+  "tool": "deliver_static_project",
+  "arguments": {
+    "title": "Landing page",
+    "entryFile": "index.html",
+    "files": [
+      { "path": "index.html", "content": "<!doctype html><html><head><link rel=\"stylesheet\" href=\"styles.css\"></head><body><h1>Hello</h1><script src=\"app.js\"></script></body></html>" },
+      { "path": "styles.css", "content": "body { font-family: system-ui, sans-serif; }" },
+      { "path": "app.js", "content": "console.log('ready');" }
+    ]
+  }
+}
+```
+
+Use this path when the agent is producing the first complete version of a static app or site. Return `shareUrl` / `publishedUrl` to the user. Do not call legacy `create_share` for project deliverables.
+
+Lower-level path for incremental edits or repair of an existing Project:
+
+```json
+{ "tool": "create_project", "arguments": { "title": "Repairable page", "entryFile": "index.html" } }
+```
+
+Capture `structuredContent.projectId` or `jobId`, then use that value as `projectId`:
+
+```json
+{ "tool": "write_project_file", "arguments": { "projectId": "proj_123", "path": "index.html", "content": "<!doctype html><html><body><h1>Ready</h1></body></html>" } }
+```
+
+```json
+{ "tool": "validate_project", "arguments": { "projectId": "proj_123", "entryFile": "index.html" } }
+```
+
+```json
+{ "tool": "publish_and_report", "arguments": { "projectId": "proj_123", "entryFile": "index.html" } }
+```
+
+Use `publish_project` only when the project has already passed validation and a browser report is not needed. Use `publish_and_report` when handing off a fixed project because it publishes and returns a structured delivery report. Use `inspect_webpage`, `audit_accessibility`, `auto_fix_accessibility`, or `get_project_activity` after a failed validation or visual/runtime concern.
+
+Safe recovery from blocked writes:
+
+1. Call `get_project_activity` with the `projectId` to inspect recent task history and validation failures.
+2. Call `get_project_manifest` to verify the entry file, file list, and last validation.
+3. Call `read_project_file` before overwriting a file the agent did not just create.
+4. Use `create_project_backup` before broad rewrites, then `restore_latest_project_backup` if the repair makes the project worse.
+
 For idea-to-demo React, Vue, or Vite apps, use the App project workflow:
 
 1. `create_app_project` with `template` set to `vite-react`, `vite-vue`, or `vite-vanilla`.
@@ -101,6 +153,8 @@ For idea-to-demo React, Vue, or Vite apps, use the App project workflow:
 ## Presentation workflow
 
 Use `create_video_presentation` when an agent needs a presentation-style video preview from scene data. The tool creates a published Project with `index.html`, `video.css`, `video.js`, and a vendored MIT MP4 muxer module. It returns the Project `shareUrl`; MP4 export happens inside the browser through WebCodecs when the user's browser supports H.264 encoding.
+
+Use the scripted media workflow tools when the agent needs a reusable export handoff: create a scene timeline, add WebVTT captions, attach voice/audio alignment metadata, generate frame preview contact sheets, then create an export manifest for MP4/WebM/GIF/PNG sequence/HTML preview. The workflow is designed around Code-MCP project files, browser standards, and MIT-compatible muxing where used; it does not require a paid video engine. Byte encoding remains an explicit verified encoder step, and any optional external encoder must have its license and commercial-use status recorded before delivery.
 
 The MCP server does not render MP4 files server-side. If WebCodecs is unavailable, the generated page shows a clear browser capability error and remains usable as an animated HTML preview.
 

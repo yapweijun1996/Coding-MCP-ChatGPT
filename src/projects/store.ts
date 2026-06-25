@@ -68,6 +68,19 @@ export interface ProjectTaskItem {
   progress: number;
   dependsOn: string[];
   evidence: ProjectTaskEvidenceLink[];
+  blockedReason?: string;
+  unblockRequirement?: string;
+  blockedAt?: string;
+  completionSummary?: string;
+  completedFiles?: string[];
+  completionValidation?: {
+    ok: boolean;
+    status: ProjectValidationStatus;
+    checkedAt: string;
+    entryFile: string;
+    errors: string[];
+    warnings: string[];
+  };
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
@@ -90,6 +103,60 @@ export type ReviewCategory =
   | "security"
   | "other";
 export type ReviewStatus = "open" | "addressed" | "wontfix";
+export type ProjectReviewCommentStatus = "open" | "resolved" | "wontfix";
+export type ProjectReviewCommentTargetType = "file" | "screenshot" | "ui-region" | "issue" | "project";
+
+export interface ProjectReviewCommentRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface ProjectReviewCommentReply {
+  id: string;
+  body: string;
+  authorClientId?: string;
+  createdAt: string;
+}
+
+export interface ProjectReviewComment {
+  id: string;
+  title: string;
+  body: string;
+  severity: ReviewSeverity;
+  status: ProjectReviewCommentStatus;
+  targetType: ProjectReviewCommentTargetType;
+  filePath?: string;
+  lineStart?: number;
+  lineEnd?: number;
+  screenshotPath?: string;
+  region?: ProjectReviewCommentRegion;
+  selector?: string;
+  issueId?: string;
+  assignedTo?: string;
+  reviewerClientId?: string;
+  resolutionNote?: string;
+  replies: ProjectReviewCommentReply[];
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string;
+}
+
+export interface ProjectReviewCommentInput {
+  title: string;
+  body: string;
+  severity: ReviewSeverity;
+  targetType: ProjectReviewCommentTargetType;
+  filePath?: string;
+  lineStart?: number;
+  lineEnd?: number;
+  screenshotPath?: string;
+  region?: ProjectReviewCommentRegion;
+  selector?: string;
+  issueId?: string;
+  assignedTo?: string;
+}
 
 // A single structured finding from a reviewer (e.g. ChatGPT after testing the generated page),
 // fed back to the coding agent so it can iterate on this specific project. Stored on the
@@ -136,6 +203,7 @@ export interface ProjectMetadata {
   taskHistory?: ProjectTaskHistoryItem[];
   taskList?: ProjectTaskItem[];
   reviewFeedback?: ReviewFinding[];
+  reviewComments?: ProjectReviewComment[];
 }
 
 export interface ProjectFileInfo {
@@ -173,6 +241,12 @@ export interface ProjectTaskGraphNode extends ProjectTaskItem {
   blockedBy: string[];
   blocked: boolean;
   dependents: string[];
+  blockedReasons: Array<{
+    type: "explicit" | "dependency";
+    reason: string;
+    unblockRequirement: string;
+    blockingTaskId?: string;
+  }>;
 }
 
 export interface ProjectTaskGraph {
@@ -192,13 +266,14 @@ export const maxProjectFileBytes = 1024 * 1024;
 export const maxProjectImageAssetBytes = 10 * 1024 * 1024;
 export const maxProjectMediaAssetBytes = 100 * 1024 * 1024;
 export const maxProjectPresentationAssetBytes = 25 * 1024 * 1024;
+export const maxProjectArchiveAssetBytes = 50 * 1024 * 1024;
 
 const metadataFilename = "project.json";
 const filesDirectoryName = "files";
 const workspaceDirectoryName = "workspace";
 const maxTaskHistoryItems = 100;
-const allowedTextExtensions = new Set([".html", ".css", ".js", ".mjs", ".json", ".webmanifest", ".txt", ".md", ".svg"]);
-const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".mp4", ".webm", ".pptx"]);
+const allowedTextExtensions = new Set([".html", ".css", ".js", ".mjs", ".json", ".webmanifest", ".txt", ".md", ".csv", ".svg"]);
+const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".mp4", ".webm", ".pptx", ".zip"]);
 const projectContentTypes = new Map([
   [".html", "text/html"],
   [".css", "text/css"],
@@ -208,6 +283,7 @@ const projectContentTypes = new Map([
   [".webmanifest", "application/manifest+json"],
   [".txt", "text/plain"],
   [".md", "text/markdown"],
+  [".csv", "text/csv"],
   [".svg", "image/svg+xml"],
   [".png", "image/png"],
   [".jpg", "image/jpeg"],
@@ -226,7 +302,8 @@ const projectContentTypes = new Map([
   [".midi", "audio/midi"],
   [".mp4", "video/mp4"],
   [".webm", "video/webm"],
-  [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"]
+  [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+  [".zip", "application/zip"]
 ]);
 
 type DirectoryEntryLike = {
@@ -378,7 +455,9 @@ function validateProjectAssetBytes(relativePath: string, buffer: Buffer, content
   ensureContentTypeMatches(extension, contentType);
 
   if (buffer.length === 0) throw new Error("Project asset content is empty.");
-  if (extension === ".pptx") {
+  if (extension === ".zip") {
+    if (buffer.length > maxProjectArchiveAssetBytes) throw new Error("ZIP asset exceeds 50 MiB.");
+  } else if (extension === ".pptx") {
     if (buffer.length > maxProjectPresentationAssetBytes) throw new Error("PPTX asset exceeds 25 MiB.");
   } else if ([".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".mp4", ".webm"].includes(extension)) {
     if (buffer.length > maxProjectMediaAssetBytes) throw new Error("Media/model asset exceeds 100 MiB.");
@@ -400,6 +479,7 @@ function validateProjectAssetBytes(relativePath: string, buffer: Buffer, content
   if (extension === ".pptx" && (!hasBytes(buffer, [0x50, 0x4b]) || !includesAscii(buffer, "[Content_Types].xml") || !includesAscii(buffer, "ppt/"))) {
     throw new Error("PPTX asset must be an OOXML presentation package.");
   }
+  if (extension === ".zip" && !hasBytes(buffer, [0x50, 0x4b])) throw new Error("ZIP asset has invalid magic bytes.");
   if (extension === ".svg") validateSvgAsset(buffer);
 }
 
@@ -465,6 +545,7 @@ export async function appendProjectTaskHistory(
 }
 
 const maxReviewFindings = 500;
+const maxReviewComments = 1000;
 
 function nextReviewFindingId(findings: ReviewFinding[]): number {
   return findings.reduce((max, finding) => {
@@ -553,6 +634,129 @@ export async function updateReviewFindingStatus(
     });
     await writeProjectMetadata(projectRoot, updated);
     return updatedFinding;
+  });
+}
+
+function nextProjectReviewCommentId(comments: ProjectReviewComment[]): number {
+  const max = comments.reduce((current, comment) => {
+    const match = /^comment_(\d+)$/.exec(comment.id);
+    return match ? Math.max(current, Number.parseInt(match[1]!, 10)) : current;
+  }, 0);
+  return max + 1;
+}
+
+export async function addProjectReviewComments(
+  projectRoot: string,
+  projectId: string,
+  comments: ProjectReviewCommentInput[],
+  reviewerClientId?: string
+): Promise<{ metadata: ProjectMetadata; added: ProjectReviewComment[] }> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await readProjectMetadata(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot add review comments to a deleted project.");
+    const existing = metadata.reviewComments ?? [];
+    const now = new Date().toISOString();
+    let counter = nextProjectReviewCommentId(existing);
+    const added = comments.map((comment) => {
+      const item: ProjectReviewComment = {
+        ...comment,
+        id: `comment_${String(counter++).padStart(3, "0")}`,
+        status: "open",
+        reviewerClientId,
+        replies: [],
+        createdAt: now,
+        updatedAt: now
+      };
+      return item;
+    });
+    const nextComments = [...existing, ...added].slice(-maxReviewComments);
+    const updated = addHistory({ ...metadata, reviewComments: nextComments }, {
+      toolName: "add_project_review_comment",
+      ok: true,
+      summary: `Added ${added.length} project review comment(s).`,
+      details: { commentIds: added.map((comment) => comment.id) }
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return { metadata: updated, added };
+  });
+}
+
+export async function listProjectReviewComments(
+  projectRoot: string,
+  projectId: string,
+  filters: { status?: ProjectReviewCommentStatus; targetType?: ProjectReviewCommentTargetType; assignedTo?: string } = {}
+): Promise<ProjectReviewComment[]> {
+  const metadata = await readProjectMetadata(projectRoot, projectId);
+  return (metadata.reviewComments ?? []).filter((comment) => {
+    if (filters.status && comment.status !== filters.status) return false;
+    if (filters.targetType && comment.targetType !== filters.targetType) return false;
+    if (filters.assignedTo && comment.assignedTo !== filters.assignedTo) return false;
+    return true;
+  });
+}
+
+export async function replyProjectReviewComment(
+  projectRoot: string,
+  projectId: string,
+  commentId: string,
+  body: string,
+  authorClientId?: string
+): Promise<ProjectReviewComment> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await readProjectMetadata(projectRoot, projectId);
+    const comments = metadata.reviewComments ?? [];
+    const index = comments.findIndex((comment) => comment.id === commentId);
+    if (index < 0) throw new Error(`No project review comment ${commentId}.`);
+    const now = new Date().toISOString();
+    const current = comments[index]!;
+    const reply: ProjectReviewCommentReply = {
+      id: `reply_${String(current.replies.length + 1).padStart(3, "0")}`,
+      body,
+      authorClientId,
+      createdAt: now
+    };
+    const updatedComment: ProjectReviewComment = { ...current, replies: [...current.replies, reply], updatedAt: now };
+    const nextComments = [...comments.slice(0, index), updatedComment, ...comments.slice(index + 1)];
+    const updated = addHistory({ ...metadata, reviewComments: nextComments }, {
+      toolName: "reply_project_review_comment",
+      ok: true,
+      summary: `Replied to project review comment ${commentId}.`,
+      details: { commentId, replyId: reply.id }
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return updatedComment;
+  });
+}
+
+export async function updateProjectReviewCommentStatus(
+  projectRoot: string,
+  projectId: string,
+  commentId: string,
+  status: ProjectReviewCommentStatus,
+  resolutionNote?: string
+): Promise<ProjectReviewComment> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await readProjectMetadata(projectRoot, projectId);
+    const comments = metadata.reviewComments ?? [];
+    const index = comments.findIndex((comment) => comment.id === commentId);
+    if (index < 0) throw new Error(`No project review comment ${commentId}.`);
+    const now = new Date().toISOString();
+    const updatedComment: ProjectReviewComment = {
+      ...comments[index]!,
+      status,
+      resolutionNote,
+      updatedAt: now,
+      resolvedAt: status === "open" ? undefined : now
+    };
+    const nextComments = [...comments.slice(0, index), updatedComment, ...comments.slice(index + 1)];
+    const updated = addHistory({ ...metadata, reviewComments: nextComments }, {
+      toolName: "resolve_project_review_comment",
+      ok: true,
+      summary: `Marked project review comment ${commentId} ${status}.`,
+      details: { commentId, status, resolutionNote }
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return updatedComment;
   });
 }
 
@@ -829,11 +1033,28 @@ export async function getProjectTaskGraph(projectRoot: string, projectId: string
   }
   const nodes: ProjectTaskGraphNode[] = tasks.map((task) => {
     const blockedBy = (task.dependsOn ?? []).filter((dependency) => tasks.find((candidate) => candidate.id === dependency)?.status !== "done");
+    const blockedReasons = [
+      ...(task.status === "blocked" ? [{
+        type: "explicit" as const,
+        reason: task.blockedReason ?? "Task was manually marked blocked.",
+        unblockRequirement: task.unblockRequirement ?? "Record what is needed to unblock this task."
+      }] : []),
+      ...blockedBy.map((dependency) => {
+        const blockingTask = tasks.find((candidate) => candidate.id === dependency);
+        return {
+          type: "dependency" as const,
+          reason: `Waiting for dependency ${dependency}${blockingTask ? `: ${blockingTask.title}` : ""}.`,
+          unblockRequirement: `Complete ${dependency}${blockingTask ? `: ${blockingTask.title}` : ""}.`,
+          blockingTaskId: dependency
+        };
+      })
+    ];
     return {
       ...task,
       blockedBy,
       blocked: blockedBy.length > 0 || task.status === "blocked",
-      dependents: dependents.get(task.id) ?? []
+      dependents: dependents.get(task.id) ?? [],
+      blockedReasons
     };
   });
   const edges = tasks.flatMap((task) => (task.dependsOn ?? []).map((dependency) => ({ from: dependency, to: task.id })));
@@ -854,6 +1075,11 @@ export async function upsertProjectTask(
     progress?: number;
     dependsOn?: string[];
     evidence?: ProjectTaskEvidenceLink[];
+    blockedReason?: string;
+    unblockRequirement?: string;
+    completionSummary?: string;
+    completedFiles?: string[];
+    completionValidation?: ProjectTaskItem["completionValidation"];
   }
 ): Promise<ProjectTaskItem> {
   return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
@@ -863,15 +1089,26 @@ export async function upsertProjectTask(
     const tasks = metadata.taskList ?? [];
     const index = input.taskId ? tasks.findIndex((task) => task.id === input.taskId) : -1;
     const previous = index >= 0 ? tasks[index] : undefined;
+    const status = input.status ?? previous?.status ?? "todo";
+    const blockedReason = input.blockedReason !== undefined ? input.blockedReason.trim() || undefined : previous?.blockedReason;
+    const unblockRequirement = input.unblockRequirement !== undefined ? input.unblockRequirement.trim() || undefined : previous?.unblockRequirement;
+    const completionSummary = input.completionSummary !== undefined ? input.completionSummary.trim() || undefined : previous?.completionSummary;
+    const completedFiles = input.completedFiles !== undefined ? [...new Set(input.completedFiles.map((file) => file.trim()).filter(Boolean))] : previous?.completedFiles;
     const nextTask: ProjectTaskItem = {
       id: previous?.id ?? nextProjectTaskId(tasks),
       title: input.title.trim(),
-      status: input.status ?? previous?.status ?? "todo",
+      status,
       priority: input.priority ?? previous?.priority ?? "medium",
       notes: input.notes?.trim() ?? previous?.notes ?? "",
       progress: input.progress ?? previous?.progress ?? 0,
       dependsOn: input.dependsOn ?? previous?.dependsOn ?? [],
       evidence: input.evidence ?? previous?.evidence ?? [],
+      blockedReason: status === "blocked" ? blockedReason : undefined,
+      unblockRequirement: status === "blocked" ? unblockRequirement : undefined,
+      blockedAt: status === "blocked" ? previous?.blockedAt ?? now : undefined,
+      completionSummary: status === "done" ? completionSummary : undefined,
+      completedFiles: status === "done" ? completedFiles : undefined,
+      completionValidation: status === "done" ? input.completionValidation ?? previous?.completionValidation : undefined,
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
       completedAt: input.status === "done" ? previous?.completedAt ?? now : previous?.completedAt
@@ -1166,7 +1403,7 @@ export async function validateProject(projectRoot: string, projectId: string, en
       errors.push(`Invalid file path ${file.path}: ${error instanceof Error ? error.message : "invalid path"}`);
     }
     const extension = path.extname(file.path).toLowerCase();
-    const maxBytes = extension === ".pptx" ? maxProjectPresentationAssetBytes : allowedAssetExtensions.has(extension) ? maxProjectImageAssetBytes : maxProjectFileBytes;
+    const maxBytes = extension === ".zip" ? maxProjectArchiveAssetBytes : extension === ".pptx" ? maxProjectPresentationAssetBytes : allowedAssetExtensions.has(extension) ? maxProjectImageAssetBytes : maxProjectFileBytes;
     if (file.size > maxBytes) {
       errors.push(`File exceeds max size: ${file.path}`);
     }

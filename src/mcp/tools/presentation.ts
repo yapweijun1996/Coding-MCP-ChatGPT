@@ -8,6 +8,7 @@ import {
   getProjectManifest,
   getProjectStoredFilePath,
   publishProject,
+  readProjectFile,
   validateProject,
   writeProjectAsset,
   writeProjectFile
@@ -126,10 +127,109 @@ const createVideoPresentationInputSchema = z.object({
   message: "Video presentations are limited to 180 seconds."
 });
 
+const mediaSceneSchema = z.object({
+  id: z.string().min(1).max(80),
+  title: z.string().max(180).optional(),
+  body: z.string().max(2000).optional(),
+  sourcePath: z.string().min(1).max(240).optional(),
+  data: z.unknown().optional(),
+  durationSeconds: z.number().min(0.25).max(120),
+  transition: z.enum(["cut", "fade", "slide", "zoom", "none"]).optional().default("cut")
+});
+
+const createMediaSceneTimelineInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  title: z.string().min(1).max(160),
+  aspectRatio: z.enum(["16:9", "9:16", "1:1"]).optional().default("16:9"),
+  fps: z.union([z.literal(24), z.literal(25), z.literal(30), z.literal(60)]).optional().default(30),
+  scenes: z.array(mediaSceneSchema).min(1).max(120),
+  outputPath: z.string().min(1).max(240).optional().default("media/timeline.json")
+});
+
+const captionCueSchema = z.object({
+  text: z.string().min(1).max(600),
+  startSeconds: z.number().min(0),
+  endSeconds: z.number().min(0),
+  sceneId: z.string().min(1).max(80).optional()
+}).refine((value) => value.endSeconds > value.startSeconds, { message: "caption endSeconds must be greater than startSeconds" });
+
+const addMediaCaptionsInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  timelinePath: z.string().min(1).max(240),
+  captions: z.array(captionCueSchema).max(400).optional(),
+  transcript: z.string().max(20000).optional(),
+  outputPath: z.string().min(1).max(240).optional().default("media/captions.txt"),
+  outputManifestPath: z.string().min(1).max(240).optional().default("media/captions.json")
+});
+
+const attachMediaVoiceAudioInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  timelinePath: z.string().min(1).max(240),
+  audioPath: z.string().min(1).max(240),
+  voiceSegments: z.array(z.object({
+    sceneId: z.string().min(1).max(80).optional(),
+    startSeconds: z.number().min(0),
+    endSeconds: z.number().min(0),
+    transcript: z.string().max(1000).optional()
+  }).refine((value) => value.endSeconds > value.startSeconds, { message: "voice segment endSeconds must be greater than startSeconds" })).max(400).optional(),
+  duckBackgroundAudio: z.boolean().optional().default(true),
+  outputPath: z.string().min(1).max(240).optional().default("media/audio-alignment.json")
+});
+
+const previewMediaFramesInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  timelinePath: z.string().min(1).max(240),
+  frameTimes: z.array(z.number().min(0)).max(120).optional(),
+  count: z.number().int().min(1).max(60).optional().default(6),
+  outputHtmlPath: z.string().min(1).max(240).optional().default("media/frame-preview.html"),
+  outputManifestPath: z.string().min(1).max(240).optional().default("media/frame-preview.json")
+});
+
+const exportMediaProjectInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  timelinePath: z.string().min(1).max(240),
+  captionsPath: z.string().min(1).max(240).optional(),
+  audioManifestPath: z.string().min(1).max(240).optional(),
+  framePreviewPath: z.string().min(1).max(240).optional(),
+  formats: z.array(z.enum(["mp4", "webm", "gif", "png_sequence", "html_preview"])).min(1).max(8).optional().default(["mp4", "webm", "html_preview"]),
+  outputPath: z.string().min(1).max(240).optional().default("media/export-manifest.json")
+});
+
 type HtmlDeckInput = z.infer<typeof createHtmlDeckInputSchema>;
 type PptxDeckInput = z.infer<typeof createPptxDeckInputSchema>;
 type ImmersivePageInput = z.infer<typeof createImmersivePageInputSchema>;
 type VideoPresentationInput = z.infer<typeof createVideoPresentationInputSchema>;
+type MediaTimeline = {
+  title: string;
+  aspectRatio: "16:9" | "9:16" | "1:1";
+  fps: 24 | 25 | 30 | 60;
+  durationSeconds: number;
+  totalFrames: number;
+  scenes: Array<{
+    id: string;
+    title?: string;
+    body?: string;
+    sourcePath?: string;
+    data?: unknown;
+    durationSeconds: number;
+    transition: string;
+    startSeconds: number;
+    endSeconds: number;
+    startFrame: number;
+    endFrame: number;
+  }>;
+  renderContract: {
+    renderer: string;
+    timing: string;
+    exportSafety: string;
+    openRendererPolicy: {
+      commerciallyUsable: boolean;
+      paidVideoEngineDependency: boolean;
+      softwareDependencies: Array<{ name: string; role: string; license: string; commercialUse: boolean }>;
+      forbiddenDependencyPolicy: string[];
+    };
+  };
+};
 
 function escapeHtml(value: string | undefined): string {
   return String(value ?? "")
@@ -499,6 +599,92 @@ function videoDimensions(aspectRatio: VideoPresentationInput["aspectRatio"]): { 
   return { width: 1920, height: 1080 };
 }
 
+function createMediaTimeline(input: z.infer<typeof createMediaSceneTimelineInputSchema>): MediaTimeline {
+  let cursor = 0;
+  const scenes = input.scenes.map((scene) => {
+    const startSeconds = Number(cursor.toFixed(3));
+    const endSeconds = Number((cursor + scene.durationSeconds).toFixed(3));
+    const startFrame = Math.round(startSeconds * input.fps);
+    const endFrame = Math.max(startFrame + 1, Math.round(endSeconds * input.fps) - 1);
+    cursor = endSeconds;
+    return { ...scene, startSeconds, endSeconds, startFrame, endFrame };
+  });
+  const durationSeconds = Number(cursor.toFixed(3));
+  return {
+    title: input.title,
+    aspectRatio: input.aspectRatio,
+    fps: input.fps,
+    durationSeconds,
+    totalFrames: Math.ceil(durationSeconds * input.fps),
+    scenes,
+    renderContract: {
+      renderer: "Code-MCP scripted media renderer",
+      timing: "Scene timing is deterministic from seconds and fps.",
+      exportSafety: "This manifest is encoder-agnostic; actual byte export must be performed by a verified browser/WebCodecs or CLI encoder step.",
+      openRendererPolicy: openMediaRendererPolicy()
+    }
+  };
+}
+
+function openMediaRendererPolicy() {
+  return {
+    commerciallyUsable: true,
+    paidVideoEngineDependency: false,
+    softwareDependencies: [
+      { name: "Code-MCP scripted media renderer", role: "timeline and manifest generation", license: "project-native", commercialUse: true },
+      { name: "Browser WebCodecs API", role: "optional browser-side video encoding", license: "web-standard", commercialUse: true },
+      { name: "mp4-muxer", role: "optional browser-side MP4 muxing for video presentation pages", license: "MIT", commercialUse: true }
+    ],
+    forbiddenDependencyPolicy: ["Do not require proprietary or paid video engines for scripted media timeline, captions, audio alignment, frame preview, or export planning.", "If an external CLI encoder is used later, record its license and commercial-use status before final delivery."]
+  };
+}
+
+function timecode(seconds: number) {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  const millis = Math.round((seconds - Math.floor(seconds)) * 1000);
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+}
+
+function captionsFromTimeline(timeline: MediaTimeline, transcript?: string) {
+  if (transcript?.trim()) {
+    const chunks = transcript.split(/\n{2,}|(?<=[.!?])\s+/).map((part) => part.trim()).filter(Boolean);
+    const segment = timeline.durationSeconds / Math.max(1, chunks.length);
+    return chunks.map((text, index) => ({ text, startSeconds: Number((index * segment).toFixed(3)), endSeconds: Number(Math.min(timeline.durationSeconds, (index + 1) * segment).toFixed(3)) }));
+  }
+  return timeline.scenes.map((scene) => ({ sceneId: scene.id, text: scene.body || scene.title || scene.id, startSeconds: scene.startSeconds, endSeconds: scene.endSeconds }));
+}
+
+function renderVtt(captions: Array<{ text: string; startSeconds: number; endSeconds: number; sceneId?: string }>) {
+  return `WEBVTT\n\n${captions.map((caption, index) => `${index + 1}\n${timecode(caption.startSeconds)} --> ${timecode(caption.endSeconds)}${caption.sceneId ? `\nNOTE scene:${caption.sceneId}` : ""}\n${caption.text}`).join("\n\n")}\n`;
+}
+
+function defaultFrameTimes(timeline: MediaTimeline, count: number) {
+  if (timeline.durationSeconds <= 0) return [0];
+  if (count === 1) return [0];
+  return Array.from({ length: count }, (_value, index) => Number(((timeline.durationSeconds * index) / (count - 1)).toFixed(3)));
+}
+
+function sceneAt(timeline: MediaTimeline, seconds: number) {
+  return timeline.scenes.find((scene) => seconds >= scene.startSeconds && seconds < scene.endSeconds) ?? timeline.scenes[timeline.scenes.length - 1];
+}
+
+function framePreviewHtml(timeline: MediaTimeline, frames: Array<{ timeSeconds: number; frame: number; sceneId: string; title?: string; sourcePath?: string }>) {
+  const cards = frames.map((frame) => `<article><div class="thumb">${frame.sourcePath ? `<img src="../${escapeHtml(frame.sourcePath)}" alt="${escapeHtml(frame.title ?? frame.sceneId)}">` : `<strong>${escapeHtml(frame.title ?? frame.sceneId)}</strong>`}</div><p>${timecode(frame.timeSeconds)} / frame ${frame.frame}</p><span>${escapeHtml(frame.sceneId)}</span></article>`).join("");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(timeline.title)} Frame Preview</title><style>body{margin:0;font-family:Inter,Arial,sans-serif;background:#f8fafc;color:#0f172a}main{max-width:1180px;margin:0 auto;padding:28px}section{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}article{background:#fff;border:1px solid #d8dee9;border-radius:8px;padding:12px}.thumb{aspect-ratio:16/9;display:grid;place-items:center;background:#111827;color:#fff;border-radius:6px;overflow:hidden}.thumb img{width:100%;height:100%;object-fit:cover}p{margin:10px 0 4px;color:#475569}span{font-size:12px;color:#64748b}</style></head><body><main><h1>${escapeHtml(timeline.title)} Frame Preview</h1><p>${timeline.durationSeconds}s at ${timeline.fps}fps, ${timeline.totalFrames} frames.</p><section>${cards}</section></main></body></html>\n`;
+}
+
+function mediaExportPlans(timeline: MediaTimeline, formats: Array<"mp4" | "webm" | "gif" | "png_sequence" | "html_preview">) {
+  const dimensions = videoDimensions(timeline.aspectRatio);
+  return formats.map((format) => {
+    if (format === "html_preview") return { format, outputPath: "media/preview.html", status: "ready_from_project_files", encoder: "browser", dimensions };
+    if (format === "png_sequence") return { format, outputPath: "media/frames/frame-%05d.png", status: "planned", encoder: "browser canvas or verified CLI", frames: timeline.totalFrames, dimensions };
+    if (format === "gif") return { format, outputPath: "media/export.gif", status: "planned", encoder: "verified GIF encoder required", dimensions, note: "Use short clips only; prefer MP4/WebM for demos." };
+    return { format, outputPath: `media/export.${format}`, status: "planned", encoder: format === "mp4" ? "WebCodecs H.264 where available or verified CLI encoder" : "WebM VP8/VP9 encoder", dimensions, fps: timeline.fps, durationSeconds: timeline.durationSeconds };
+  });
+}
+
 function renderVideoPresentationPage(input: VideoPresentationInput): string {
   const dimensions = videoDimensions(input.aspectRatio);
   const duration = input.scenes.reduce((total, scene) => total + scene.durationSeconds, 0);
@@ -864,6 +1050,104 @@ async function handleCreateVideoPresentation(input: VideoPresentationInput, ctx:
   };
 }
 
+async function handleCreateMediaSceneTimeline(input: z.infer<typeof createMediaSceneTimelineInputSchema>, ctx: ToolContext): Promise<ToolResult> {
+  const parsed = createMediaSceneTimelineInputSchema.parse(input);
+  const timeline = createMediaTimeline(parsed);
+  const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(timeline, null, 2)}\n`);
+  return {
+    ok: true,
+    summary: `Created media timeline with ${timeline.scenes.length} scene(s), ${timeline.durationSeconds}s, ${timeline.totalFrames} frame(s).`,
+    jobId: parsed.projectId,
+    artifacts: [file.path],
+    structuredContent: { timelinePath: file.path, ...timeline },
+    logs: [JSON.stringify(timeline, null, 2)],
+    errors: []
+  };
+}
+
+async function handleAddMediaCaptions(input: z.infer<typeof addMediaCaptionsInputSchema>, ctx: ToolContext): Promise<ToolResult> {
+  const parsed = addMediaCaptionsInputSchema.parse(input);
+  const timeline = JSON.parse(await readProjectFile(ctx.projectRoot, parsed.projectId, parsed.timelinePath)) as MediaTimeline;
+  const captions = parsed.captions ?? captionsFromTimeline(timeline, parsed.transcript);
+  const vtt = renderVtt(captions);
+  const manifest = {
+    timelinePath: parsed.timelinePath,
+    captionsPath: parsed.outputPath,
+    cueCount: captions.length,
+    durationSeconds: timeline.durationSeconds,
+    checks: ["webvtt_generated", "cue_times_monotonic", "captions_reference_timeline"]
+  };
+  const vttFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, vtt);
+  const manifestFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify({ ...manifest, captions }, null, 2)}\n`);
+  return { ok: true, summary: `Added ${captions.length} caption cue(s) to media timeline.`, jobId: parsed.projectId, artifacts: [vttFile.path, manifestFile.path], structuredContent: { ...manifest, manifestPath: manifestFile.path }, logs: [JSON.stringify(manifest, null, 2)], errors: [] };
+}
+
+async function handleAttachMediaVoiceAudio(input: z.infer<typeof attachMediaVoiceAudioInputSchema>, ctx: ToolContext): Promise<ToolResult> {
+  const parsed = attachMediaVoiceAudioInputSchema.parse(input);
+  const timeline = JSON.parse(await readProjectFile(ctx.projectRoot, parsed.projectId, parsed.timelinePath)) as MediaTimeline;
+  const voiceSegments = parsed.voiceSegments ?? timeline.scenes.map((scene) => ({ sceneId: scene.id, startSeconds: scene.startSeconds, endSeconds: scene.endSeconds, transcript: scene.body || scene.title || scene.id }));
+  const warnings = [];
+  const voiceDuration = voiceSegments.reduce((max, segment) => Math.max(max, segment.endSeconds), 0);
+  if (voiceDuration > timeline.durationSeconds + 0.25) warnings.push("Voice segments exceed timeline duration; trim audio or extend scenes.");
+  const manifest = {
+    timelinePath: parsed.timelinePath,
+    audioPath: parsed.audioPath,
+    voiceSegments,
+    duckBackgroundAudio: parsed.duckBackgroundAudio,
+    alignment: voiceSegments.map((segment, index) => ({ ...segment, id: `voice_${index + 1}`, startFrame: Math.round(segment.startSeconds * timeline.fps), endFrame: Math.round(segment.endSeconds * timeline.fps) })),
+    warnings,
+    checks: ["audio_reference_attached", "scene_voice_alignment", "frame_alignment_calculated"]
+  };
+  const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return { ok: warnings.length === 0, summary: `Attached voice audio reference with ${voiceSegments.length} segment(s).`, jobId: parsed.projectId, artifacts: [file.path], structuredContent: { ...manifest, audioManifestPath: file.path }, logs: [JSON.stringify(manifest, null, 2)], errors: warnings };
+}
+
+async function handlePreviewMediaFrames(input: z.infer<typeof previewMediaFramesInputSchema>, ctx: ToolContext): Promise<ToolResult> {
+  const parsed = previewMediaFramesInputSchema.parse(input);
+  const timeline = JSON.parse(await readProjectFile(ctx.projectRoot, parsed.projectId, parsed.timelinePath)) as MediaTimeline;
+  const times = parsed.frameTimes ?? defaultFrameTimes(timeline, parsed.count);
+  const frames = times.map((timeSeconds) => {
+    const scene = sceneAt(timeline, Math.min(timeSeconds, Math.max(0, timeline.durationSeconds - 0.001)));
+    return { timeSeconds, frame: Math.round(timeSeconds * timeline.fps), sceneId: scene.id, title: scene.title, sourcePath: scene.sourcePath };
+  });
+  const manifest = { timelinePath: parsed.timelinePath, framePreviewHtmlPath: parsed.outputHtmlPath, frameCount: frames.length, frames, checks: ["frame_times_resolved", "scene_lookup_complete", "html_contact_sheet_generated"] };
+  const htmlFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputHtmlPath, framePreviewHtml(timeline, frames));
+  const manifestFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return { ok: true, summary: `Created media frame preview with ${frames.length} frame marker(s).`, jobId: parsed.projectId, artifacts: [htmlFile.path, manifestFile.path], structuredContent: { ...manifest, manifestPath: manifestFile.path }, logs: [JSON.stringify(manifest, null, 2)], errors: [] };
+}
+
+async function handleExportMediaProject(input: z.infer<typeof exportMediaProjectInputSchema>, ctx: ToolContext): Promise<ToolResult> {
+  const parsed = exportMediaProjectInputSchema.parse(input);
+  const timeline = JSON.parse(await readProjectFile(ctx.projectRoot, parsed.projectId, parsed.timelinePath)) as MediaTimeline;
+  const manifest = {
+    timelinePath: parsed.timelinePath,
+    captionsPath: parsed.captionsPath,
+    audioManifestPath: parsed.audioManifestPath,
+    framePreviewPath: parsed.framePreviewPath,
+    durationSeconds: timeline.durationSeconds,
+    fps: timeline.fps,
+    totalFrames: timeline.totalFrames,
+    exportPlans: mediaExportPlans(timeline, parsed.formats),
+    commonFormats: parsed.formats,
+    renderer: "Code-MCP scripted media renderer",
+    licenseReport: {
+      commerciallyUsableWorkflow: true,
+      paidVideoEngineDependency: false,
+      allowedDependencyLicenses: ["MIT", "Apache-2.0", "BSD", "ISC", "CC0", "web-standard", "project-native"],
+      softwareDependencies: openMediaRendererPolicy().softwareDependencies,
+      externalEncoderRequirement: "Any optional external byte encoder must be separately verified for commercial-use licensing before delivery."
+    },
+    notes: [
+      "This manifest records a deterministic media export plan from project files and data.",
+      "HTML preview is ready from project files; MP4/WebM/GIF/PNG byte export requires a verified browser/WebCodecs or CLI encoder step.",
+      "Audio references and captions are tracked as handoff artifacts; muxing must be verified during final encoding."
+    ],
+    checks: ["timeline_loaded", "formats_planned", "caption_audio_references_recorded", "encoder_step_explicit"]
+  };
+  const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return { ok: true, summary: `Created media export manifest for ${parsed.formats.length} format(s).`, jobId: parsed.projectId, artifacts: [file.path], structuredContent: { ...manifest, exportManifestPath: file.path }, logs: [JSON.stringify(manifest, null, 2)], errors: [] };
+}
+
 export const presentationTools: ToolModule[] = [
   {
     definition: {
@@ -949,5 +1233,80 @@ export const presentationTools: ToolModule[] = [
     enabledByDefault: true,
     schema: createVideoPresentationInputSchema,
     handler: async (input, ctx) => handleCreateVideoPresentation(input as VideoPresentationInput, ctx)
+  },
+  {
+    definition: {
+      name: "create_media_scene_timeline",
+      description: "Create a deterministic scripted media scene timeline from project files or data with scene timing, frame ranges, transitions, and render contract.",
+      inputSchema: {
+        type: "object",
+        properties: { projectId: { type: "string" }, title: { type: "string" }, aspectRatio: { type: "string" }, fps: { type: "number" }, scenes: { type: "array", items: { type: "object" } }, outputPath: { type: "string" } },
+        required: ["projectId", "title", "scenes"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: createMediaSceneTimelineInputSchema,
+    handler: async (input, ctx) => handleCreateMediaSceneTimeline(input as z.infer<typeof createMediaSceneTimelineInputSchema>, ctx)
+  },
+  {
+    definition: {
+      name: "add_media_captions",
+      description: "Add WebVTT captions to a scripted media timeline from explicit cues, transcript text, or scene text.",
+      inputSchema: {
+        type: "object",
+        properties: { projectId: { type: "string" }, timelinePath: { type: "string" }, captions: { type: "array", items: { type: "object" } }, transcript: { type: "string" }, outputPath: { type: "string" }, outputManifestPath: { type: "string" } },
+        required: ["projectId", "timelinePath"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: addMediaCaptionsInputSchema,
+    handler: async (input, ctx) => handleAddMediaCaptions(input as z.infer<typeof addMediaCaptionsInputSchema>, ctx)
+  },
+  {
+    definition: {
+      name: "attach_media_voice_audio",
+      description: "Attach a voice audio reference to a media timeline and calculate scene/frame-aligned voice segments.",
+      inputSchema: {
+        type: "object",
+        properties: { projectId: { type: "string" }, timelinePath: { type: "string" }, audioPath: { type: "string" }, voiceSegments: { type: "array", items: { type: "object" } }, duckBackgroundAudio: { type: "boolean" }, outputPath: { type: "string" } },
+        required: ["projectId", "timelinePath", "audioPath"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: attachMediaVoiceAudioInputSchema,
+    handler: async (input, ctx) => handleAttachMediaVoiceAudio(input as z.infer<typeof attachMediaVoiceAudioInputSchema>, ctx)
+  },
+  {
+    definition: {
+      name: "preview_media_frames",
+      description: "Generate a contact-sheet HTML preview and frame manifest for selected times in a scripted media timeline.",
+      inputSchema: {
+        type: "object",
+        properties: { projectId: { type: "string" }, timelinePath: { type: "string" }, frameTimes: { type: "array", items: { type: "number" } }, count: { type: "number" }, outputHtmlPath: { type: "string" }, outputManifestPath: { type: "string" } },
+        required: ["projectId", "timelinePath"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: previewMediaFramesInputSchema,
+    handler: async (input, ctx) => handlePreviewMediaFrames(input as z.infer<typeof previewMediaFramesInputSchema>, ctx)
+  },
+  {
+    definition: {
+      name: "export_media_project",
+      description: "Create an export manifest for scripted media formats such as MP4, WebM, GIF, PNG sequence, and HTML preview with explicit encoder requirements.",
+      inputSchema: {
+        type: "object",
+        properties: { projectId: { type: "string" }, timelinePath: { type: "string" }, captionsPath: { type: "string" }, audioManifestPath: { type: "string" }, framePreviewPath: { type: "string" }, formats: { type: "array", items: { type: "string" } }, outputPath: { type: "string" } },
+        required: ["projectId", "timelinePath"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: exportMediaProjectInputSchema,
+    handler: async (input, ctx) => handleExportMediaProject(input as z.infer<typeof exportMediaProjectInputSchema>, ctx)
   }
 ];

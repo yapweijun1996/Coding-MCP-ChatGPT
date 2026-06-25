@@ -46,6 +46,7 @@ export const skillRegistry: readonly SkillDefinition[] = [
       "tail_file",
       "git_status",
       "git_diff",
+      "git_safe_change_plan",
       "git_diff_staged",
       "git_show",
       "git_blame",
@@ -69,6 +70,16 @@ export const skillRegistry: readonly SkillDefinition[] = [
       "list_custom_mcp_tool_blueprints",
       "get_custom_mcp_tool_blueprint",
       "validate_custom_mcp_tool_spec",
+      "discover_mcp_plugins",
+      "register_mcp_plugin",
+      "set_mcp_plugin_enabled",
+      "test_mcp_plugin_capabilities",
+      "mcp_plugin_version_report",
+      "export_mcp_plugin_docs",
+      "verify_numeric_claim",
+      "search_math_counterexample",
+      "solve_equation_numeric",
+      "verify_derivation_steps",
       "check_tool_action_permission",
       "check_workspace_path_scope",
       "check_project_scope",
@@ -81,6 +92,64 @@ export const skillRegistry: readonly SkillDefinition[] = [
       "summarize_audit_log",
       "record_delivery_audit",
       "export_audit_log_report",
+      "record_usage_event",
+      "create_usage_budget",
+      "summarize_usage_costs",
+      "import_telemetry_usage",
+      "export_usage_cost_report",
+      "upsert_env_config_profile",
+      "upsert_env_config_entry",
+      "list_env_config_profiles",
+      "validate_env_config",
+      "export_env_config_report",
+      "create_demo_feedback_form",
+      "submit_demo_feedback",
+      "list_demo_feedback",
+      "link_demo_feedback_to_task",
+      "export_demo_feedback_report",
+      "create_demo_analytics_plan",
+      "record_demo_analytics_event",
+      "list_demo_analytics_events",
+      "summarize_demo_analytics",
+      "analyze_demo_interaction_funnel",
+      "export_demo_analytics_report",
+      "register_project_template",
+      "list_project_templates",
+      "recommend_project_templates",
+      "create_project_from_template",
+      "export_project_template_catalog",
+      "register_workflow_template",
+      "list_workflow_templates",
+      "recommend_workflow_templates",
+      "create_workflow_runbook_from_template",
+      "export_workflow_library_report",
+      "register_reusable_component",
+      "list_reusable_components",
+      "recommend_reusable_components",
+      "create_component_reuse_plan",
+      "export_component_registry_report",
+      "create_model_comparison",
+      "add_model_comparison_candidate",
+      "score_model_comparison",
+      "compare_model_tradeoffs",
+      "export_model_comparison_report",
+      "create_content_brief",
+      "create_content_version",
+      "review_content_version",
+      "list_content_versions",
+      "approve_content_version",
+      "export_content_workflow_report",
+      "create_export_package_manifest",
+      "build_zip_export_package",
+      "create_html_export_bundle",
+      "list_export_packages",
+      "export_package_report",
+      "configure_notification_channel",
+      "send_project_notification",
+      "schedule_project_notification",
+      "list_project_notifications",
+      "process_due_project_notifications",
+      "export_notification_report",
       "run_tool_async",
       "get_job_status",
       "list_background_jobs",
@@ -121,6 +190,7 @@ export const skillRegistry: readonly SkillDefinition[] = [
       "list_project_backups",
       "verify_recovery_point",
       "restore_project_backup",
+      "restore_latest_project_backup",
       "recover_deleted_project_file",
       "export_project_backup_archive"
     ],
@@ -149,12 +219,15 @@ Use this skill to discover the available workspace/project context before taking
       "get_project_manifest",
       "get_project_activity",
       "upsert_project_task",
+      "set_project_task_blocker",
+      "summarize_project_task_completion",
       "get_project_task",
       "delete_project_task",
       "search_project_tasks",
       "record_project_task_evidence",
       "bind_project_task_evidence",
       "list_project_tasks",
+      "rank_project_tasks",
       "get_project_task_graph",
       "get_project_task_dependency_view",
       "get_project_task_board",
@@ -165,6 +238,12 @@ Use this skill to discover the available workspace/project context before taking
       "get_custom_mcp_tool_blueprint",
       "generate_custom_mcp_tool_spec",
       "validate_custom_mcp_tool_spec",
+      "discover_mcp_plugins",
+      "register_mcp_plugin",
+      "set_mcp_plugin_enabled",
+      "test_mcp_plugin_capabilities",
+      "mcp_plugin_version_report",
+      "export_mcp_plugin_docs",
       "load_dataset_preview",
       "profile_dataset_quality",
       "clean_dataset_preview",
@@ -183,6 +262,10 @@ Use this skill to discover the available workspace/project context before taking
       "calculate_prediction_intervals",
       "evaluate_prediction_model",
       "explain_prediction_errors",
+      "verify_numeric_claim",
+      "search_math_counterexample",
+      "solve_equation_numeric",
+      "verify_derivation_steps",
       "inspect_convertible_file",
       "list_safe_archive_entries",
       "convert_table_data_format",
@@ -195,21 +278,44 @@ Use this skill to discover the available workspace/project context before taking
       "create_icon_manifest",
       "check_image_style_consistency",
       "create_placeholder_svg_asset",
+      "generate_svg_scene",
+      "layout_svg_elements",
+      "fit_svg_typography",
+      "inspect_svg_visual_quality",
+      "apply_svg_design_tokens",
+      "optimize_svg_paths",
+      "generate_svg_diagram",
+      "generate_svg_chart",
+      "generate_isometric_svg",
+      "generate_svg_icon_set",
+      "animate_svg_scene",
+      "add_svg_interactivity",
+      "animate_and_interact_svg",
+      "inspect_svg_accessibility",
+      "export_svg_project",
+      "process_svg_revision_feedback",
       "create_music_style_brief",
       "compose_edit_midi",
       "generate_music_variations",
       "publish_music_audition_demo",
       "extend_music_arrangement",
       "extend_original_music_arrangement",
+      "assemble_original_music_session",
       "assemble_music_session",
       "normalize_music_loudness",
+      "create_production_music_render_plan",
+      "apply_music_mix_master_chain",
+      "review_music_production_export",
       "export_music_project",
+      "process_music_revision_feedback",
       "compose_music",
       "edit_midi",
       "render_midi_to_audio",
       "generate_jazz_harmony",
       "generate_drum_groove",
       "inspect_audio_quality",
+      "build_music_license_manifest",
+      "manage_jazz_instrument_packs",
       "export_music_assets",
       "audition_music_variations",
       "create_3d_game_build_brief",
@@ -224,6 +330,10 @@ Use this skill to discover the available workspace/project context before taking
       "create_game_loop_qa_plan",
       "create_camera_control_test_plan",
       "profile_game_performance_budget",
+      "create_3d_visual_qa_plan",
+      "critique_3d_scene_design",
+      "search_3d_asset_library",
+      "export_3d_showcase_package",
       "optimize_3d_asset",
       "write_project_file",
       "write_project_asset",
@@ -238,6 +348,22 @@ Use this skill to discover the available workspace/project context before taking
       "run_project_build",
       "publish_project_dist",
       "get_app_project_report",
+      "create_project_mock_api",
+      "start_project_mock_api",
+      "stop_project_mock_api",
+      "generate_mock_data_fixture",
+      "scan_project_security",
+      "audit_design_system_consistency",
+      "audit_i18n_coverage",
+      "audit_seo_social_meta",
+      "classify_project_errors",
+      "optimize_project_assets",
+      "optimize_project_svgs",
+      "generate_project_docs",
+      "generate_component_library",
+      "modernize_legacy_project",
+      "monitor_published_demo_health",
+      "test_form_persistence",
       "bind_project_workspace",
       "init_project_git",
       "list_project_files",
@@ -256,9 +382,15 @@ Use this skill to discover the available workspace/project context before taking
       "fork_project",
       "screenshot_project",
       "run_project_fix_loop",
+      "auto_fix_accessibility",
       "submit_review_feedback",
       "get_review_feedback",
       "resolve_review_feedback",
+      "add_project_review_comment",
+      "list_project_review_comments",
+      "reply_project_review_comment",
+      "resolve_project_review_comment",
+      "export_project_review_summary",
       "read_project_file",
       "delete_project_file",
       "validate_project",
@@ -280,6 +412,7 @@ Use this skill to discover the available workspace/project context before taking
       "refactor_hints",
       "git_status",
       "git_diff",
+      "git_safe_change_plan",
       "git_diff_staged",
       "git_show",
       "git_log",
@@ -297,6 +430,7 @@ Use this skill to discover the available workspace/project context before taking
       "repo_summary",
       "test_failure_digest",
       "changed_files_context",
+      "git_safe_change_plan",
       "search_project_docs",
       "extract_project_conventions",
       "write_agent_note",
@@ -331,6 +465,64 @@ Use this skill to discover the available workspace/project context before taking
       "summarize_audit_log",
       "record_delivery_audit",
       "export_audit_log_report",
+      "record_usage_event",
+      "create_usage_budget",
+      "summarize_usage_costs",
+      "import_telemetry_usage",
+      "export_usage_cost_report",
+      "upsert_env_config_profile",
+      "upsert_env_config_entry",
+      "list_env_config_profiles",
+      "validate_env_config",
+      "export_env_config_report",
+      "create_demo_feedback_form",
+      "submit_demo_feedback",
+      "list_demo_feedback",
+      "link_demo_feedback_to_task",
+      "export_demo_feedback_report",
+      "create_demo_analytics_plan",
+      "record_demo_analytics_event",
+      "list_demo_analytics_events",
+      "summarize_demo_analytics",
+      "analyze_demo_interaction_funnel",
+      "export_demo_analytics_report",
+      "register_project_template",
+      "list_project_templates",
+      "recommend_project_templates",
+      "create_project_from_template",
+      "export_project_template_catalog",
+      "register_workflow_template",
+      "list_workflow_templates",
+      "recommend_workflow_templates",
+      "create_workflow_runbook_from_template",
+      "export_workflow_library_report",
+      "register_reusable_component",
+      "list_reusable_components",
+      "recommend_reusable_components",
+      "create_component_reuse_plan",
+      "export_component_registry_report",
+      "create_model_comparison",
+      "add_model_comparison_candidate",
+      "score_model_comparison",
+      "compare_model_tradeoffs",
+      "export_model_comparison_report",
+      "create_content_brief",
+      "create_content_version",
+      "review_content_version",
+      "list_content_versions",
+      "approve_content_version",
+      "export_content_workflow_report",
+      "create_export_package_manifest",
+      "build_zip_export_package",
+      "create_html_export_bundle",
+      "list_export_packages",
+      "export_package_report",
+      "configure_notification_channel",
+      "send_project_notification",
+      "schedule_project_notification",
+      "list_project_notifications",
+      "process_due_project_notifications",
+      "export_notification_report",
       "run_tool_async",
       "get_job_status",
       "list_background_jobs",
@@ -395,6 +587,7 @@ Use this skill to discover the available workspace/project context before taking
       "list_project_backups",
       "verify_recovery_point",
       "restore_project_backup",
+      "restore_latest_project_backup",
       "recover_deleted_project_file",
       "export_project_backup_archive",
       "api_healthcheck",
@@ -404,6 +597,11 @@ Use this skill to discover the available workspace/project context before taking
       "create_pptx_deck",
       "create_immersive_page",
       "create_video_presentation",
+      "create_media_scene_timeline",
+      "add_media_captions",
+      "attach_media_voice_audio",
+      "preview_media_frames",
+      "export_media_project",
       "set_homepage",
       "clear_homepage",
       "get_homepage",
@@ -418,7 +616,30 @@ Use this skill to discover the available workspace/project context before taking
 Use this skill when the user asks the agent to build, edit, validate, or publish project files.
 
 - Prefer \`deliver_static_project\` for complete static HTML/CSS/JS deliverables.
+- For first-pass static pages, call \`deliver_static_project\` with \`title\`, \`entryFile\`, and a \`files\` array of \`{ path, content }\`; return the resulting \`shareUrl\` or \`publishedUrl\`.
+- Treat \`projectId\` as the persistent Project identifier for follow-up calls. Tool results may also set \`jobId\` to the same value for generic job UIs, but follow-up Project tools should receive \`projectId\`.
+- For incremental repairs, use \`create_project\` or inspect an existing project, then \`write_project_file\`, \`validate_project\`, and \`publish_and_report\`. Use \`publish_project\` only when validation already passed and a browser/report handoff is not needed.
+- When blocked by validation or a failed write, call \`get_project_activity\`, \`get_project_manifest\`, and \`read_project_file\` before overwriting files; use \`create_project_backup\` before broad rewrites and \`restore_latest_project_backup\` if the repair regresses.
 - Use the app project workflow for React/Vue/Vite idea-to-demo requests: create, edit source, install, build, then publish dist.
+- For API-driven frontend demos without real keys or backend deployment, use \`create_project_mock_api\` and \`start_project_mock_api\` to provide project-scoped CORS JSON endpoints with pagination, search, empty, error, auth-expired, and slow states; call \`stop_project_mock_api\` after verification.
+- For admin, ERP, inventory, sales, or dashboard demos, use \`generate_mock_data_fixture\` to create deterministic JSON/CSV tables with schema fields, relationships, row counts, and edge cases before wiring UI state.
+- Run \`scan_project_security\` before publishing projects that use package dependencies, external CDN assets, embedded third-party pages, browser storage, permissions APIs, or any user-provided source that may contain secrets.
+- For admin panels or multi-page UIs, run \`audit_design_system_consistency\` to catch color, spacing, typography, radius, button variant, table density, and CSS token drift before visual handoff.
+- For multilingual projects, run \`audit_i18n_coverage\` to catch missing locale keys, hardcoded UI copy, fallback gaps, terminology drift, translation overflow risk, and missing language persistence.
+- Before publishing static demos, run \`audit_seo_social_meta\` to check title, description, canonical URL, favicon, Open Graph, Twitter cards, viewport, robots, theme color, and share-preview readiness.
+- When validation, browser QA, build/test, or tool calls fail, run \`classify_project_errors\` to group failures by root cause, affected files/selectors, likely fixes, and the next diagnostic tool to call.
+- When a tool call is blocked before MCP execution with vague safety wording, pass the exact blocked message to \`classify_project_errors\`; use its \`reasonCategory\` and \`safeRetrySuggestion\` before retrying.
+- Before publishing image-heavy demos, run \`optimize_project_assets\` to detect oversized images/media, strip safe PNG metadata, minify SVGs, flag embedded data URIs, suggest WebP/AVIF/video conversions, and report before/after size impact.
+- For SVG-heavy demos or icon systems, run \`optimize_project_svgs\` to validate viewBox, preserve title/desc accessibility labels, remove editor metadata/unused attributes, collapse duplicate groups, minify safely, and report size reduction.
+- After project creation, refactor, validation, or publish, run \`generate_project_docs\` to create durable README and CHANGELOG files from project files, task history, validation results, published URL, features, known limitations, and next steps.
+- For reusable admin/demo UI work, run \`generate_component_library\` to create shared design tokens, buttons, cards, tables, modals, sidebars, topbars, empty states, toasts, tabs, form fields, SVG icons, usage docs, and a style guide page before duplicating component markup by hand.
+- For old single-file or messy static demos, run \`modernize_legacy_project\` to analyze legacy patterns, split inline CSS/JS into modular files, preserve the original entry, produce a migration report, and validate the modernized entry before continuing feature work.
+- After publishing a demo, run \`monitor_published_demo_health\` to collect production-style health evidence: HTTP uptime, runtime/page errors, console errors, failed requests, broken assets, slow loads, slow requests, and recent deploy health history.
+- For admin/PWA forms, drafts, filters, theme/language preferences, or local persistence, run \`test_form_persistence\` to seed/reset storage, fill fields, reload, assert form values, localStorage/sessionStorage, IndexedDB databases, and same-context page reopen behavior.
+- For larger human reviews, use \`add_project_review_comment\` to attach file/line, screenshot region, UI selector, issue, or project-level comments; use \`reply_project_review_comment\`, \`resolve_project_review_comment\`, and \`export_project_review_summary\` to close the review loop.
+- For project task queues with competing work, call \`rank_project_tasks\` or \`list_project_tasks\` with default rank sorting to choose by dependency readiness, priority, inferred risk, dependency impact, progress, and recency.
+- When a task is blocked, use \`set_project_task_blocker\` or \`upsert_project_task\` with \`blockedReason\` and \`unblockRequirement\` so resume, board, dependency, and ranking views explain why it is blocked and what must happen next.
+- When a task is done, use \`summarize_project_task_completion\` or queue completion fields to persist a completion summary, changed files, validation snapshot, and evidence links.
 - For incremental work, create or inspect a project, write files, validate, then publish.
 - Use \`refactor_hints\` before broad cleanup to identify oversized modules, mixed responsibilities, and reviewable refactor candidates.
 - Use sandbox execution tools when code, scripts, builds, data jobs, or experiments need bounded local execution with logs, artifacts, and cleanup.
@@ -439,12 +660,15 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "get_project_manifest",
       "get_project_activity",
       "upsert_project_task",
+      "set_project_task_blocker",
+      "summarize_project_task_completion",
       "get_project_task",
       "delete_project_task",
       "search_project_tasks",
       "record_project_task_evidence",
       "bind_project_task_evidence",
       "list_project_tasks",
+      "rank_project_tasks",
       "get_project_task_graph",
       "get_project_task_dependency_view",
       "get_project_task_board",
@@ -455,6 +679,12 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "get_custom_mcp_tool_blueprint",
       "generate_custom_mcp_tool_spec",
       "validate_custom_mcp_tool_spec",
+      "discover_mcp_plugins",
+      "register_mcp_plugin",
+      "set_mcp_plugin_enabled",
+      "test_mcp_plugin_capabilities",
+      "mcp_plugin_version_report",
+      "export_mcp_plugin_docs",
       "load_dataset_preview",
       "profile_dataset_quality",
       "clean_dataset_preview",
@@ -473,6 +703,10 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "calculate_prediction_intervals",
       "evaluate_prediction_model",
       "explain_prediction_errors",
+      "verify_numeric_claim",
+      "search_math_counterexample",
+      "solve_equation_numeric",
+      "verify_derivation_steps",
       "inspect_convertible_file",
       "list_safe_archive_entries",
       "convert_table_data_format",
@@ -485,21 +719,44 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "create_icon_manifest",
       "check_image_style_consistency",
       "create_placeholder_svg_asset",
+      "generate_svg_scene",
+      "layout_svg_elements",
+      "fit_svg_typography",
+      "inspect_svg_visual_quality",
+      "apply_svg_design_tokens",
+      "optimize_svg_paths",
+      "generate_svg_diagram",
+      "generate_svg_chart",
+      "generate_isometric_svg",
+      "generate_svg_icon_set",
+      "animate_svg_scene",
+      "add_svg_interactivity",
+      "animate_and_interact_svg",
+      "inspect_svg_accessibility",
+      "export_svg_project",
+      "process_svg_revision_feedback",
       "create_music_style_brief",
       "compose_edit_midi",
       "generate_music_variations",
       "publish_music_audition_demo",
       "extend_music_arrangement",
       "extend_original_music_arrangement",
+      "assemble_original_music_session",
       "assemble_music_session",
       "normalize_music_loudness",
+      "create_production_music_render_plan",
+      "apply_music_mix_master_chain",
+      "review_music_production_export",
       "export_music_project",
+      "process_music_revision_feedback",
       "compose_music",
       "edit_midi",
       "render_midi_to_audio",
       "generate_jazz_harmony",
       "generate_drum_groove",
       "inspect_audio_quality",
+      "build_music_license_manifest",
+      "manage_jazz_instrument_packs",
       "export_music_assets",
       "audition_music_variations",
       "create_3d_game_build_brief",
@@ -514,6 +771,10 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "create_game_loop_qa_plan",
       "create_camera_control_test_plan",
       "profile_game_performance_budget",
+      "create_3d_visual_qa_plan",
+      "critique_3d_scene_design",
+      "search_3d_asset_library",
+      "export_3d_showcase_package",
       "optimize_3d_asset",
       "read_project_file",
       "validate_project",
@@ -529,6 +790,7 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "repo_summary",
       "test_failure_digest",
       "changed_files_context",
+      "git_safe_change_plan",
       "ingest_knowledge_document",
       "chunk_knowledge_document",
       "build_project_knowledge_index",
@@ -560,6 +822,64 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "summarize_audit_log",
       "record_delivery_audit",
       "export_audit_log_report",
+      "record_usage_event",
+      "create_usage_budget",
+      "summarize_usage_costs",
+      "import_telemetry_usage",
+      "export_usage_cost_report",
+      "upsert_env_config_profile",
+      "upsert_env_config_entry",
+      "list_env_config_profiles",
+      "validate_env_config",
+      "export_env_config_report",
+      "create_demo_feedback_form",
+      "submit_demo_feedback",
+      "list_demo_feedback",
+      "link_demo_feedback_to_task",
+      "export_demo_feedback_report",
+      "create_demo_analytics_plan",
+      "record_demo_analytics_event",
+      "list_demo_analytics_events",
+      "summarize_demo_analytics",
+      "analyze_demo_interaction_funnel",
+      "export_demo_analytics_report",
+      "register_project_template",
+      "list_project_templates",
+      "recommend_project_templates",
+      "create_project_from_template",
+      "export_project_template_catalog",
+      "register_workflow_template",
+      "list_workflow_templates",
+      "recommend_workflow_templates",
+      "create_workflow_runbook_from_template",
+      "export_workflow_library_report",
+      "register_reusable_component",
+      "list_reusable_components",
+      "recommend_reusable_components",
+      "create_component_reuse_plan",
+      "export_component_registry_report",
+      "create_model_comparison",
+      "add_model_comparison_candidate",
+      "score_model_comparison",
+      "compare_model_tradeoffs",
+      "export_model_comparison_report",
+      "create_content_brief",
+      "create_content_version",
+      "review_content_version",
+      "list_content_versions",
+      "approve_content_version",
+      "export_content_workflow_report",
+      "create_export_package_manifest",
+      "build_zip_export_package",
+      "create_html_export_bundle",
+      "list_export_packages",
+      "export_package_report",
+      "configure_notification_channel",
+      "send_project_notification",
+      "schedule_project_notification",
+      "list_project_notifications",
+      "process_due_project_notifications",
+      "export_notification_report",
       "run_tool_async",
       "get_job_status",
       "list_background_jobs",
@@ -624,6 +944,7 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "list_project_backups",
       "verify_recovery_point",
       "restore_project_backup",
+      "restore_latest_project_backup",
       "recover_deleted_project_file",
       "export_project_backup_archive",
       "browser_dom_snapshot",
@@ -632,17 +953,42 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "browser_storage_snapshot",
       "run_a11y_audit_detailed",
       "run_visual_regression_snapshot",
+      "profile_web_performance",
+      "record_interaction_flow",
+      "replay_interaction_recording",
       "run_smoke_flow",
+      "test_form_persistence",
       "analyze_webpage_visual",
       "inspect_3d_scene_visuals",
       "inspect_dom_at_point",
       "diagnostic_bundle",
       "diagnostic_bundle_full",
+      "create_project_mock_api",
+      "start_project_mock_api",
+      "stop_project_mock_api",
+      "generate_mock_data_fixture",
+      "scan_project_security",
+      "audit_design_system_consistency",
+      "audit_i18n_coverage",
+      "audit_seo_social_meta",
+      "classify_project_errors",
+      "optimize_project_assets",
+      "optimize_project_svgs",
+      "generate_project_docs",
+      "generate_component_library",
+      "modernize_legacy_project",
+      "monitor_published_demo_health",
+      "add_project_review_comment",
+      "list_project_review_comments",
+      "reply_project_review_comment",
+      "resolve_project_review_comment",
+      "export_project_review_summary",
       "check_url",
       "inspect_webpage",
       "inspect_webpage_plus",
       "inspect_webpage_multibrowser",
       "audit_accessibility",
+      "auto_fix_accessibility",
       "audit_lighthouse",
       "inspect_interaction_flow",
       "inspect_local_project"
@@ -765,6 +1111,58 @@ Use this skill for bounded forecasting, scenario modeling, model evaluation, bac
 - Always state caveats for sampling, uncertainty, missing drivers, and regime changes.`
   },
   {
+    id: "math-verification",
+    label: "Math Verification",
+    category: "analysis",
+    description: "Verify numeric claims, search bounded counterexamples, solve scalar equations, and check derivation steps with reproducible evidence.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "verify_numeric_claim",
+      "search_math_counterexample",
+      "solve_equation_numeric",
+      "verify_derivation_steps"
+    ],
+    protocolMarkdown: `# Math Verification
+
+Use this skill when an answer depends on formulas, equations, numeric claims, algebra steps, or counterexample checks.
+
+- Use \`verify_numeric_claim\` to evaluate a bounded expression with explicit variable values and tolerance.
+- Use \`search_math_counterexample\` to test equations or inequalities across deterministic bounded sample grids.
+- Use \`solve_equation_numeric\` for one real scalar root on a bracketed interval.
+- Use \`verify_derivation_steps\` to catch invalid algebra transitions by comparing adjacent steps over sampled assignments.
+- These tools are reproducible numeric/sampling checks, not full formal proof assistants. State assumptions, variable ranges, and tolerances in the final answer.`
+  },
+  {
+    id: "mcp-plugin-registry",
+    label: "MCP Plugin Registry",
+    category: "development",
+    description: "Discover, register, enable, disable, version-check, capability-test, and document MCP plugins and their tool surfaces.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "medium",
+    toolNames: [
+      "discover_mcp_plugins",
+      "register_mcp_plugin",
+      "set_mcp_plugin_enabled",
+      "test_mcp_plugin_capabilities",
+      "mcp_plugin_version_report",
+      "export_mcp_plugin_docs"
+    ],
+    protocolMarkdown: `# MCP Plugin Registry
+
+Use this skill when an agent needs to understand or manage MCP plugin capabilities.
+
+- Use \`discover_mcp_plugins\` to inspect built-in skill-backed plugins and project-registered plugin manifests by query, category, status, version, and tools.
+- Use \`register_mcp_plugin\` to save a project-local plugin manifest with version, capabilities, linked tools, linked skills, docs, and provenance.
+- Use \`set_mcp_plugin_enabled\` to enable or disable project plugin records. Use \`applyToLinkedSkills=true\` only when you intentionally want to update linked built-in skill state.
+- Use \`test_mcp_plugin_capabilities\` to validate metadata, linked tools, linked skills, tool schemas, and effective tool access before relying on a plugin.
+- Use \`mcp_plugin_version_report\` to compare built-in and project plugin versions/status.
+- Use \`export_mcp_plugin_docs\` to create Markdown documentation for available plugins, capabilities, linked tools, and status.
+- These tools do not install third-party code or store secrets; they document and manage registry state around already available MCP capabilities.`
+  },
+  {
     id: "file-conversion",
     label: "File Conversion",
     category: "media",
@@ -778,7 +1176,12 @@ Use this skill for bounded forecasting, scenario modeling, model evaluation, bac
       "convert_table_data_format",
       "create_file_conversion_plan",
       "export_file_conversion_report",
-      "create_media_conversion_manifest"
+      "create_media_conversion_manifest",
+      "create_media_scene_timeline",
+      "add_media_captions",
+      "attach_media_voice_audio",
+      "preview_media_frames",
+      "export_media_project"
     ],
     protocolMarkdown: `# File Conversion
 
@@ -789,6 +1192,7 @@ Use this skill for safe file inspection, conversion planning, bounded table conv
 - Use \`convert_table_data_format\` for bounded CSV/JSON table conversion to JSON, CSV, or Markdown.
 - Use \`create_file_conversion_plan\` and \`export_file_conversion_report\` when a durable handoff or audit trail is needed.
 - Use \`create_media_conversion_manifest\` for image/audio/video transcode requirements; actual byte transcoding requires a separate verified converter step.
+- Use \`create_media_scene_timeline\`, \`add_media_captions\`, \`attach_media_voice_audio\`, \`preview_media_frames\`, and \`export_media_project\` for scripted media export handoff from project files/data; keep the workflow on Code-MCP project files, browser standards, and commercially usable open dependencies, and record license status for any optional encoder.
 - Reject traversal paths, hidden archive paths, oversized files, and high compression-ratio entries before extraction.`
   },
   {
@@ -805,7 +1209,23 @@ Use this skill for safe file inspection, conversion planning, bounded table conv
       "create_sprite_sheet_spec",
       "create_icon_manifest",
       "check_image_style_consistency",
-      "create_placeholder_svg_asset"
+      "create_placeholder_svg_asset",
+      "generate_svg_scene",
+      "layout_svg_elements",
+      "fit_svg_typography",
+      "inspect_svg_visual_quality",
+      "apply_svg_design_tokens",
+      "optimize_svg_paths",
+      "generate_svg_diagram",
+      "generate_svg_chart",
+      "generate_isometric_svg",
+      "generate_svg_icon_set",
+      "animate_svg_scene",
+      "add_svg_interactivity",
+      "animate_and_interact_svg",
+      "inspect_svg_accessibility",
+      "export_svg_project",
+      "process_svg_revision_feedback"
     ],
     protocolMarkdown: `# Image Workflow
 
@@ -813,6 +1233,9 @@ Use this skill for project-local image generation/editing planning, sprite/icon 
 
 - Start with \`create_image_workflow_brief\` to define target assets, prompts, edits, background-removal needs, references, and constraints.
 - Use \`create_placeholder_svg_asset\` when the project needs a safe temporary icon or visual placeholder before final artwork exists.
+- Use \`generate_svg_scene\`, \`generate_svg_diagram\`, \`generate_svg_chart\`, \`generate_isometric_svg\`, or \`generate_svg_icon_set\` for production SVG illustrations, diagrams, charts, isometric scenes, and icon families.
+- Use \`layout_svg_elements\`, \`fit_svg_typography\`, \`apply_svg_design_tokens\`, \`inspect_svg_visual_quality\`, \`inspect_svg_accessibility\`, and \`optimize_svg_paths\` before delivery to catch overlap, tiny text, missing viewBox/title/desc, style drift, and bloated SVG markup.
+- Use \`animate_svg_scene\`, \`add_svg_interactivity\`, or \`animate_and_interact_svg\` for animated/interactive SVG handoff; prefer \`animate_and_interact_svg\` when CSS, WAAPI config, hotspots/tooltips, reduced-motion support, and interaction QA should be produced together.
 - Use \`create_sprite_sheet_spec\` and \`create_icon_manifest\` to make implementation-ready asset specs.
 - Run \`inspect_project_image_assets\` and \`check_image_style_consistency\` before publish or visual review.
 - Treat generated briefs/specs as handoff artifacts; import final raster assets with the project asset tools.`
@@ -838,6 +1261,10 @@ Use this skill for project-local image generation/editing planning, sprite/icon 
       "create_game_loop_qa_plan",
       "create_camera_control_test_plan",
       "profile_game_performance_budget",
+      "create_3d_visual_qa_plan",
+      "critique_3d_scene_design",
+      "search_3d_asset_library",
+      "export_3d_showcase_package",
       "optimize_3d_asset"
     ],
     protocolMarkdown: `# 3D and Game Building
@@ -851,6 +1278,10 @@ Use this skill for project-local 3D assets, game scene planning, gameplay QA, an
 - Use \`create_3d_scene_manifest\` and \`generate_game_map_spec\` to make scene and level structure reviewable.
 - Use \`test_collision_rules\`, \`create_game_loop_qa_plan\`, and \`create_camera_control_test_plan\` before browser gameplay checks.
 - Use \`profile_game_performance_budget\` to flag triangle, draw-call, texture, and animation risks before final visual QA.
+- Use \`create_3d_visual_qa_plan\` to define front/back/side/top/mobile screenshot captures and checks for darkness, scale, clipping, facing, contrast, UI readability, shadows, camera interior clipping, and mobile framing.
+- Use \`critique_3d_scene_design\` with screenshot evidence to compare against Minecraft collectible, toy figurine, product showcase, hero select, cyberpunk showroom, or Apple product intro style targets.
+- Use \`search_3d_asset_library\` before importing external models, textures, HDRIs, sounds, or animations to prefer commercial-safe sources and capture attribution requirements.
+- Use \`export_3d_showcase_package\` for screenshot card, poster, turntable, model report, PWA checklist, and asset manifest handoff.
 - Browser/canvas verification is still required before claiming a rendered 3D/game experience works.`
   },
   {
@@ -868,15 +1299,22 @@ Use this skill for project-local 3D assets, game scene planning, gameplay QA, an
       "publish_music_audition_demo",
       "extend_music_arrangement",
       "extend_original_music_arrangement",
+      "assemble_original_music_session",
       "assemble_music_session",
       "normalize_music_loudness",
+      "create_production_music_render_plan",
+      "apply_music_mix_master_chain",
+      "review_music_production_export",
       "export_music_project",
+      "process_music_revision_feedback",
       "compose_music",
       "edit_midi",
       "render_midi_to_audio",
       "generate_jazz_harmony",
       "generate_drum_groove",
       "inspect_audio_quality",
+      "build_music_license_manifest",
+      "manage_jazz_instrument_packs",
       "export_music_assets",
       "audition_music_variations"
     ],
@@ -888,8 +1326,12 @@ Use this skill for original background music, MIDI sketches, WAV previews, jazz 
 - Use \`compose_music\` to generate the structured composition manifest and MIDI.
 - Use \`edit_midi\` for quantize, transpose, humanize, swing, and velocity shaping.
 - Use \`render_midi_to_audio\` for a project WAV preview from the built-in safe synth; MP3/OGG require a verified encoder step.
-- Use \`generate_jazz_harmony\` and \`generate_drum_groove\` for readable chord charts, voicings, walking bass, and drum/brush patterns.
-- Run \`inspect_audio_quality\` before delivery to check clipping, density, repetition, loop seams, and background suitability.
+- Use \`generate_jazz_harmony\` for section-aware original jazz progressions, piano voicings, bass guide tones, MIDI-ready voicing data, and variation notes before composing cafe/lounge tracks; use \`generate_drum_groove\` for section-aware MIDI-ready drum/brush grooves with swing, velocities, fills, background safety constraints, and variation maps.
+- Run \`inspect_audio_quality\` before delivery or publishing to check clipping, loudness, dynamic range, silence gaps, harshness/bass proxies, density, repetition, loop seams, session transitions, severity-ranked findings, and background suitability fixes.
+- Use \`assemble_original_music_session\` or \`assemble_music_session\` after 5-10 minute arrangements to create 30/60/90/120 minute background programs with energy profile, transition map, loudness report, source manifest, and render/export plan.
+- Use \`process_music_revision_feedback\` after an audition listener picks a version or leaves timestamped comments; turn subjective feedback into MIDI edit operations, arrangement/mix changes, QA checks, revision history, and the next tool sequence.
+- Use \`build_music_license_manifest\` before public demos, website/cafe/video/game use, ZIP exports, or client delivery to classify generated assets, soundfonts, samples, drum kits, ambience beds, stems, session mixes, attribution, and commercial-use safety.
+- Use \`manage_jazz_instrument_packs\` before claiming realistic piano/upright bass/brush drum rendering; register SFZ/SoundFont/WAV multisample/impulse-response packs, verify hashes, commercial-use permission, attribution, redistribution rules, GPL/LGPL/proprietary/non-commercial risk, and select only ready packs.
 - Use \`export_music_assets\` for MIDI/WAV/chord-chart/license metadata handoff.
 - Do not copy melodies, lyrics, recordings, artist identity, or distinctive arrangements from copyrighted works.`
   },
@@ -931,7 +1373,12 @@ Use this skill to inspect an existing webpage and rebuild it as a validated stat
       "browser_storage_snapshot",
       "run_a11y_audit_detailed",
       "run_visual_regression_snapshot",
+      "profile_web_performance",
+      "record_interaction_flow",
+      "replay_interaction_recording",
       "run_smoke_flow",
+      "test_form_persistence",
+      "monitor_published_demo_health",
       "inspect_webpage",
       "inspect_webpage_plus",
       "inspect_webpage_multibrowser",
@@ -940,6 +1387,7 @@ Use this skill to inspect an existing webpage and rebuild it as a validated stat
       "inspect_3d_scene_visuals",
       "inspect_dom_at_point",
       "audit_accessibility",
+      "auto_fix_accessibility",
       "audit_lighthouse",
       "inspect_interaction_flow",
       "inspect_local_project",
@@ -966,7 +1414,11 @@ Use this skill to validate runtime, layout, accessibility, and interaction behav
       "browser_dom_snapshot",
       "browser_network_trace",
       "browser_console_log",
-      "browser_storage_snapshot"
+      "browser_storage_snapshot",
+      "profile_web_performance",
+      "record_interaction_flow",
+      "replay_interaction_recording",
+      "test_form_persistence"
     ],
     protocolMarkdown: `# Agent Browser Observability
 
@@ -974,6 +1426,8 @@ Use this skill when the agent needs deterministic evidence of DOM, network, cons
 
 - Prefer browser session-based observation before DOM mutation.
 - Use traces for flaky request/page failures and console errors.
+- Use \`profile_web_performance\` for laggy WebGL, SVG animation, chart-heavy, or large DOM pages; review FPS, long tasks, memory growth, layout shift, paint cost, script hot spots, and heavy selectors.
+- Use \`record_interaction_flow\` and \`replay_interaction_recording\` to preserve clicks, inputs, scrolls, screenshots, console, and network evidence for manual UI bugs.
 - Treat findings as evidence and keep fix proposals scoped.`
   },
   {
@@ -987,7 +1441,8 @@ Use this skill when the agent needs deterministic evidence of DOM, network, cons
     toolNames: [
       "repo_summary",
       "test_failure_digest",
-      "changed_files_context"
+      "changed_files_context",
+      "git_safe_change_plan"
     ],
     protocolMarkdown: `# Agent Code Intelligence
 
@@ -1155,6 +1610,298 @@ Use this skill when project work needs a durable history of what happened and wh
 - Use \`record_delivery_audit\` before final handoff to capture delivered files, validation evidence, and published URLs.
 - Use \`export_audit_log_report\` to produce a Markdown audit report for review.
 - Audit tools write project-local records; they do not replace telemetry or grant permissions.`
+  },
+  {
+    id: "usage-cost",
+    label: "Usage and Cost Tracking",
+    category: "operations",
+    description: "Track estimated project usage and costs for model calls, tool calls, storage, publishes, browser QA, and long workflows.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "record_usage_event",
+      "create_usage_budget",
+      "summarize_usage_costs",
+      "import_telemetry_usage",
+      "export_usage_cost_report"
+    ],
+    protocolMarkdown: `# Usage and Cost Tracking
+
+Use this skill when project work needs cost awareness, budget checks, or usage handoff.
+
+- Use \`create_usage_budget\` to set project budget metadata and warning thresholds.
+- Use \`record_usage_event\` to track model calls, tool calls, storage, publishes, browser QA runs, and long workflow costs with explicit pricing assumptions.
+- Use \`import_telemetry_usage\` to convert recent MCP tool-call telemetry into project usage events with a per-call estimate.
+- Use \`summarize_usage_costs\` before long workflows or final handoff to show spend by category, tool, model, and units.
+- Use \`export_usage_cost_report\` to create a Markdown cost report.
+- Costs are estimates from supplied pricing and telemetry; state assumptions and do not treat them as provider billing invoices.`
+  },
+  {
+    id: "environment-config",
+    label: "Environment Configuration",
+    category: "operations",
+    description: "Manage dev, preview, demo, and production environment config metadata, feature flags, required variables, and safe defaults without storing secrets.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "upsert_env_config_profile",
+      "upsert_env_config_entry",
+      "list_env_config_profiles",
+      "validate_env_config",
+      "export_env_config_report"
+    ],
+    protocolMarkdown: `# Environment Configuration
+
+Use this skill when project work needs environment-specific config, feature flags, required variables, or publish readiness checks.
+
+- Use \`upsert_env_config_profile\` to define dev, preview, demo, or production config policy and notes.
+- Use \`upsert_env_config_entry\` for environment variables, feature flags, and config values. Mark secrets with \`secret=true\`; real secret values are not persisted.
+- Use \`list_env_config_profiles\` to inspect current profiles and entries.
+- Use \`validate_env_config\` before preview/demo/production handoff to find missing required values, placeholders, unsafe secret persistence, and safe-default gaps.
+- Use \`export_env_config_report\` to create a Markdown handoff report.
+- Keep real credentials in external secret management. These tools track config metadata, defaults, and readiness only.`
+  },
+  {
+    id: "demo-feedback",
+    label: "Demo User Feedback",
+    category: "operations",
+    description: "Collect published demo user feedback with forms, ratings, screenshot notes, and links back to project tasks.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "create_demo_feedback_form",
+      "submit_demo_feedback",
+      "list_demo_feedback",
+      "link_demo_feedback_to_task",
+      "export_demo_feedback_report"
+    ],
+    protocolMarkdown: `# Demo User Feedback
+
+Use this skill after preview/demo/publish handoff when external or internal users need a lightweight feedback loop.
+
+- Use \`create_demo_feedback_form\` to define the feedback form, rating scale, screenshot support, and task-linking policy.
+- Use \`submit_demo_feedback\` to capture ratings, summaries, page URLs, screenshot notes, selectors, tags, and optional task links.
+- Use \`list_demo_feedback\` to triage by status, sentiment, tag, or project task.
+- Use \`link_demo_feedback_to_task\` to attach existing feedback to project task evidence.
+- Use \`export_demo_feedback_report\` before implementation follow-up or stakeholder handoff.
+- Do not store secrets or private credentials in feedback metadata.`
+  },
+  {
+    id: "demo-analytics",
+    label: "Demo Analytics",
+    category: "operations",
+    description: "Track and analyze published demo usage with page views, devices, clicks, errors, funnels, and drop-off points.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "create_demo_analytics_plan",
+      "record_demo_analytics_event",
+      "list_demo_analytics_events",
+      "summarize_demo_analytics",
+      "analyze_demo_interaction_funnel",
+      "export_demo_analytics_report"
+    ],
+    protocolMarkdown: `# Demo Analytics
+
+Use this skill after a demo is published or shared and the agent needs usage evidence beyond health monitoring.
+
+- Use \`create_demo_analytics_plan\` to define tracked event types, goals, privacy notes, and interaction funnels.
+- Use \`record_demo_analytics_event\` to ingest page views, clicks, runtime errors, funnel steps, custom events, session ids, and device types.
+- Use \`list_demo_analytics_events\` when debugging raw events by session, path, event type, or device.
+- Use \`summarize_demo_analytics\` to report page views, device mix, top click targets, and top errors.
+- Use \`analyze_demo_interaction_funnel\` to find step-level conversion and drop-off points.
+- Use \`export_demo_analytics_report\` for stakeholder handoff or the next implementation task.
+- Keep analytics project-local and avoid collecting secrets, credentials, or unnecessary personal data.`
+  },
+  {
+    id: "project-templates",
+    label: "Project Template Marketplace",
+    category: "development",
+    description: "Discover, register, recommend, instantiate, and export reusable project templates for common app and site categories.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "register_project_template",
+      "list_project_templates",
+      "recommend_project_templates",
+      "create_project_from_template",
+      "export_project_template_catalog"
+    ],
+    protocolMarkdown: `# Project Template Marketplace
+
+Use this skill before starting a common project type where a reusable starter can reduce scaffold time.
+
+- Use \`list_project_templates\` to browse built-in and project-local templates for admin panels, PWA apps, dashboards, games, landing pages, data tools, and docs sites.
+- Use \`recommend_project_templates\` with the user goal and desired features before choosing a starter.
+- Use \`create_project_from_template\` to create and validate a static starter project from a selected template.
+- Use \`register_project_template\` when a project has a reusable custom template worth saving in the project-local marketplace.
+- Use \`export_project_template_catalog\` to hand off available template choices.
+- Treat generated starter files as a baseline; customize copy, data, visuals, accessibility, and validation for the actual user request.`
+  },
+  {
+    id: "workflow-library",
+    label: "Prompt and Workflow Library",
+    category: "development",
+    description: "Save, discover, recommend, instantiate, and export reusable prompt/workflow templates for common agent jobs.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "register_workflow_template",
+      "list_workflow_templates",
+      "recommend_workflow_templates",
+      "create_workflow_runbook_from_template",
+      "export_workflow_library_report"
+    ],
+    protocolMarkdown: `# Prompt and Workflow Library
+
+Use this skill when a common job should follow a reusable SOP or prompt pattern before execution.
+
+- Use \`list_workflow_templates\` to browse built-in and project-local workflows for refactor, QA, publish, data report, PWA polish, and bug fix loops.
+- Use \`recommend_workflow_templates\` with the job description and desired tools before choosing a workflow.
+- Use \`create_workflow_runbook_from_template\` to instantiate a template into a project-local Markdown runbook with variables filled in.
+- Use \`register_workflow_template\` when a stable project workflow or prompt should be saved for reuse.
+- Use \`export_workflow_library_report\` to hand off available workflow choices.
+- This library stores reusable instructions; execution still happens through the relevant project, QA, workflow automation, test, publish, or analysis tools.`
+  },
+  {
+    id: "component-registry",
+    label: "Reusable Component Registry",
+    category: "development",
+    description: "Save, search, recommend, plan reuse, and export working components, icons, layouts, game objects, charts, and interaction patterns.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "register_reusable_component",
+      "list_reusable_components",
+      "recommend_reusable_components",
+      "create_component_reuse_plan",
+      "export_component_registry_report"
+    ],
+    protocolMarkdown: `# Reusable Component Registry
+
+Use this skill when a working UI/component pattern should be saved or reused across project work.
+
+- Use \`register_reusable_component\` to save components, icons, layouts, game objects, charts, or interaction patterns with files, props, variants, dependencies, usage notes, and accessibility notes.
+- Use \`list_reusable_components\` to inspect registry entries by kind, tag, maturity, or text query.
+- Use \`recommend_reusable_components\` before rebuilding a component from scratch.
+- Use \`create_component_reuse_plan\` to hand off selected components with source files, props, dependencies, and reuse guidance.
+- Use \`export_component_registry_report\` for a Markdown registry handoff.
+- Use \`generate_component_library\` when a new component library must be generated; use this registry when existing working components should be cataloged and reused.`
+  },
+  {
+    id: "model-comparison",
+    label: "Multi-Model Comparison",
+    category: "analysis",
+    description: "Compare model candidates for coding, analysis, writing, vision, cost, speed, and reliability using recorded outputs and metrics.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "create_model_comparison",
+      "add_model_comparison_candidate",
+      "score_model_comparison",
+      "compare_model_tradeoffs",
+      "export_model_comparison_report"
+    ],
+    protocolMarkdown: `# Multi-Model Comparison
+
+Use this skill when choosing between model outputs or documenting why one model is better for a task.
+
+- Use \`create_model_comparison\` to define the prompt, task type, and weighted criteria.
+- Use \`add_model_comparison_candidate\` for each recorded model output, with quality scores, latency, cost, and reliability metrics.
+- Use \`score_model_comparison\` to rank candidates with normalized cost/speed and weighted rubric scores.
+- Use \`compare_model_tradeoffs\` to identify the weighted winner, fastest, cheapest, and most reliable candidate.
+- Use \`export_model_comparison_report\` for a Markdown handoff.
+- These tools compare supplied evidence; they do not call model provider APIs or verify claims automatically.`
+  },
+  {
+    id: "content-workflow",
+    label: "Content Generation Workflow",
+    category: "development",
+    description: "Manage content briefs, draft versions, reviews, approvals, and reports for articles, emails, docs, scripts, slide outlines, video scripts, and social posts.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "create_content_brief",
+      "create_content_version",
+      "review_content_version",
+      "list_content_versions",
+      "approve_content_version",
+      "export_content_workflow_report"
+    ],
+    protocolMarkdown: `# Content Generation Workflow
+
+Use this skill for writing deliverables that need reviewable drafts and versioning.
+
+- Use \`create_content_brief\` to define type, audience, goal, tone, channels, constraints, and review checklist.
+- Use \`create_content_version\` to store article, email, doc, script, slide outline, video script, or social post drafts as versioned artifacts.
+- Use \`review_content_version\` to attach reviewer decisions, comments, and checklist results.
+- Use \`approve_content_version\` only after review is complete and the draft is ready for handoff.
+- Use \`list_content_versions\` to inspect draft status by brief, type, or status.
+- Use \`export_content_workflow_report\` to hand off briefs, versions, reviews, and approvals.
+- These tools do not send emails, publish posts, or claim factual verification; use separate review/compliance checks for high-stakes claims.`
+  },
+  {
+    id: "export-package",
+    label: "Export Package",
+    category: "operations",
+    description: "Create export package manifests, ZIP packages, HTML bundle indexes, package listings, and handoff reports for project deliverables.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "create_export_package_manifest",
+      "build_zip_export_package",
+      "create_html_export_bundle",
+      "list_export_packages",
+      "export_package_report"
+    ],
+    protocolMarkdown: `# Export Package
+
+Use this skill when a project or report needs a share-ready handoff package.
+
+- Use \`create_export_package_manifest\` to define requested formats such as ZIP, PDF, DOCX, PPTX, HTML bundle, screenshots, and share archive.
+- Use \`build_zip_export_package\` to create a real ZIP package from project files and optional workspace files.
+- Use \`create_html_export_bundle\` to create a share-ready HTML index with files, readiness, and published URL.
+- Use \`list_export_packages\` to inspect the current manifest and generated package artifacts.
+- Use \`export_package_report\` to produce a Markdown handoff report with completed packages and pending converter steps.
+- PDF/DOCX/PPTX generation may require dedicated converter tools; this package layer records readiness and remaining steps.`
+  },
+  {
+    id: "notifications",
+    label: "Project Notifications",
+    category: "operations",
+    description: "Configure project notification channels, send immediate notifications, schedule reminders, process due notifications, and export notification reports.",
+    enabledByDefault: true,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "configure_notification_channel",
+      "send_project_notification",
+      "schedule_project_notification",
+      "list_project_notifications",
+      "process_due_project_notifications",
+      "export_notification_report"
+    ],
+    protocolMarkdown: `# Project Notifications
+
+Use this skill when work should notify humans or follow-up agents about completed tasks, failed jobs, review requests, blocked tasks, or important project changes.
+
+- Use \`configure_notification_channel\` to define project-local channels such as in-app, email, webhook, Slack, SMS, or calendar without storing external secrets.
+- Use \`send_project_notification\` for immediate completed-task, failed-job, review-needed, blocked-task, project-change, release, deployment, or budget notifications.
+- Use \`schedule_project_notification\` to queue a future reminder or review request.
+- Use \`process_due_project_notifications\` to mark due scheduled notifications as sent and return delivery packets.
+- Use \`list_project_notifications\` to inspect sent, scheduled, failed, or event-specific notifications.
+- Use \`export_notification_report\` for a Markdown handoff of channels, sent items, scheduled reminders, and failures.
+- These tools store auditable project-local notification records; actual external delivery still requires a configured external integration.`
   },
   {
     id: "job-queue",
@@ -1445,6 +2192,7 @@ Use this skill when an agent needs to run code, scripts, builds, data jobs, or e
       "list_project_backups",
       "verify_recovery_point",
       "restore_project_backup",
+      "restore_latest_project_backup",
       "recover_deleted_project_file",
       "export_project_backup_archive"
     ],
@@ -1456,6 +2204,7 @@ Use this skill before broad edits, risky refactors, release promotion, file dele
 - Use \`verify_recovery_point\` before restore/export to ensure every backup file still matches its manifest hash.
 - Use \`recover_deleted_project_file\` to restore one file from a verified backup without replacing the full project.
 - Use \`restore_project_backup\` with \`confirm=true\` for full recovery, choosing \`overwrite_all\` or \`missing_only\`.
+- Use \`restore_latest_project_backup\` as the one-click rollback path: preview the latest verified backup by default, then rerun with \`confirm=true\` to restore it.
 - Use \`list_project_backups\` to find recovery points and \`export_project_backup_archive\` for portable handoff.
 - Do not put secrets in project files or backup archives.`
   },

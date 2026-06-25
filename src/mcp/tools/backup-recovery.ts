@@ -43,6 +43,13 @@ const restoreProjectBackupInputSchema = z.object({
   confirm: z.boolean().refine((value) => value === true, { message: "Restore requires confirm=true." })
 });
 
+const restoreLatestProjectBackupInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  mode: z.enum(["overwrite_all", "missing_only"]).optional().default("overwrite_all"),
+  labelContains: z.string().min(1).max(160).optional(),
+  confirm: z.boolean().optional().default(false)
+});
+
 const recoverDeletedProjectFileInputSchema = z.object({
   backupId: backupIdSchema,
   projectId: z.string().min(8).max(80),
@@ -185,6 +192,18 @@ async function restoreFile(projectRoot: string, projectId: string, root: string,
   }
 }
 
+async function restoreBackupFiles(projectRoot: string, projectId: string, root: string, manifest: BackupManifest, mode: "overwrite_all" | "missing_only") {
+  const existing = new Set((await getProjectManifest(projectRoot, projectId)).files.map((file) => file.path));
+  if (mode === "overwrite_all") await clearProjectFiles(projectRoot, projectId);
+  const restored: string[] = [];
+  for (const file of manifest.files) {
+    if (mode === "missing_only" && existing.has(file.path)) continue;
+    await restoreFile(projectRoot, projectId, root, file);
+    restored.push(file.path);
+  }
+  return restored;
+}
+
 export const backupRecoveryTools: ToolModule[] = [
   {
     definition: {
@@ -273,15 +292,43 @@ export const backupRecoveryTools: ToolModule[] = [
       const manifest = await readBackupManifest(root);
       const verification = await verifyManifest(root, manifest);
       if (!verification.ok) throw new Error(`Cannot restore unverified backup: ${verification.findings.join("; ")}`);
-      const existing = new Set((await getProjectManifest(ctx.projectRoot, parsed.projectId)).files.map((file) => file.path));
-      if (parsed.mode === "overwrite_all") await clearProjectFiles(ctx.projectRoot, parsed.projectId);
-      const restored: string[] = [];
-      for (const file of manifest.files) {
-        if (parsed.mode === "missing_only" && existing.has(file.path)) continue;
-        await restoreFile(ctx.projectRoot, parsed.projectId, root, file);
-        restored.push(file.path);
-      }
+      const restored = await restoreBackupFiles(ctx.projectRoot, parsed.projectId, root, manifest, parsed.mode);
       return { ok: true, summary: `Restored ${restored.length} file(s) from ${parsed.backupId}.`, jobId: parsed.projectId, artifacts: [backupManifestPath(root)], structuredContent: { backupId: parsed.backupId, projectId: parsed.projectId, mode: parsed.mode, restored }, logs: restored, errors: [] };
+    }
+  },
+  {
+    definition: {
+      name: "restore_latest_project_backup",
+      description: "One-click rollback helper: find the latest verified backup for a project, preview it by default, and restore it when confirm=true.",
+      inputSchema: { type: "object", properties: { projectId: { type: "string" }, mode: { type: "string" }, labelContains: { type: "string" }, confirm: { type: "boolean" } }, required: ["projectId"], additionalProperties: false }
+    },
+    enabledByDefault: true,
+    schema: restoreLatestProjectBackupInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = restoreLatestProjectBackupInputSchema.parse(input);
+      const backups = (await listBackupManifests(ctx.artifactRoot, parsed.projectId, 200))
+        .filter((backup) => !parsed.labelContains || backup.label.toLowerCase().includes(parsed.labelContains!.toLowerCase()));
+      const manifest = backups[0];
+      if (!manifest) throw new Error(`No project backup found for ${parsed.projectId}${parsed.labelContains ? ` matching ${parsed.labelContains}` : ""}.`);
+      const root = backupRoot(ctx.artifactRoot, manifest.backupId);
+      const verification = await verifyManifest(root, manifest);
+      const preview = {
+        backupId: manifest.backupId,
+        projectId: parsed.projectId,
+        label: manifest.label,
+        reason: manifest.reason,
+        createdAt: manifest.createdAt,
+        mode: parsed.mode,
+        fileCount: manifest.fileCount,
+        files: manifest.files.map((file) => file.path),
+        verification
+      };
+      if (!verification.ok) return { ok: false, summary: `Latest backup ${manifest.backupId} failed verification.`, jobId: parsed.projectId, artifacts: [backupManifestPath(root)], structuredContent: { ...preview, restored: [] }, logs: [JSON.stringify(preview, null, 2)], errors: verification.findings };
+      if (!parsed.confirm) {
+        return { ok: true, summary: `Preview restore from latest backup ${manifest.backupId}; rerun with confirm=true to restore ${manifest.fileCount} file(s).`, jobId: parsed.projectId, artifacts: [backupManifestPath(root)], structuredContent: { ...preview, restored: [], dryRun: true }, logs: [JSON.stringify(preview, null, 2)], errors: [] };
+      }
+      const restored = await restoreBackupFiles(ctx.projectRoot, parsed.projectId, root, manifest, parsed.mode);
+      return { ok: true, summary: `Restored ${restored.length} file(s) from latest backup ${manifest.backupId}.`, jobId: parsed.projectId, artifacts: [backupManifestPath(root)], structuredContent: { ...preview, restored, dryRun: false }, logs: restored, errors: [] };
     }
   },
   {

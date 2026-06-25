@@ -31,6 +31,16 @@ const gitCommitSchema = z.object({
   path: z.string().min(1).max(500).optional()
 });
 
+const gitSafeChangePlanSchema = z.object({
+  projectId: z.string().min(8).max(80).optional(),
+  selectedPaths: z.array(z.string().min(1).max(500)).max(50).optional().default([]),
+  includePatch: z.boolean().optional().default(false),
+  createCheckpoint: z.boolean().optional().default(false),
+  checkpointLabel: z.string().min(1).max(80).optional().default("safe-change"),
+  checkpointPrefix: z.string().min(1).max(40).optional().default("checkpoint"),
+  maxFiles: z.number().int().min(1).max(200).optional().default(80)
+});
+
 // A leading dash lets a value masquerade as a git option (e.g.
 // `--receive-pack=<cmd>`/`--upload-pack=<cmd>`), which is argument injection
 // reaching command execution. These are positional args with no `--` guard,
@@ -103,6 +113,24 @@ function gitResult(summary: string, cwd: string, stdout: string, stderr: string)
   };
 }
 
+function parsePorcelainStatus(output: string) {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .map((line) => {
+      const status = line.slice(0, 2);
+      const rawPath = line.slice(3).trim();
+      const renamed = rawPath.includes(" -> ");
+      const file = renamed ? rawPath.split(" -> ").at(-1) ?? rawPath : rawPath;
+      return { status, path: file.replace(/^"|"$/g, ""), staged: status[0] !== " " && status[0] !== "?", unstaged: status[1] !== " " };
+    });
+}
+
+function safeBranchSegment(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9._/-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "safe-change";
+}
+
 const projectAwareGitTools: ToolModule[] = [
   {
     definition: {
@@ -143,6 +171,100 @@ const projectAwareGitTools: ToolModule[] = [
       if (parsed.path) args.push("--", await resolveGitPath(ctx, parsed.projectId, parsed.path));
       const { stdout, stderr, cwd } = await runGit(ctx, parsed.projectId, args);
       return gitResult("Ran git diff.", cwd, stdout || "(no diff)", stderr);
+    }
+  },
+  {
+    definition: {
+      name: "git_safe_change_plan",
+      description: "Create a Git-style safe change management plan with branch/HEAD, status, diff stats, staged state, checkpoint branch guidance, selected path staging/revert commands, and final review summary.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string", description: "Optional projectId bound with bind_project_workspace." },
+          selectedPaths: { type: "array", items: { type: "string" }, description: "Optional repository-relative paths to focus stage/revert guidance." },
+          includePatch: { type: "boolean", description: "Include a bounded patch preview." },
+          createCheckpoint: { type: "boolean", description: "Create a checkpoint branch at current HEAD." },
+          checkpointLabel: { type: "string" },
+          checkpointPrefix: { type: "string" },
+          maxFiles: { type: "number" }
+        },
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: gitSafeChangePlanSchema,
+    handler: async (input, ctx) => {
+      const parsed = gitSafeChangePlanSchema.parse(input);
+      const statusRun = await runGit(ctx, parsed.projectId, ["status", "--porcelain=v1"]);
+      const cwd = statusRun.cwd;
+      const currentBranch = await runGit(ctx, parsed.projectId, ["branch", "--show-current"]).then((result) => result.stdout.trim()).catch(() => "");
+      const head = await runGit(ctx, parsed.projectId, ["rev-parse", "--short", "HEAD"]).then((result) => result.stdout.trim()).catch(() => "");
+      const upstream = await runGit(ctx, parsed.projectId, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]).then((result) => result.stdout.trim()).catch(() => "");
+      const diffStat = await runGit(ctx, parsed.projectId, ["diff", "--stat"]).then((result) => result.stdout.trim()).catch(() => "");
+      const stagedDiffStat = await runGit(ctx, parsed.projectId, ["diff", "--cached", "--stat"]).then((result) => result.stdout.trim()).catch(() => "");
+      const patchPreview = parsed.includePatch ? await runGit(ctx, parsed.projectId, ["diff", "--", ...(await Promise.all(parsed.selectedPaths.map((entry) => resolveGitPath(ctx, parsed.projectId, entry))))]).then((result) => trimOutput(result.stdout)).catch(() => "") : "";
+      const changedFiles = parsePorcelainStatus(statusRun.stdout).slice(0, parsed.maxFiles);
+      const selectedPaths = await Promise.all(parsed.selectedPaths.map((entry) => resolveGitPath(ctx, parsed.projectId, entry)));
+      const statusCount = changedFiles.reduce<Record<string, number>>((acc, entry) => {
+        acc[entry.status.trim() || "modified"] = (acc[entry.status.trim() || "modified"] ?? 0) + 1;
+        return acc;
+      }, {});
+      let checkpointBranch: string | undefined;
+      if (parsed.createCheckpoint) {
+        checkpointBranch = `${safeBranchSegment(parsed.checkpointPrefix)}/${safeBranchSegment(parsed.checkpointLabel)}-${Date.now().toString(36)}`;
+        await runGit(ctx, parsed.projectId, ["check-ref-format", `refs/heads/${checkpointBranch}`]);
+        await runGit(ctx, parsed.projectId, ["branch", checkpointBranch]);
+      }
+      const focusPaths = selectedPaths.length ? selectedPaths : changedFiles.map((entry) => entry.path);
+      const suggestedCommands = {
+        inspect: [
+          "git status --short",
+          "git diff --stat",
+          "git diff --cached --stat"
+        ],
+        checkpoint: checkpointBranch
+          ? [`git branch ${checkpointBranch}`]
+          : [`git branch ${safeBranchSegment(parsed.checkpointPrefix)}/${safeBranchSegment(parsed.checkpointLabel)}-$(date +%Y%m%d%H%M%S)`],
+        stageSelected: focusPaths.map((entry) => `git add -- ${entry}`),
+        unstageSelected: focusPaths.map((entry) => `git restore --staged -- ${entry}`),
+        revertSelected: focusPaths.map((entry) => `git restore -- ${entry}`),
+        finalReview: [
+          "git diff --cached --stat",
+          "git diff --cached",
+          "git status --short"
+        ]
+      };
+      const warnings = [
+        ...(changedFiles.some((entry) => entry.status.includes("D")) ? ["Deleted files are present; verify they are intentional before staging."] : []),
+        ...(changedFiles.some((entry) => entry.status.includes("??")) ? ["Untracked files are present; review generated artifacts before adding."] : []),
+        ...(parsed.createCheckpoint ? [] : ["No checkpoint branch was created; rerun with createCheckpoint=true before a risky refactor if needed."])
+      ];
+      const result = {
+        cwd,
+        projectId: parsed.projectId,
+        currentBranch,
+        upstream,
+        head,
+        checkpointBranch,
+        createdCheckpoint: Boolean(checkpointBranch),
+        changedFiles,
+        statusCount,
+        diffStat,
+        stagedDiffStat,
+        selectedPaths,
+        patchPreview,
+        suggestedCommands,
+        safeWorkflow: [
+          "Inspect current diff and changed file list.",
+          "Create a checkpoint branch before broad refactors.",
+          "Stage only reviewed paths.",
+          "Run validation before commit.",
+          "Use selective restore commands for accidental edits.",
+          "Finish with cached diff and status summary."
+        ],
+        warnings
+      };
+      return { ok: true, summary: `Prepared safe change plan for ${changedFiles.length} changed file(s).`, jobId: parsed.projectId ?? currentBranch ?? "workspace", artifacts: [], structuredContent: result, logs: [`branch=${currentBranch || "(detached)"}`, `head=${head}`, `changed=${changedFiles.length}`, trimOutput(diffStat)].filter(Boolean), errors: [] };
     }
   },
   {

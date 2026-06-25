@@ -276,6 +276,183 @@ test("project next task picker selects in-progress, ready, and blocked fallback 
   }
 });
 
+test("project task ranking sorts by dependency readiness, priority, risk, and impact", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "project-task-ranking-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Ranking project", createdByClientId: "coder" });
+    const upsert = getToolModule("upsert_project_task");
+    const rank = getToolModule("rank_project_tasks");
+    const list = getToolModule("list_project_tasks");
+    assert.ok(upsert, "upsert_project_task registered");
+    assert.ok(rank, "rank_project_tasks registered");
+    assert.ok(list, "list_project_tasks registered");
+
+    const lowReady = await upsert!.handler({ projectId: project.id, title: "Polish copy", status: "todo", priority: "low", notes: "Small wording cleanup." }, ctx);
+    const lowReadyId = (lowReady.structuredContent as { task: { id: string } }).task.id;
+    const risky = await upsert!.handler({ projectId: project.id, title: "Fix payment auth regression", status: "todo", priority: "high", notes: "Security and billing release blocker." }, ctx);
+    const riskyId = (risky.structuredContent as { task: { id: string } }).task.id;
+    const urgentBlocked = await upsert!.handler({ projectId: project.id, title: "Deploy production migration", status: "todo", priority: "urgent", dependsOn: [riskyId] }, ctx);
+    const urgentBlockedId = (urgentBlocked.structuredContent as { task: { id: string } }).task.id;
+    const doing = await upsert!.handler({ projectId: project.id, title: "Continue incident triage", status: "doing", priority: "medium", progress: 20 }, ctx);
+    const doingId = (doing.structuredContent as { task: { id: string } }).task.id;
+
+    const ranked = (await rank!.handler({ projectId: project.id }, ctx)).structuredContent as {
+      ranked: Array<{ id: string; dependencyState: string; priority: string; riskScore: number; sortReasons: string[] }>;
+      sorting: string[];
+      nextActions: string[];
+    };
+    assert.deepEqual(ranked.ranked.map((task) => task.id), [doingId, riskyId, lowReadyId, urgentBlockedId]);
+    assert.equal(ranked.ranked[0].dependencyState, "doing");
+    assert.equal(ranked.ranked[1].priority, "high");
+    assert.ok(ranked.ranked[1].riskScore > ranked.ranked[2].riskScore);
+    assert.ok(ranked.ranked[1].sortReasons.some((reason) => reason.startsWith("risk=")));
+    assert.ok(ranked.sorting.includes("dependency readiness"));
+    assert.match(ranked.nextActions[0], new RegExp(doingId));
+
+    const listed = (await list!.handler({ projectId: project.id }, ctx)).structuredContent as {
+      tasks: Array<{ id: string }>;
+      ranked: Array<{ id: string; rank: number; dependencyState: string }>;
+      sortBy: string;
+    };
+    assert.equal(listed.sortBy, "rank");
+    assert.deepEqual(listed.tasks.map((task) => task.id), [doingId, riskyId, lowReadyId, urgentBlockedId]);
+    assert.deepEqual(listed.ranked.map((task) => task.rank), [1, 2, 3, 4]);
+    assert.equal(listed.ranked.at(-1)?.dependencyState, "blocked");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("project task blockers record reasons and unblock requirements across task views", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "project-task-blockers-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Blocked task project", createdByClientId: "coder" });
+    const upsert = getToolModule("upsert_project_task");
+    const setBlocker = getToolModule("set_project_task_blocker");
+    const getTask = getToolModule("get_project_task");
+    const graphTool = getToolModule("get_project_task_graph");
+    const boardTool = getToolModule("get_project_task_board");
+    const rank = getToolModule("rank_project_tasks");
+    const resume = getToolModule("get_project_resume_state");
+    assert.ok(upsert, "upsert_project_task registered");
+    assert.ok(setBlocker, "set_project_task_blocker registered");
+
+    const created = await upsert!.handler({ projectId: project.id, title: "Wait for API credentials", status: "todo", priority: "high" }, ctx);
+    const taskId = (created.structuredContent as { task: { id: string } }).task.id;
+    const blocked = await setBlocker!.handler({
+      projectId: project.id,
+      taskId,
+      blockedReason: "OAuth client secret is missing from staging.",
+      unblockRequirement: "Provision staging OAuth credentials and rerun login smoke test."
+    }, ctx);
+    assert.equal(blocked.ok, true);
+    const blockedTask = (await getTask!.handler({ projectId: project.id, taskId }, ctx)).structuredContent as { task: { status: string; blockedReason?: string; unblockRequirement?: string; blockedAt?: string } };
+    assert.equal(blockedTask.task.status, "blocked");
+    assert.equal(blockedTask.task.blockedReason, "OAuth client secret is missing from staging.");
+    assert.equal(blockedTask.task.unblockRequirement, "Provision staging OAuth credentials and rerun login smoke test.");
+    assert.ok(blockedTask.task.blockedAt);
+
+    const graph = (await graphTool!.handler({ projectId: project.id }, ctx)).structuredContent as { blockedTasks: Array<{ id: string; blockedReasons: Array<{ type: string; reason: string; unblockRequirement: string }> }> };
+    assert.equal(graph.blockedTasks.some((task) => task.id === taskId && task.blockedReasons.some((reason) => reason.type === "explicit" && reason.reason.includes("OAuth"))), true);
+
+    const board = (await boardTool!.handler({ projectId: project.id }, ctx)).structuredContent as { lanes: { blocked: Array<{ id: string; blockedReason?: string; unblockRequirement?: string }> } };
+    assert.equal(board.lanes.blocked.some((task) => task.id === taskId && task.blockedReason?.includes("OAuth")), true);
+
+    const ranked = (await rank!.handler({ projectId: project.id }, ctx)).structuredContent as { ranked: Array<{ id: string; blockedReason?: string; unblockRequirement?: string; dependencyState: string }> };
+    assert.equal(ranked.ranked.some((task) => task.id === taskId && task.dependencyState === "blocked" && task.unblockRequirement?.includes("smoke test")), true);
+
+    const resumeState = (await resume!.handler({ projectId: project.id }, ctx)).structuredContent as { resumeTask: { id: string; blockedReason?: string }; reason: string };
+    assert.equal(resumeState.resumeTask.id, taskId);
+    assert.equal(resumeState.reason, "unblock_required");
+    assert.equal(resumeState.resumeTask.blockedReason, "OAuth client secret is missing from staging.");
+
+    const cleared = await setBlocker!.handler({ projectId: project.id, taskId, clear: true, statusWhenCleared: "todo" }, ctx);
+    assert.equal(cleared.ok, true);
+    const clearedTask = (await getTask!.handler({ projectId: project.id, taskId }, ctx)).structuredContent as { task: { status: string; blockedReason?: string; unblockRequirement?: string; blockedAt?: string } };
+    assert.equal(clearedTask.task.status, "todo");
+    assert.equal(clearedTask.task.blockedReason, undefined);
+    assert.equal(clearedTask.task.unblockRequirement, undefined);
+    assert.equal(clearedTask.task.blockedAt, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("project task completion summaries include changed files, validation, and evidence", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "project-task-completion-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Completion project", createdByClientId: "coder" });
+    await writeProjectFile(ctx.projectRoot, project.id, "index.html", "<!doctype html><html><body><h1>Done</h1></body></html>");
+    await validateProject(ctx.projectRoot, project.id);
+
+    const upsert = getToolModule("upsert_project_task");
+    const summarize = getToolModule("summarize_project_task_completion");
+    const getTask = getToolModule("get_project_task");
+    const rank = getToolModule("rank_project_tasks");
+    const dependencyView = getToolModule("get_project_task_dependency_view");
+    const board = getToolModule("get_project_task_board");
+    assert.ok(upsert, "upsert_project_task registered");
+    assert.ok(summarize, "summarize_project_task_completion registered");
+
+    const created = await upsert!.handler({ projectId: project.id, title: "Ship static demo", status: "doing", priority: "high" }, ctx);
+    const taskId = (created.structuredContent as { task: { id: string } }).task.id;
+    const completed = await summarize!.handler({
+      projectId: project.id,
+      taskId,
+      changedFiles: ["index.html", "styles.css"]
+    }, ctx);
+    assert.equal(completed.ok, true);
+    const completion = (completed.structuredContent as {
+      completion: {
+        completionSummary: string;
+        completedFiles: string[];
+        completionValidation?: { ok: boolean; status: string; entryFile: string };
+        evidenceAdded: Array<{ kind?: string; filePath?: string; label: string }>;
+      };
+    }).completion;
+    assert.match(completion.completionSummary, /Completed Ship static demo/);
+    assert.match(completion.completionSummary, /Changed files: index\.html, styles\.css/);
+    assert.match(completion.completionSummary, /Validation passed/);
+    assert.deepEqual(completion.completedFiles, ["index.html", "styles.css"]);
+    assert.equal(completion.completionValidation?.ok, true);
+    assert.equal(completion.completionValidation?.entryFile, "index.html");
+    assert.equal(completion.evidenceAdded.some((item) => item.kind === "changed_file" && item.filePath === "index.html"), true);
+    assert.equal(completion.evidenceAdded.some((item) => item.kind === "validation"), true);
+
+    const stored = (await getTask!.handler({ projectId: project.id, taskId }, ctx)).structuredContent as {
+      task: {
+        status: string;
+        progress: number;
+        completionSummary?: string;
+        completedFiles?: string[];
+        completionValidation?: { ok: boolean; status: string };
+        completedAt?: string;
+        evidence: Array<{ kind?: string; filePath?: string }>;
+      };
+    };
+    assert.equal(stored.task.status, "done");
+    assert.equal(stored.task.progress, 100);
+    assert.equal(stored.task.completedAt !== undefined, true);
+    assert.deepEqual(stored.task.completedFiles, ["index.html", "styles.css"]);
+    assert.equal(stored.task.completionValidation?.status, "valid");
+    assert.equal(stored.task.evidence.some((item) => item.kind === "changed_file" && item.filePath === "styles.css"), true);
+
+    const ranked = (await rank!.handler({ projectId: project.id, includeDone: true }, ctx)).structuredContent as { ranked: Array<{ id: string; completionSummary?: string; completedFiles: string[] }> };
+    assert.equal(ranked.ranked.some((task) => task.id === taskId && task.completionSummary?.includes("Ship static demo") && task.completedFiles.includes("index.html")), true);
+
+    const view = (await dependencyView!.handler({ projectId: project.id }, ctx)).structuredContent as { lanes: { done: Array<{ id: string; completionSummary?: string; completedFiles: string[] }> } };
+    assert.equal(view.lanes.done.some((task) => task.id === taskId && task.completionSummary?.includes("Ship static demo") && task.completedFiles.includes("styles.css")), true);
+
+    const boardPayload = (await board!.handler({ projectId: project.id }, ctx)).structuredContent as { lanes: { done: Array<{ id: string; completionValidation?: { ok: boolean } }> } };
+    assert.equal(boardPayload.lanes.done.some((task) => task.id === taskId && task.completionValidation?.ok), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("project task evidence binding collects validation, reports, screenshots, published URLs, and changed files", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "project-task-evidence-bind-"));
   try {
@@ -359,8 +536,8 @@ test("project task queue step claims, completes, validates, and stops on validat
       completionNote: "Static validation passed.",
       changedFiles: ["index.html"]
     }, ctx)).structuredContent as {
-      task: { id: string; status: string; progress: number; evidence: Array<{ kind?: string }> };
-      validation: { ok: boolean };
+      task: { id: string; status: string; progress: number; completionSummary?: string; completedFiles?: string[]; completionValidation?: { ok: boolean; status: string }; evidence: Array<{ kind?: string }> };
+      validation: { ok: boolean; status: string };
       stopReason: string;
       nextTask: { id: string };
     };
@@ -368,10 +545,19 @@ test("project task queue step claims, completes, validates, and stops on validat
     assert.equal(completed.task.status, "done");
     assert.equal(completed.task.progress, 100);
     assert.equal(completed.validation.ok, true);
+    assert.match(completed.task.completionSummary ?? "", /Static validation passed/);
+    assert.match(completed.task.completionSummary ?? "", /Changed files: index\.html/);
+    assert.match(completed.task.completionSummary ?? "", /Validation passed/);
+    assert.deepEqual(completed.task.completedFiles, ["index.html"]);
+    assert.equal(completed.task.completionValidation?.ok, true);
+    assert.equal(completed.task.completionValidation?.status, "valid");
     assert.equal(completed.stopReason, "step_completed_next_ready");
     assert.equal(completed.nextTask.id, secondId);
 
-    const storedFirst = (await getTask!.handler({ projectId: project.id, taskId: firstId }, ctx)).structuredContent as { task: { evidence: Array<{ kind?: string; filePath?: string }> } };
+    const storedFirst = (await getTask!.handler({ projectId: project.id, taskId: firstId }, ctx)).structuredContent as { task: { completionSummary?: string; completedFiles?: string[]; completionValidation?: { ok: boolean }; evidence: Array<{ kind?: string; filePath?: string }> } };
+    assert.match(storedFirst.task.completionSummary ?? "", /Changed files: index\.html/);
+    assert.deepEqual(storedFirst.task.completedFiles, ["index.html"]);
+    assert.equal(storedFirst.task.completionValidation?.ok, true);
     assert.equal(storedFirst.task.evidence.some((item) => item.kind === "validation"), true);
     assert.equal(storedFirst.task.evidence.some((item) => item.kind === "changed_file" && item.filePath === "index.html"), true);
 
@@ -472,12 +658,15 @@ test("coding and debug skills expose project task list tools", () => {
     const skill = skillRegistry.find((entry) => entry.id === id);
     assert.ok(skill, `${id} skill registered`);
     assert.ok(skill!.toolNames.includes("upsert_project_task"));
+    assert.ok(skill!.toolNames.includes("set_project_task_blocker"));
+    assert.ok(skill!.toolNames.includes("summarize_project_task_completion"));
     assert.ok(skill!.toolNames.includes("get_project_task"));
     assert.ok(skill!.toolNames.includes("delete_project_task"));
     assert.ok(skill!.toolNames.includes("search_project_tasks"));
     assert.ok(skill!.toolNames.includes("record_project_task_evidence"));
     assert.ok(skill!.toolNames.includes("bind_project_task_evidence"));
     assert.ok(skill!.toolNames.includes("list_project_tasks"));
+    assert.ok(skill!.toolNames.includes("rank_project_tasks"));
     assert.ok(skill!.toolNames.includes("get_project_task_graph"));
     assert.ok(skill!.toolNames.includes("get_project_task_dependency_view"));
     assert.ok(skill!.toolNames.includes("get_project_task_board"));

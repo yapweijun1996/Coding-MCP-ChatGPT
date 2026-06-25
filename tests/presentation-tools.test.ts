@@ -178,3 +178,114 @@ test("create_video_presentation stays private by default and publishes only when
     assert.match(script, /mp4-muxer/);
   });
 });
+
+test("scripted media export workflow creates timeline, captions, audio alignment, frame previews, and export manifest", async () => {
+  await withContext(async (ctx) => {
+    const project = await createProject(ctx.projectRoot, {
+      title: "Media workflow",
+      createdByClientId: "test-client"
+    });
+
+    const timelineResult = await callTool("create_media_scene_timeline", {
+      projectId: project.id,
+      title: "Product walkthrough",
+      aspectRatio: "16:9",
+      fps: 30,
+      scenes: [
+        { id: "intro", title: "Intro", body: "Open with the product promise.", durationSeconds: 2, transition: "fade" },
+        { id: "demo", title: "Demo", body: "Show the workflow from project data.", sourcePath: "assets/demo.png", durationSeconds: 3, transition: "slide" }
+      ]
+    }, ctx);
+    assert.equal(timelineResult.ok, true);
+    assert.ok(timelineResult.artifacts.includes("media/timeline.json"));
+    const timelinePayload = timelineResult.structuredContent as {
+      timelinePath: string;
+      totalFrames: number;
+      scenes: Array<{ id: string; startFrame: number; endFrame: number }>;
+      renderContract: {
+        renderer: string;
+        openRendererPolicy: {
+          commerciallyUsable: boolean;
+          paidVideoEngineDependency: boolean;
+          softwareDependencies: Array<{ name: string; license: string; commercialUse: boolean }>;
+          forbiddenDependencyPolicy: string[];
+        };
+      };
+    };
+    assert.equal(timelinePayload.timelinePath, "media/timeline.json");
+    assert.equal(timelinePayload.totalFrames, 150);
+    assert.equal(timelinePayload.scenes[1].startFrame, 60);
+    assert.match(timelinePayload.renderContract.renderer, /Code-MCP/);
+    assert.equal(timelinePayload.renderContract.openRendererPolicy.commerciallyUsable, true);
+    assert.equal(timelinePayload.renderContract.openRendererPolicy.paidVideoEngineDependency, false);
+    assert.ok(timelinePayload.renderContract.openRendererPolicy.softwareDependencies.some((dependency) => dependency.name === "mp4-muxer" && dependency.license === "MIT" && dependency.commercialUse));
+    assert.ok(timelinePayload.renderContract.openRendererPolicy.forbiddenDependencyPolicy.some((policy) => /paid video engines/.test(policy)));
+
+    const captionsResult = await callTool("add_media_captions", {
+      projectId: project.id,
+      timelinePath: timelinePayload.timelinePath,
+      transcript: "Open with the product promise. Show the workflow from project data."
+    }, ctx);
+    assert.equal(captionsResult.ok, true);
+    assert.ok(captionsResult.artifacts.includes("media/captions.txt"));
+    const captionsPayload = captionsResult.structuredContent as { captionsPath: string; cueCount: number; manifestPath: string };
+    assert.equal(captionsPayload.captionsPath, "media/captions.txt");
+    assert.equal(captionsPayload.cueCount, 2);
+    const vttPath = await getProjectStoredFilePath(ctx.projectRoot, project.id, captionsPayload.captionsPath);
+    assert.match(await readFile(vttPath, "utf8"), /WEBVTT/);
+
+    const audioResult = await callTool("attach_media_voice_audio", {
+      projectId: project.id,
+      timelinePath: timelinePayload.timelinePath,
+      audioPath: "assets/voice.wav"
+    }, ctx);
+    assert.equal(audioResult.ok, true);
+    const audioPayload = audioResult.structuredContent as { audioManifestPath: string; alignment: Array<{ startFrame: number; endFrame: number }>; checks: string[] };
+    assert.equal(audioPayload.audioManifestPath, "media/audio-alignment.json");
+    assert.equal(audioPayload.alignment.length, 2);
+    assert.ok(audioPayload.checks.includes("frame_alignment_calculated"));
+
+    const previewResult = await callTool("preview_media_frames", {
+      projectId: project.id,
+      timelinePath: timelinePayload.timelinePath,
+      count: 4
+    }, ctx);
+    assert.equal(previewResult.ok, true);
+    const previewPayload = previewResult.structuredContent as { framePreviewHtmlPath: string; frameCount: number; frames: Array<{ sceneId: string }> };
+    assert.equal(previewPayload.framePreviewHtmlPath, "media/frame-preview.html");
+    assert.equal(previewPayload.frameCount, 4);
+    assert.ok(previewPayload.frames.some((frame) => frame.sceneId === "demo"));
+    const previewPath = await getProjectStoredFilePath(ctx.projectRoot, project.id, previewPayload.framePreviewHtmlPath);
+    assert.match(await readFile(previewPath, "utf8"), /Frame Preview/);
+
+    const exportResult = await callTool("export_media_project", {
+      projectId: project.id,
+      timelinePath: timelinePayload.timelinePath,
+      captionsPath: captionsPayload.captionsPath,
+      audioManifestPath: audioPayload.audioManifestPath,
+      framePreviewPath: previewPayload.framePreviewHtmlPath,
+      formats: ["mp4", "webm", "gif", "png_sequence", "html_preview"]
+    }, ctx);
+    assert.equal(exportResult.ok, true);
+    const exportPayload = exportResult.structuredContent as {
+      exportManifestPath: string;
+      exportPlans: Array<{ format: string; status: string; encoder: string }>;
+      checks: string[];
+      licenseReport: {
+        commerciallyUsableWorkflow: boolean;
+        paidVideoEngineDependency: boolean;
+        allowedDependencyLicenses: string[];
+        softwareDependencies: Array<{ name: string; license: string; commercialUse: boolean }>;
+      };
+    };
+    assert.equal(exportPayload.exportManifestPath, "media/export-manifest.json");
+    assert.ok(exportPayload.exportPlans.some((plan) => plan.format === "mp4" && /WebCodecs/.test(plan.encoder)));
+    assert.ok(exportPayload.exportPlans.some((plan) => plan.format === "html_preview" && plan.status === "ready_from_project_files"));
+    assert.ok(exportPayload.checks.includes("encoder_step_explicit"));
+    assert.equal(exportPayload.licenseReport.commerciallyUsableWorkflow, true);
+    assert.equal(exportPayload.licenseReport.paidVideoEngineDependency, false);
+    assert.ok(exportPayload.licenseReport.allowedDependencyLicenses.includes("MIT"));
+    assert.ok(exportPayload.licenseReport.softwareDependencies.every((dependency) => dependency.commercialUse));
+    assert.doesNotMatch(JSON.stringify(exportPayload), /paid video engine dependency required/i);
+  });
+});

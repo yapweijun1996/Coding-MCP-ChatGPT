@@ -124,3 +124,14 @@ test("agent skill protocol tools expose skill metadata and SOP content", async (
     }
   });
 });
+
+test("coding skill protocol documents project workflow recipes and naming conventions", () => {
+  const coding = skillRegistry.find((skill) => skill.id === "coding");
+  assert.ok(coding);
+  assert.match(coding.protocolMarkdown, /deliver_static_project.*title.*entryFile.*files/s);
+  assert.match(coding.protocolMarkdown, /projectId.*persistent Project identifier/s);
+  assert.match(coding.protocolMarkdown, /jobId.*same value/s);
+  assert.match(coding.protocolMarkdown, /write_project_file.*validate_project.*publish_and_report/s);
+  assert.match(coding.protocolMarkdown, /get_project_activity.*get_project_manifest.*read_project_file/s);
+  assert.match(coding.protocolMarkdown, /create_project_backup.*restore_latest_project_backup/s);
+});

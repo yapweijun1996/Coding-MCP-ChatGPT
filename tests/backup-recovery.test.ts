@@ -34,8 +34,9 @@ test("backup recovery tools create, verify, recover files, restore projects, and
     const verify = getToolModule("verify_recovery_point");
     const recover = getToolModule("recover_deleted_project_file");
     const restore = getToolModule("restore_project_backup");
+    const restoreLatest = getToolModule("restore_latest_project_backup");
     const archive = getToolModule("export_project_backup_archive");
-    for (const [name, tool] of Object.entries({ backup, list, verify, recover, restore, archive })) assert.ok(tool, `${name} registered`);
+    for (const [name, tool] of Object.entries({ backup, list, verify, recover, restore, restoreLatest, archive })) assert.ok(tool, `${name} registered`);
 
     const backupResult = await backup!.handler({ projectId: project.id, label: "Before risky edit", reason: "Regression safety." }, ctx);
     assert.equal(backupResult.ok, true);
@@ -52,6 +53,16 @@ test("backup recovery tools create, verify, recover files, restore projects, and
     await writeProjectFile(ctx.projectRoot, project.id, "extra.txt", "temporary file\n");
     await deleteProjectFile(ctx.projectRoot, project.id, "notes/readme.md");
 
+    const latestPreview = await restoreLatest!.handler({ projectId: project.id }, ctx);
+    assert.equal(latestPreview.ok, true);
+    const latestPreviewPayload = latestPreview.structuredContent as { backupId: string; dryRun: boolean; files: string[]; restored: string[]; verification: { ok: boolean } };
+    assert.equal(latestPreviewPayload.backupId, backupId);
+    assert.equal(latestPreviewPayload.dryRun, true);
+    assert.equal(latestPreviewPayload.verification.ok, true);
+    assert.deepEqual(latestPreviewPayload.restored, []);
+    assert.ok(latestPreviewPayload.files.includes("index.html"));
+    assert.match(await readProjectFile(ctx.projectRoot, project.id, "index.html"), /Version 2/);
+
     const recoverResult = await recover!.handler({ backupId, projectId: project.id, relativePath: "notes/readme.md", confirm: true }, ctx);
     assert.equal(recoverResult.ok, true);
     assert.match(await readProjectFile(ctx.projectRoot, project.id, "notes/readme.md"), /Recover me/);
@@ -60,6 +71,15 @@ test("backup recovery tools create, verify, recover files, restore projects, and
     assert.equal(restoreResult.ok, true);
     assert.match(await readProjectFile(ctx.projectRoot, project.id, "index.html"), /Version 1/);
     await assert.rejects(readProjectFile(ctx.projectRoot, project.id, "extra.txt"), /no such file|ENOENT/i);
+
+    await writeProjectFile(ctx.projectRoot, project.id, "index.html", "<!doctype html><html><body><h1>Version 3</h1></body></html>");
+    const latestRestore = await restoreLatest!.handler({ projectId: project.id, mode: "overwrite_all", confirm: true }, ctx);
+    assert.equal(latestRestore.ok, true);
+    const latestRestorePayload = latestRestore.structuredContent as { backupId: string; dryRun: boolean; restored: string[] };
+    assert.equal(latestRestorePayload.backupId, backupId);
+    assert.equal(latestRestorePayload.dryRun, false);
+    assert.ok(latestRestorePayload.restored.includes("index.html"));
+    assert.match(await readProjectFile(ctx.projectRoot, project.id, "index.html"), /Version 1/);
 
     const archiveResult = await archive!.handler({ backupId }, ctx);
     assert.equal(archiveResult.ok, true);
@@ -83,6 +103,7 @@ test("backup-recovery skill exposes tools through core, coding, and debug skills
     "list_project_backups",
     "verify_recovery_point",
     "restore_project_backup",
+    "restore_latest_project_backup",
     "recover_deleted_project_file",
     "export_project_backup_archive"
   ];

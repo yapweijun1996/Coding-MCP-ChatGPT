@@ -264,6 +264,59 @@ const optimize3dAssetInputSchema = z.object({
   outputReportPath: z.string().min(1).max(240).optional().default("three-d-game/asset-optimization-report.json")
 });
 
+const styleTargetSchema = z.enum(["minecraft_collectible", "toy_figurine", "product_showcase", "hero_select", "cyberpunk_showroom", "apple_product_intro"]);
+const visualQaViewSchema = z.enum(["front", "back", "left", "right", "top", "three_quarter", "mobile_portrait", "mobile_landscape"]);
+const create3dVisualQaPlanInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  styleTarget: styleTargetSchema.default("minecraft_collectible"),
+  sceneConfigPath: z.string().min(1).max(240).optional(),
+  assetManifestPath: z.string().min(1).max(240).optional(),
+  views: z.array(visualQaViewSchema).min(1).max(8).default(["front", "back", "left", "right", "top", "mobile_portrait"]),
+  checks: z.array(z.enum(["model_too_dark", "model_too_small", "clipped_object", "wrong_facing", "poor_contrast", "unreadable_ui", "broken_shadows", "camera_inside_mesh", "hidden_by_ui", "bad_mobile_framing"])).min(1).max(20).default(["model_too_dark", "model_too_small", "clipped_object", "wrong_facing", "poor_contrast", "unreadable_ui", "broken_shadows", "camera_inside_mesh", "hidden_by_ui", "bad_mobile_framing"]),
+  outputPath: z.string().min(1).max(240).default("three-d-game/visual-qa-plan.json")
+});
+
+const critique3dSceneDesignInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  styleTarget: styleTargetSchema,
+  screenshotEvidence: z.array(z.object({
+    view: visualQaViewSchema,
+    path: z.string().min(1).max(240).optional(),
+    brightness: z.number().min(0).max(1).optional(),
+    contrast: z.number().min(0).max(1).optional(),
+    modelCoverage: z.number().min(0).max(1).optional(),
+    clipped: z.boolean().optional().default(false),
+    facing: z.enum(["front", "back", "left", "right", "unknown"]).optional().default("unknown"),
+    uiReadable: z.boolean().optional().default(true),
+    notes: z.string().max(1000).optional()
+  })).min(1).max(40),
+  desiredFacing: z.enum(["front", "three_quarter", "any"]).default("three_quarter"),
+  outputPath: z.string().min(1).max(240).default("three-d-game/design-critique-report.json")
+});
+
+const search3dAssetLibraryInputSchema = z.object({
+  projectId: z.string().min(8).max(80).optional(),
+  query: z.string().min(1).max(160),
+  assetType: z.enum(["model", "texture", "hdri", "sound", "animation"]).optional(),
+  styleTarget: styleTargetSchema.optional(),
+  commercialUseRequired: z.boolean().default(true),
+  maxResults: z.number().int().min(1).max(20).default(8),
+  writeToProject: z.boolean().default(false),
+  outputPath: z.string().min(1).max(240).default("three-d-game/asset-library-search.json")
+});
+
+const export3dShowcasePackageInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  title: z.string().min(1).max(160).default("3D Showcase Package"),
+  assetPaths: z.array(z.string().min(1).max(240)).max(80).default([]),
+  screenshotPaths: z.array(z.string().min(1).max(240)).max(80).default([]),
+  reportPaths: z.array(z.string().min(1).max(240)).max(80).default([]),
+  includeTurntablePlan: z.boolean().default(true),
+  includePwaChecklist: z.boolean().default(true),
+  outputPath: z.string().min(1).max(240).default("three-d-game/showcase-export-package.json"),
+  readmePath: z.string().min(1).max(240).default("three-d-game/showcase-export-readme.md")
+});
+
 function glbHeader(buffer: Buffer): Record<string, unknown> {
   const warnings: string[] = [];
   if (buffer.length < 12) throw new Error("GLB asset is too small for a valid header.");
@@ -1708,6 +1761,152 @@ async function optimize3dAsset(ctx: ToolContext, input: z.infer<typeof optimize3
   return { report, artifacts: [outputAssetPath, reportFile.path], contentType };
 }
 
+function visualQaPlan(input: z.infer<typeof create3dVisualQaPlanInputSchema>) {
+  const viewportFor = (view: z.infer<typeof visualQaViewSchema>) => view.startsWith("mobile")
+    ? { width: view === "mobile_landscape" ? 844 : 390, height: view === "mobile_landscape" ? 390 : 844, deviceScaleFactor: 2 }
+    : { width: 1440, height: 900, deviceScaleFactor: 1 };
+  const cameraFor = (view: z.infer<typeof visualQaViewSchema>) => ({
+    front: [0, 1.4, 4],
+    back: [0, 1.4, -4],
+    left: [-4, 1.4, 0],
+    right: [4, 1.4, 0],
+    top: [0, 5, 0.01],
+    three_quarter: [3, 2, 4],
+    mobile_portrait: [3, 1.8, 4.8],
+    mobile_landscape: [3, 1.6, 4.2]
+  }[view]);
+  return {
+    projectId: input.projectId,
+    styleTarget: input.styleTarget,
+    sceneConfigPath: input.sceneConfigPath,
+    assetManifestPath: input.assetManifestPath,
+    captures: input.views.map((view) => ({
+      view,
+      viewport: viewportFor(view),
+      camera: { position: cameraFor(view), target: [0, 1, 0] },
+      artifactPath: `three-d-game/screenshots/${view}.png`,
+      checks: input.checks
+    })),
+    thresholds: {
+      minBrightness: 0.24,
+      minContrast: 0.35,
+      minModelCoverage: 0.32,
+      maxModelCoverage: 0.82,
+      mobileSafeAreaPaddingPx: 24
+    },
+    requiredEvidence: ["screenshot artifact per view", "console/network check", "nonblank canvas check", "camera/orbit interaction pass"],
+    passCriteria: input.checks.map((check) => `${check}: no high severity finding`),
+    createdAt: new Date().toISOString()
+  };
+}
+
+function critique3dScene(input: z.infer<typeof critique3dSceneDesignInputSchema>) {
+  const findings = input.screenshotEvidence.flatMap((shot) => {
+    const issues: Array<{ severity: "low" | "medium" | "high"; view: string; issue: string; recommendation: string }> = [];
+    if (shot.brightness !== undefined && shot.brightness < 0.24) issues.push({ severity: "high", view: shot.view, issue: "model_too_dark", recommendation: "Increase key/fill light intensity, raise exposure, or use a lighter environment map." });
+    if (shot.contrast !== undefined && shot.contrast < 0.35) issues.push({ severity: "medium", view: shot.view, issue: "poor_contrast", recommendation: "Separate model, floor, and background values; add rim light for silhouette." });
+    if (shot.modelCoverage !== undefined && shot.modelCoverage < 0.32) issues.push({ severity: "high", view: shot.view, issue: "model_too_small", recommendation: "Move camera closer or increase focal length while preserving orbit min distance." });
+    if (shot.modelCoverage !== undefined && shot.modelCoverage > 0.82) issues.push({ severity: "high", view: shot.view, issue: "clipped_or_too_large", recommendation: "Move camera back and check top/bottom framing on mobile." });
+    if (shot.clipped) issues.push({ severity: "high", view: shot.view, issue: "clipped_object", recommendation: "Increase camera distance, widen FOV slightly, or recenter model bounds." });
+    if (!shot.uiReadable) issues.push({ severity: "medium", view: shot.view, issue: "unreadable_ui", recommendation: "Move UI away from model silhouette and increase text/background contrast." });
+    if (input.desiredFacing !== "any" && shot.view === "front" && shot.facing === "back") issues.push({ severity: "high", view: shot.view, issue: "wrong_facing", recommendation: "Rotate model root 180 degrees or adjust import forward axis." });
+    return issues;
+  });
+  const styleGuidance: Record<z.infer<typeof styleTargetSchema>, string[]> = {
+    minecraft_collectible: ["Use chunky proportions, crisp edges, high color separation, and a pedestal/nameplate.", "Avoid realistic soft detail that weakens the voxel collectible read."],
+    toy_figurine: ["Use studio-like softbox lighting, a visible base, contact shadow, and material roughness variation.", "Keep proportions readable from mobile portrait."],
+    product_showcase: ["Prioritize clean silhouette, neutral floor, controlled reflections, and one primary call-to-action zone.", "Avoid UI panels covering product edges."],
+    hero_select: ["Use dramatic rim light, readable stance, strong name/role hierarchy, and clear action state.", "Check that weapon/accessory silhouettes do not hide the face."],
+    cyberpunk_showroom: ["Use neon accents sparingly, high silhouette contrast, and depth/fog without hiding the object.", "Preserve text readability over dark panels."],
+    apple_product_intro: ["Use restrained lighting, precise centering, calm camera motion, and large whitespace.", "Avoid noisy backgrounds or excessive glow."]
+  };
+  const score = Math.max(0, 100 - findings.reduce((sum, finding) => sum + (finding.severity === "high" ? 18 : finding.severity === "medium" ? 10 : 4), 0));
+  return {
+    projectId: input.projectId,
+    styleTarget: input.styleTarget,
+    desiredFacing: input.desiredFacing,
+    score,
+    status: findings.some((finding) => finding.severity === "high") ? "needs_revision" : findings.length ? "minor_revision" : "pass",
+    findings,
+    styleGuidance: styleGuidance[input.styleTarget],
+    nextActions: findings.length ? findings.slice(0, 5).map((finding) => finding.recommendation) : ["Capture final desktop/mobile screenshots and export the showcase package."],
+    evidence: input.screenshotEvidence,
+    createdAt: new Date().toISOString()
+  };
+}
+
+const assetLibrary = [
+  { id: "polyhaven-hdri", source: "Poly Haven", type: "hdri", styles: ["product_showcase", "apple_product_intro", "cyberpunk_showroom"], license: "CC0", commercialUse: true, attributionRequired: false, url: "https://polyhaven.com/hdris", tags: ["studio", "environment", "lighting"] },
+  { id: "kenney-blocky-kit", source: "Kenney", type: "model", styles: ["minecraft_collectible", "toy_figurine"], license: "CC0", commercialUse: true, attributionRequired: false, url: "https://kenney.nl/assets", tags: ["blocky", "game", "low-poly"] },
+  { id: "quaternius-lowpoly", source: "Quaternius", type: "model", styles: ["hero_select", "toy_figurine"], license: "CC0", commercialUse: true, attributionRequired: false, url: "https://quaternius.com", tags: ["character", "low-poly", "props"] },
+  { id: "ambientcg-textures", source: "ambientCG", type: "texture", styles: ["product_showcase", "cyberpunk_showroom", "toy_figurine"], license: "CC0", commercialUse: true, attributionRequired: false, url: "https://ambientcg.com", tags: ["pbr", "texture", "material"] },
+  { id: "mixamo-animation", source: "Mixamo", type: "animation", styles: ["hero_select"], license: "Adobe Mixamo terms", commercialUse: true, attributionRequired: false, url: "https://www.mixamo.com", tags: ["character", "animation", "humanoid"] },
+  { id: "freesound-effects", source: "Freesound", type: "sound", styles: ["hero_select", "cyberpunk_showroom"], license: "varies", commercialUse: false, attributionRequired: true, url: "https://freesound.org", tags: ["sound", "effects", "verify-license"] }
+] as const;
+
+function searchAssetLibrary(input: z.infer<typeof search3dAssetLibraryInputSchema>) {
+  const query = input.query.toLowerCase();
+  return assetLibrary
+    .filter((asset) => !input.assetType || asset.type === input.assetType)
+    .filter((asset) => !input.styleTarget || (asset.styles as readonly string[]).includes(input.styleTarget))
+    .filter((asset) => !input.commercialUseRequired || asset.commercialUse)
+    .map((asset) => {
+      const haystack = [asset.id, asset.source, asset.type, asset.tags.join(" "), asset.styles.join(" ")].join(" ").toLowerCase();
+      const score = (haystack.includes(query) ? 50 : 0) + (input.styleTarget && (asset.styles as readonly string[]).includes(input.styleTarget) ? 25 : 0) + (input.assetType === asset.type ? 15 : 0) + (asset.commercialUse ? 10 : 0);
+      return {
+        ...asset,
+        businessDemoSuitability: asset.commercialUse && asset.license === "CC0" ? "high" : asset.commercialUse ? "medium" : "low",
+        licenseChecks: asset.license === "varies" ? ["Verify item-level license before use.", "Record attribution in compliance manifest."] : ["Record source URL and license in attribution manifest."],
+        score
+      };
+    })
+    .filter((asset) => asset.score > 0 || query.length < 3)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, input.maxResults);
+}
+
+function showcaseReadme(pkg: Record<string, unknown>) {
+  return `# ${pkg.title}
+
+- Project: \`${pkg.projectId}\`
+- Assets: ${(pkg.assetPaths as string[]).length}
+- Screenshots: ${(pkg.screenshotPaths as string[]).length}
+- Reports: ${(pkg.reportPaths as string[]).length}
+
+## Export Checklist
+
+${(pkg.checklist as string[]).map((item) => `- ${item}`).join("\n")}
+
+## Turntable Plan
+
+${JSON.stringify(pkg.turntablePlan, null, 2)}
+`;
+}
+
+function showcasePackage(input: z.infer<typeof export3dShowcasePackageInputSchema>) {
+  const checklist = [
+    "Run inspect_3d_asset on imported GLB/GLTF/OBJ files.",
+    "Run compose_3d_scene and validate_3d_animation_controls before visual QA.",
+    "Run create_3d_visual_qa_plan and critique_3d_scene_design with desktop/mobile screenshots.",
+    "Record commercial-safe asset sources and attribution requirements.",
+    ...(input.includePwaChecklist ? ["Verify manifest, icons, offline fallback, touch controls, and iOS/Android safe-area behavior."] : []),
+    "Export final screenshot card, poster image, and package report."
+  ];
+  return {
+    projectId: input.projectId,
+    title: input.title,
+    assetPaths: input.assetPaths,
+    screenshotPaths: input.screenshotPaths,
+    reportPaths: input.reportPaths,
+    turntablePlan: input.includeTurntablePlan ? { frames: 72, degrees: 360, durationSeconds: 6, views: ["front", "three_quarter", "side"], output: "three-d-game/exports/turntable.webm" } : undefined,
+    posterPlan: { output: "three-d-game/exports/poster.png", view: "three_quarter", minWidth: 1600, minHeight: 900 },
+    screenshotCardPlan: { output: "three-d-game/exports/screenshot-card.png", views: ["front", "back", "mobile_portrait"] },
+    pwaChecklist: input.includePwaChecklist ? ["manifest present", "icon maskable", "offline route", "touch drag", "pinch zoom", "safe-area padding"] : [],
+    checklist,
+    createdAt: new Date().toISOString()
+  };
+}
+
 function performanceReport(input: z.infer<typeof profileGamePerformanceBudgetInputSchema>): Record<string, unknown> {
   const warnings: string[] = [];
   if (input.triangles > input.maxTriangles) warnings.push(`Triangles ${input.triangles} exceed budget ${input.maxTriangles}.`);
@@ -1990,6 +2189,76 @@ export const threeDGameTools: ToolModule[] = [
         artifacts.push(file.path);
       }
       return { ok: true, summary: `Performance budget is ${report.status}.`, jobId: parsed.projectId, artifacts, structuredContent: report, logs: [JSON.stringify(report, null, 2)], errors: [] };
+    }
+  },
+  {
+    definition: {
+      name: "create_3d_visual_qa_plan",
+      description: "Create a 3D visual QA capture plan for front/back/side/top/mobile views with checks for darkness, scale, clipping, facing direction, contrast, UI readability, shadows, camera interior clipping, and mobile framing.",
+      inputSchema: { type: "object", properties: { projectId: { type: "string" }, styleTarget: { type: "string" }, sceneConfigPath: { type: "string" }, assetManifestPath: { type: "string" }, views: { type: "array", items: { type: "string" } }, checks: { type: "array", items: { type: "string" } }, outputPath: { type: "string" } }, required: ["projectId"], additionalProperties: false }
+    },
+    enabledByDefault: true,
+    schema: create3dVisualQaPlanInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = create3dVisualQaPlanInputSchema.parse(input);
+      const plan = visualQaPlan(parsed);
+      const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(plan, null, 2)}\n`);
+      return { ok: true, summary: `Created 3D visual QA plan with ${plan.captures.length} capture(s).`, jobId: parsed.projectId, artifacts: [file.path], structuredContent: plan, logs: [JSON.stringify(plan, null, 2)], errors: [] };
+    }
+  },
+  {
+    definition: {
+      name: "critique_3d_scene_design",
+      description: "Critique 3D scene screenshots against style targets such as Minecraft collectible, toy figurine, product showcase, hero select, cyberpunk showroom, or Apple product intro.",
+      inputSchema: { type: "object", properties: { projectId: { type: "string" }, styleTarget: { type: "string" }, screenshotEvidence: { type: "array" }, desiredFacing: { type: "string" }, outputPath: { type: "string" } }, required: ["projectId", "styleTarget", "screenshotEvidence"], additionalProperties: false }
+    },
+    enabledByDefault: true,
+    schema: critique3dSceneDesignInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = critique3dSceneDesignInputSchema.parse(input);
+      const report = critique3dScene(parsed);
+      const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(report, null, 2)}\n`);
+      const highFindings = report.findings.filter((finding) => finding.severity === "high");
+      return { ok: highFindings.length === 0, summary: `3D design critique ${report.status} with score ${report.score}/100 and ${report.findings.length} finding(s).`, jobId: parsed.projectId, artifacts: [file.path, ...parsed.screenshotEvidence.map((item) => item.path).filter((item): item is string => Boolean(item))], structuredContent: report, logs: [JSON.stringify(report, null, 2)], errors: highFindings.map((finding) => `${finding.view}: ${finding.issue}`) };
+    }
+  },
+  {
+    definition: {
+      name: "search_3d_asset_library",
+      description: "Search a curated commercial-safe 3D asset source guide for models, textures, HDRIs, sounds, and animations with license and attribution metadata.",
+      inputSchema: { type: "object", properties: { projectId: { type: "string" }, query: { type: "string" }, assetType: { type: "string" }, styleTarget: { type: "string" }, commercialUseRequired: { type: "boolean" }, maxResults: { type: "number" }, writeToProject: { type: "boolean" }, outputPath: { type: "string" } }, required: ["query"], additionalProperties: false }
+    },
+    enabledByDefault: true,
+    schema: search3dAssetLibraryInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = search3dAssetLibraryInputSchema.parse(input);
+      const results = searchAssetLibrary(parsed);
+      const payload = { query: parsed.query, assetType: parsed.assetType, styleTarget: parsed.styleTarget, commercialUseRequired: parsed.commercialUseRequired, results, createdAt: new Date().toISOString() };
+      const artifacts: string[] = [];
+      if (parsed.writeToProject) {
+        if (!parsed.projectId) throw new Error("projectId is required when writeToProject is true.");
+        const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(payload, null, 2)}\n`);
+        artifacts.push(file.path);
+      }
+      return { ok: true, summary: `Found ${results.length} commercial-safe 3D asset source candidate(s).`, jobId: parsed.projectId, artifacts, structuredContent: payload, logs: results.map((item) => `${item.source} ${item.license}: ${item.url}`), errors: [] };
+    }
+  },
+  {
+    definition: {
+      name: "export_3d_showcase_package",
+      description: "Create a 3D showcase export package plan for screenshot cards, turntable video/GIF, poster image, model package report, PWA checklist, and asset manifest handoff.",
+      inputSchema: { type: "object", properties: { projectId: { type: "string" }, title: { type: "string" }, assetPaths: { type: "array", items: { type: "string" } }, screenshotPaths: { type: "array", items: { type: "string" } }, reportPaths: { type: "array", items: { type: "string" } }, includeTurntablePlan: { type: "boolean" }, includePwaChecklist: { type: "boolean" }, outputPath: { type: "string" }, readmePath: { type: "string" } }, required: ["projectId"], additionalProperties: false }
+    },
+    enabledByDefault: true,
+    schema: export3dShowcasePackageInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = export3dShowcasePackageInputSchema.parse(input);
+      const pkg = showcasePackage(parsed);
+      const [packageFile, readmeFile] = await Promise.all([
+        writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(pkg, null, 2)}\n`),
+        writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.readmePath, showcaseReadme(pkg))
+      ]);
+      return { ok: true, summary: `Created 3D showcase export package with ${pkg.checklist.length} checklist item(s).`, jobId: parsed.projectId, artifacts: [packageFile.path, readmeFile.path], structuredContent: { ...pkg, packagePath: packageFile.path, readmePath: readmeFile.path }, logs: [JSON.stringify(pkg, null, 2)], errors: [] };
     }
   },
   {

@@ -92,8 +92,12 @@ test("3D/game tools validate assets and create build, scene, map, QA, collision,
     const loopQa = getToolModule("create_game_loop_qa_plan");
     const controls = getToolModule("create_camera_control_test_plan");
     const performance = getToolModule("profile_game_performance_budget");
+    const visualQa = getToolModule("create_3d_visual_qa_plan");
+    const critique = getToolModule("critique_3d_scene_design");
+    const assetSearch = getToolModule("search_3d_asset_library");
+    const showcaseExport = getToolModule("export_3d_showcase_package");
     const optimizer = getToolModule("optimize_3d_asset");
-    for (const [name, tool] of Object.entries({ brief, validate, inspect, blocky, composer, animation, scene, map, collision, loopQa, controls, performance, optimizer })) assert.ok(tool, `${name} registered`);
+    for (const [name, tool] of Object.entries({ brief, validate, inspect, blocky, composer, animation, scene, map, collision, loopQa, controls, performance, visualQa, critique, assetSearch, showcaseExport, optimizer })) assert.ok(tool, `${name} registered`);
 
     const briefResult = await brief!.handler({
       projectId: project.id,
@@ -375,6 +379,73 @@ test("3D/game tools validate assets and create build, scene, map, QA, collision,
     const report = await readProjectFile(ctx.projectRoot, project.id, "three-d-game/performance-budget-report.json");
     assert.match(report, /over_budget/);
 
+    const visualQaResult = await visualQa!.handler({
+      projectId: project.id,
+      styleTarget: "minecraft_collectible",
+      sceneConfigPath: "three-d-game/scene-composer-config.json",
+      assetManifestPath: "three-d-game/blocky-character-manifest.json",
+      views: ["front", "back", "left", "right", "top", "mobile_portrait"]
+    }, ctx);
+    assert.equal(visualQaResult.ok, true);
+    assert.deepEqual(visualQaResult.artifacts, ["three-d-game/visual-qa-plan.json"]);
+    const visualQaPayload = visualQaResult.structuredContent as { captures: Array<{ view: string; viewport: { width: number; height: number }; checks: string[] }>; thresholds: { minModelCoverage: number }; passCriteria: string[] };
+    assert.equal(visualQaPayload.captures.length, 6);
+    assert.equal(visualQaPayload.captures.some((capture) => capture.view === "mobile_portrait" && capture.viewport.width === 390), true);
+    assert.equal(visualQaPayload.captures[0].checks.includes("camera_inside_mesh"), true);
+    assert.ok(visualQaPayload.thresholds.minModelCoverage > 0);
+    assert.ok(visualQaPayload.passCriteria.some((item) => item.includes("model_too_dark")));
+
+    const critiqueResult = await critique!.handler({
+      projectId: project.id,
+      styleTarget: "minecraft_collectible",
+      desiredFacing: "three_quarter",
+      screenshotEvidence: [
+        { view: "front", path: "three-d-game/screenshots/front.png", brightness: 0.18, contrast: 0.3, modelCoverage: 0.25, clipped: false, facing: "back", uiReadable: false },
+        { view: "mobile_portrait", path: "three-d-game/screenshots/mobile.png", brightness: 0.4, contrast: 0.45, modelCoverage: 0.86, clipped: true, facing: "front", uiReadable: true }
+      ]
+    }, ctx);
+    assert.equal(critiqueResult.ok, false);
+    assert.ok(critiqueResult.artifacts.includes("three-d-game/design-critique-report.json"));
+    const critiquePayload = critiqueResult.structuredContent as { status: string; score: number; findings: Array<{ issue: string; severity: string }>; styleGuidance: string[]; nextActions: string[] };
+    assert.equal(critiquePayload.status, "needs_revision");
+    assert.ok(critiquePayload.score < 100);
+    assert.equal(critiquePayload.findings.some((finding) => finding.issue === "model_too_dark" && finding.severity === "high"), true);
+    assert.equal(critiquePayload.findings.some((finding) => finding.issue === "wrong_facing"), true);
+    assert.ok(critiquePayload.styleGuidance.some((item) => item.includes("chunky")));
+    assert.ok(critiquePayload.nextActions.length > 0);
+
+    const assetSearchResult = await assetSearch!.handler({
+      projectId: project.id,
+      query: "blocky character",
+      assetType: "model",
+      styleTarget: "minecraft_collectible",
+      commercialUseRequired: true,
+      writeToProject: true
+    }, ctx);
+    assert.equal(assetSearchResult.ok, true);
+    assert.deepEqual(assetSearchResult.artifacts, ["three-d-game/asset-library-search.json"]);
+    const assetSearchPayload = assetSearchResult.structuredContent as { results: Array<{ source: string; license: string; businessDemoSuitability: string; commercialUse: boolean }> };
+    assert.ok(assetSearchPayload.results.length >= 1);
+    assert.equal(assetSearchPayload.results.every((item) => item.commercialUse), true);
+    assert.equal(assetSearchPayload.results.some((item) => item.license === "CC0" && item.businessDemoSuitability === "high"), true);
+
+    const showcaseResult = await showcaseExport!.handler({
+      projectId: project.id,
+      title: "Crystal Miner Showcase",
+      assetPaths: ["three-d-game/blocky-character.js", "assets/heavy.gltf"],
+      screenshotPaths: ["three-d-game/screenshots/front.png", "three-d-game/screenshots/mobile.png"],
+      reportPaths: ["three-d-game/design-critique-report.json", "three-d-game/asset-inspection.json"]
+    }, ctx);
+    assert.equal(showcaseResult.ok, true);
+    assert.deepEqual(showcaseResult.artifacts.sort(), ["three-d-game/showcase-export-package.json", "three-d-game/showcase-export-readme.md"].sort());
+    const showcasePayload = showcaseResult.structuredContent as { turntablePlan: { frames: number; output: string }; pwaChecklist: string[]; packagePath: string; readmePath: string; checklist: string[] };
+    assert.equal(showcasePayload.turntablePlan.frames, 72);
+    assert.equal(showcasePayload.turntablePlan.output, "three-d-game/exports/turntable.webm");
+    assert.ok(showcasePayload.pwaChecklist.includes("touch drag"));
+    assert.equal(showcasePayload.packagePath, "three-d-game/showcase-export-package.json");
+    assert.equal(showcasePayload.readmePath, "three-d-game/showcase-export-readme.md");
+    assert.ok(showcasePayload.checklist.some((item) => item.includes("visual QA")));
+
     await writeProjectAsset(ctx.projectRoot, project.id, "assets/heavy.gltf", Buffer.from(JSON.stringify({
       asset: { version: "2.0" },
       scenes: [{ nodes: [0, 1, 2] }],
@@ -462,6 +533,10 @@ test("three-d-game skill exposes 3D/game tools through dedicated, coding, and de
     "create_game_loop_qa_plan",
     "create_camera_control_test_plan",
     "profile_game_performance_budget",
+    "create_3d_visual_qa_plan",
+    "critique_3d_scene_design",
+    "search_3d_asset_library",
+    "export_3d_showcase_package",
     "optimize_3d_asset"
   ];
   const threeDGame = skillRegistry.find((entry) => entry.id === "three-d-game");
