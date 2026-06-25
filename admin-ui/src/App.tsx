@@ -42,6 +42,7 @@ import type {
   RegistrationSettings,
   ProjectFileInfo,
   ProjectManifest,
+  ProjectShareAccess,
   ProjectStatus,
   ProjectSummary,
   SettingsResult,
@@ -110,17 +111,21 @@ function validationStatus(project: ProjectSummary): ValidationStatus {
 }
 
 function badgeClass(value: string): string {
-  if (["published", "valid", "ok", "enabled", "low"].includes(value)) return "badge good";
+  if (["published", "valid", "ok", "enabled", "low", "anyone_with_link"].includes(value)) return "badge good";
   if (["warnings", "private", "medium", "draft", "not_checked"].includes(value)) return "badge warn";
   if (["failed", "deleted", "fail", "high", "disabled"].includes(value)) return "badge bad";
   return "badge neutral";
 }
 
 const projectStatusActions: Array<{ status: MutableProjectStatus; label: string; confirmLabel: string; body: (title: string) => string; tone?: "danger" | "primary" }> = [
-  { status: "published", label: "Publish", confirmLabel: "Publish", tone: "primary", body: (title) => `Publish ${title}. Public preview links can be opened by anyone with the URL.` },
+  { status: "published", label: "Publish", confirmLabel: "Publish", tone: "primary", body: (title) => `Publish ${title}. Preview links stay private unless sharing is set to anyone with the link.` },
   { status: "private", label: "Make private", confirmLabel: "Make private", body: (title) => `Make ${title} private. Public preview access will be removed.` },
   { status: "draft", label: "Move to draft", confirmLabel: "Move to draft", body: (title) => `Move ${title} back to draft. It will no longer appear as a published project.` }
 ];
+
+function shareAccessLabel(value: ProjectShareAccess | undefined): string {
+  return value === "anyone_with_link" ? "Anyone with link" : "Private";
+}
 
 function useRoute(): { route: Route; projectId?: string } {
   const [route, setRoute] = useState(currentRoute);
@@ -519,6 +524,24 @@ function ProjectTable({ projects, onReload, setConfirm, toast, isAdmin, homeProj
     toast("success", `Project set to ${status}.`);
     onReload();
   };
+  const updateShareAccess = async (project: ProjectSummary, shareAccess: ProjectShareAccess) => {
+    await api(`/projects/${encodeURIComponent(project.id)}/share-access`, { method: "POST", body: JSON.stringify({ shareAccess }) });
+    toast("success", `Sharing set to ${shareAccessLabel(shareAccess)}.`);
+    onReload();
+  };
+  const requestShareAccessChange = (project: ProjectSummary) => {
+    const current = project.shareAccess ?? "private";
+    const next: ProjectShareAccess = current === "anyone_with_link" ? "private" : "anyone_with_link";
+    setConfirm({
+      title: next === "anyone_with_link" ? "Share with anyone" : "Make link private",
+      body: next === "anyone_with_link"
+        ? `Anyone with the link can view "${project.title}" without signing in.`
+        : `Only signed-in project users and admins can view "${project.title}".`,
+      confirmLabel: next === "anyone_with_link" ? "Share with link" : "Make private",
+      tone: next === "anyone_with_link" ? "primary" : undefined,
+      onConfirm: () => updateShareAccess(project, next)
+    });
+  };
   const requestStatusChange = (project: ProjectSummary, status: MutableProjectStatus) => {
     const action = projectStatusActions.find((item) => item.status === status);
     if (!action || project.status === status) return;
@@ -532,7 +555,7 @@ function ProjectTable({ projects, onReload, setConfirm, toast, isAdmin, homeProj
     });
   };
   return (
-    <div className="table-wrap"><table><thead><tr><th>Project</th><th>Status</th><th>Validation</th><th>Files</th><th>Updated</th><th>Created by</th><th>Actions</th></tr></thead><tbody>
+    <div className="table-wrap"><table><thead><tr><th>Project</th><th>Status</th><th>Sharing</th><th>Validation</th><th>Files</th><th>Updated</th><th>Created by</th><th>Actions</th></tr></thead><tbody>
       {projects.map((project) => <tr key={project.id}>
         <td data-label="Project"><button className="link-button" type="button" onClick={() => navigate(`/admin/projects/${encodeURIComponent(project.id)}`)}>{project.title}</button><code>{project.id}</code></td>
         <td data-label="Status">
@@ -572,6 +595,16 @@ function ProjectTable({ projects, onReload, setConfirm, toast, isAdmin, homeProj
             </div>
           )}
         </td>
+        <td data-label="Sharing">
+          <div className="status-cell">
+            <span className={badgeClass(project.shareAccess ?? "private")}>{shareAccessLabel(project.shareAccess)}</span>
+            {project.status === "published" && (
+              <button className="button subtle mini" type="button" onClick={() => requestShareAccessChange(project)}>
+                {project.shareAccess === "anyone_with_link" ? "Restrict" : "Share"}
+              </button>
+            )}
+          </div>
+        </td>
         <td data-label="Validation"><span className={badgeClass(validationStatus(project))}>{validationStatus(project).replace("_", " ")}</span></td>
         <td data-label="Files">{project.filesCount}</td>
         <td data-label="Updated">{fmtDate(project.updatedAt)}</td>
@@ -605,6 +638,19 @@ function ProjectDetailPage({ projectId, setConfirm, toast }: { projectId: string
   useEffect(() => reload(), [reload]);
   if (error) return <EmptyState title="Project unavailable" body={error} />;
   if (!project) return <div className="panel">Loading project...</div>;
+  const setShareAccess = (shareAccess: ProjectShareAccess) => setConfirm({
+    title: shareAccess === "anyone_with_link" ? "Share with anyone" : "Make link private",
+    body: shareAccess === "anyone_with_link"
+      ? `Anyone with the link can view "${project.title}" without signing in.`
+      : `Only signed-in project users and admins can view "${project.title}".`,
+    confirmLabel: shareAccess === "anyone_with_link" ? "Share with link" : "Make private",
+    tone: shareAccess === "anyone_with_link" ? "primary" : undefined,
+    onConfirm: async () => {
+      await api(`/projects/${encodeURIComponent(project.id)}/share-access`, { method: "POST", body: JSON.stringify({ shareAccess }) });
+      toast("success", `Sharing set to ${shareAccessLabel(shareAccess)}.`);
+      reload();
+    }
+  });
   return (
     <div className="detail-layout">
       <section className="panel">
@@ -613,12 +659,14 @@ function ProjectDetailPage({ projectId, setConfirm, toast }: { projectId: string
         <p>{project.summary || "No summary provided."}</p>
         <div className="detail-meta">
           <span className={badgeClass(project.status)}>{project.status}</span>
+          <span className={badgeClass(project.shareAccess ?? "private")}>{shareAccessLabel(project.shareAccess)}</span>
           <span className={badgeClass(validationStatus(project))}>{validationStatus(project).replace("_", " ")}</span>
           <span>{files.length} files</span>
           <span>Updated {fmtDate(project.updatedAt)}</span>
         </div>
         <div className="actions-row">
           {project.publishedUrl && <a className="button primary" href={project.publishedUrl} target="_blank" rel="noreferrer"><ExternalLink size={16} /> Open preview</a>}
+          {project.status === "published" && <button className="button secondary" type="button" onClick={() => setShareAccess(project.shareAccess === "anyone_with_link" ? "private" : "anyone_with_link")}>{project.shareAccess === "anyone_with_link" ? "Restrict link" : "Share with link"}</button>}
           <a className="button secondary" href={`/admin/api/projects/${encodeURIComponent(project.id)}/download.zip`}><Download size={16} /> Download ZIP</a>
           {project.status !== "deleted" && <button className="button danger" type="button" onClick={() => setConfirm({ title: "Delete project", body: `Soft-delete ${project.title}.`, confirmLabel: "Delete", tone: "danger", onConfirm: async () => { await api(`/projects/${encodeURIComponent(project.id)}/delete`, { method: "POST" }); toast("success", "Project deleted."); navigate("/admin/projects"); } })}><Trash2 size={16} /> Delete</button>}
         </div>

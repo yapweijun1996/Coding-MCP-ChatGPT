@@ -49,7 +49,7 @@ This MCP stores ChatGPT-created coding projects on disk under `.projects/`.
 - `install_project_dependencies`: run controlled `npm install` in the app workspace.
 - `run_project_dev` / `stop_project_dev`: start or stop a local Vite dev preview.
 - `run_project_build`: run controlled `npm run build`.
-- `publish_project_dist`: publish built `dist/` output to the stable `/share/:projectId/index.html` URL.
+- `publish_project_dist`: publish built `dist/` output to the stable `/share/:projectId/index.html` URL. New published projects default to private link access.
 - `get_app_project_report`: return manifest plus app dev server state.
 - `bind_project_workspace`: bind an existing `projectId` to a real local Git repository under `WORKSPACE_ROOT`.
 - `list_project_files`: list files in the bound workspace, excluding heavy generated folders by default.
@@ -61,13 +61,13 @@ This MCP stores ChatGPT-created coding projects on disk under `.projects/`.
 - `run_shell_command`: run a bounded shell command in the bound workspace with a scrubbed environment; disabled by default.
 - `inspect_project_workspace`: start the bound workspace dev server and inspect desktop/tablet/mobile screenshots, layout, console errors, and optional accessibility.
 - `record_project_workspace_video`: start the bound workspace dev server and record real browser output to WebM, or MP4 when `ffmpeg` is installed; failed MP4 conversion still returns the WebM artifact.
-- `publish_project_workspace`: copy a built output directory such as `dist/` into the project files and publish it to `/share/:projectId/index.html`.
+- `publish_project_workspace`: copy a built output directory such as `dist/` into the project files and publish it to `/share/:projectId/index.html`. Anonymous access requires setting project sharing to `anyone_with_link`.
 - `record_project_task`: append queued/in-progress/completed/blocked task state to project history.
 
 Recommended ChatGPT workflow:
 
 1. Call `deliver_static_project` with `title`, `summary`, `entryFile`, and all text files.
-2. If it returns `ok:true`, return the `publishedUrl`, for example `https://gmb01.xyz/share/project_xxx/index.html`.
+2. If it returns `ok:true`, return the `publishedUrl`, for example `https://gmb01.xyz/share/project_xxx/index.html`. By default the link requires a signed-in project user or admin.
 3. If it returns `ok:false`, use `get_project_activity` and the inspection report to explain what must be fixed.
 4. Use the lower-level `create_project` / `write_project_file` / `validate_project` / `publish_and_report` workflow only for incremental repairs.
 
@@ -77,7 +77,7 @@ Recommended ChatGPT workflow:
 - `/admin/projects/:projectId`: React project detail route for status, files, validation, and task history.
 - `/admin/api/projects/:projectId`: authenticated JSON project detail.
 - `/admin/api/projects/:projectId/download.zip`: authenticated dynamic ZIP download of project files.
-- `/share/:projectId/:filename`: public published project file.
+- `/share/:projectId/:filename`: published project file. Default access is private to signed-in project users and admins; set sharing to `anyone_with_link` for Google Drive-style anonymous link access.
 
 ## Safety boundaries
 

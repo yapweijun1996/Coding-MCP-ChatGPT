@@ -13,6 +13,7 @@ function projectLockKey(projectRoot: string, projectId: string): string {
 }
 
 export type ProjectStatus = "draft" | "private" | "published" | "deleted";
+export type ProjectShareAccess = "private" | "anyone_with_link";
 export type ProjectValidationStatus = "valid" | "warnings" | "failed";
 export type ProjectValidationProfile = "static_html";
 
@@ -196,6 +197,7 @@ export interface ProjectMetadata {
   updatedAt: string;
   createdByClientId: string;
   status: ProjectStatus;
+  shareAccess?: ProjectShareAccess;
   entryFile: string;
   publishedUrl?: string;
   workspaceBinding?: ProjectWorkspaceBinding;
@@ -260,6 +262,7 @@ export interface ProjectTaskGraph {
 
 export interface PublishProjectOptions {
   shareBasePath?: string;
+  shareAccess?: ProjectShareAccess;
 }
 
 export const maxProjectFileBytes = 1024 * 1024;
@@ -508,6 +511,7 @@ function normalizeProjectMetadata(metadata: ProjectMetadata): ProjectMetadata {
   const taskList = (metadata.taskList ?? []).map((task) => ({ ...task, dependsOn: task.dependsOn ?? [] }));
   return {
     ...metadata,
+    shareAccess: metadata.shareAccess ?? "private",
     taskHistory: metadata.taskHistory ?? [],
     taskList
   };
@@ -796,6 +800,7 @@ export async function createProject(
     updatedAt: now,
     createdByClientId: input.createdByClientId,
     status: "draft",
+    shareAccess: "private",
     entryFile,
     taskHistory: [
       {
@@ -1496,6 +1501,7 @@ export async function publishProject(projectRoot: string, projectId: string, pub
     const updated = addHistory({
       ...metadata,
       status: "published" as ProjectStatus,
+      shareAccess: options.shareAccess ?? metadata.shareAccess ?? "private",
       entryFile: safeEntryFile,
       publishedUrl
     }, {
@@ -1560,12 +1566,35 @@ export async function setProjectStatus(projectRoot: string, projectId: string, s
     const updated = addHistory({
       ...metadata,
       status,
+      shareAccess: status === "private" ? "private" : metadata.shareAccess ?? "private",
       publishedUrl: undefined
     }, {
       toolName: "set_project_status",
       ok: true,
       summary: `Set ${projectId} status to ${status}.`,
       details: { status }
+    });
+    await writeProjectMetadata(projectRoot, updated);
+    return updated;
+  });
+}
+
+export async function setProjectShareAccess(
+  projectRoot: string,
+  projectId: string,
+  shareAccess: ProjectShareAccess
+): Promise<ProjectMetadata> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot update a deleted project.");
+    const updated = addHistory({
+      ...metadata,
+      shareAccess
+    }, {
+      toolName: "set_project_share_access",
+      ok: true,
+      summary: `Set ${projectId} share access to ${shareAccess}.`,
+      details: { shareAccess }
     });
     await writeProjectMetadata(projectRoot, updated);
     return updated;

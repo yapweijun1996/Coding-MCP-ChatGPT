@@ -5,8 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createProject, publishProject, writeProjectFile } from "../src/projects/store.js";
+import { createShareArtifact } from "../src/share/store.js";
 import { clearHomepage, getHomepage, setHomepage } from "../src/site/store.js";
 import { siteTools } from "../src/mcp/tools/site.js";
+import { approveUser, registerUser, updateRegistrationSettings } from "../src/user-store.js";
 
 const root = await mkdtemp(path.join(os.tmpdir(), "coding-mcp-admin-api-"));
 process.env.ADMIN_PASSCODE = "test-admin-passcode";
@@ -48,11 +50,11 @@ async function login(baseUrl: string): Promise<{ cookie: string; csrfToken: stri
   return { cookie, csrfToken: body.csrfToken };
 }
 
-async function loginResponse(baseUrl: string, headers: Record<string, string> = {}, password = "test-admin-password"): Promise<Response> {
+async function loginResponse(baseUrl: string, headers: Record<string, string> = {}, password = "test-admin-password", email = "admin@example.test"): Promise<Response> {
   return fetch(`${baseUrl}/admin/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...headers },
-    body: JSON.stringify({ email: "admin@example.test", password })
+    body: JSON.stringify({ email, password })
   });
 }
 
@@ -123,6 +125,15 @@ test("profile username controls public username share URLs", async () => {
     await writeProjectFile(userProjectRoot, project.id, "index.html", "<!doctype html><html><head><title>Named</title></head><body>Named</body></html>");
     const initiallyPublished = await publishProject(userProjectRoot, project.id, "https://example.test", "index.html");
     assert.equal(initiallyPublished.publishedUrl, `https://example.test/share/${project.id}/index.html`);
+    assert.equal(initiallyPublished.shareAccess, "private");
+
+    const anonymousPrivateShare = await fetch(`${baseUrl}/share/${project.id}/index.html`);
+    assert.equal(anonymousPrivateShare.status, 404);
+    assert.equal(anonymousPrivateShare.headers.get("cache-control"), "private, no-store");
+    const signedInPrivateShare = await fetch(`${baseUrl}/share/${project.id}/index.html`, { headers: { Cookie: cookie } });
+    assert.equal(signedInPrivateShare.status, 200);
+    assert.equal(signedInPrivateShare.headers.get("cache-control"), "private, no-store");
+    assert.equal(signedInPrivateShare.headers.get("vary"), "Cookie");
 
     const invalidProfile = await fetch(`${baseUrl}/admin/api/profile`, {
       method: "POST",
@@ -144,19 +155,39 @@ test("profile username controls public username share URLs", async () => {
 
     const projectDetail = await fetch(`${baseUrl}/admin/api/projects/${project.id}`, { headers: { Cookie: cookie } });
     assert.equal(projectDetail.status, 200);
-    const projectDetailBody = await projectDetail.json() as { project: { publishedUrl?: string } };
+    const projectDetailBody = await projectDetail.json() as { project: { publishedUrl?: string; shareAccess?: string } };
     assert.equal(projectDetailBody.project.publishedUrl, `https://example.test/@demo_user/share/${project.id}/index.html`);
+    assert.equal(projectDetailBody.project.shareAccess, "private");
 
     const namedShare = await fetch(`${baseUrl}/@demo_user/share/${project.id}/index.html`);
-    assert.equal(namedShare.status, 200);
-    assert.match(await namedShare.text(), /rel="canonical" href="https:\/\/example\.test\/@demo_user\/share\//);
+    assert.equal(namedShare.status, 404);
 
-    // The per-user public index page (target of the admin "Public Index" link) lists the user's project.
+    // Private published projects do not appear on the per-user public index.
     const userIndex = await fetch(`${baseUrl}/@demo_user`);
     assert.equal(userIndex.status, 200);
     const userIndexHtml = await userIndex.text();
-    assert.ok(userIndexHtml.includes(project.id), "user index should list the published project");
-    assert.ok(userIndexHtml.includes(`/@demo_user/share/${project.id}`), "user index should link via the username share path");
+    assert.ok(!userIndexHtml.includes(project.id), "private project should not be listed on the public index");
+
+    const headers = { Cookie: cookie, "Content-Type": "application/json", "X-CSRF-Token": csrfToken };
+    const makePublic = await fetch(`${baseUrl}/admin/api/projects/${project.id}/share-access`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ shareAccess: "anyone_with_link" })
+    });
+    assert.equal(makePublic.status, 200);
+    const publicBody = await makePublic.json() as { project: { shareAccess?: string } };
+    assert.equal(publicBody.project.shareAccess, "anyone_with_link");
+
+    const publicNamedShare = await fetch(`${baseUrl}/@demo_user/share/${project.id}/index.html`);
+    assert.equal(publicNamedShare.status, 200);
+    assert.match(publicNamedShare.headers.get("cache-control") ?? "", /public/);
+    assert.match(await publicNamedShare.text(), /rel="canonical" href="https:\/\/example\.test\/@demo_user\/share\//);
+
+    const publicUserIndex = await fetch(`${baseUrl}/@demo_user`);
+    assert.equal(publicUserIndex.status, 200);
+    const publicUserIndexHtml = await publicUserIndex.text();
+    assert.ok(publicUserIndexHtml.includes(project.id), "user index should list the public link project");
+    assert.ok(publicUserIndexHtml.includes(`/@demo_user/share/${project.id}`), "user index should link via the username share path");
 
     // An unknown / not-public username index is 404.
     const unknownIndex = await fetch(`${baseUrl}/@other_user`);
@@ -167,6 +198,55 @@ test("profile username controls public username share URLs", async () => {
 
     const wrongUserShare = await fetch(`${baseUrl}/@other_user/share/${project.id}/index.html`);
     assert.equal(wrongUserShare.status, 404);
+  });
+});
+
+test("legacy shares are private by default and public only when explicitly link-shared", async () => {
+  await withServer(async (baseUrl) => {
+    const { cookie } = await login(baseUrl);
+    const ownerSession = await fetch(`${baseUrl}/admin/api/session`, { headers: { Cookie: cookie } });
+    const ownerSessionBody = await ownerSession.json() as { user?: { id?: string } };
+    const ownerUserId = ownerSessionBody.user?.id;
+    assert.ok(ownerUserId);
+
+    await updateRegistrationSettings({ allowRegistration: true, allowedEmailDomains: [] });
+    const otherEmail = `other-${Date.now()}@example.test`;
+    const otherPassword = "test-user-password";
+    const otherUser = await registerUser(otherEmail, otherPassword);
+    await approveUser(otherUser.id, ownerUserId);
+    const otherLogin = await loginResponse(baseUrl, {}, otherPassword, otherEmail);
+    assert.equal(otherLogin.status, 200);
+    const otherCookie = otherLogin.headers.get("set-cookie")?.split(";")[0];
+    assert.ok(otherCookie);
+
+    const privateShare = await createShareArtifact({
+      shareRoot: process.env.SHARE_ROOT!,
+      title: "Private legacy share",
+      summary: "legacy private",
+      filename: "private.html",
+      html: "<h1>PRIVATE_LEGACY_SHARE</h1>",
+      ownerUserId
+    });
+    const anonymousPrivate = await fetch(`${baseUrl}/share/${privateShare.id}/${privateShare.filename}`);
+    assert.equal(anonymousPrivate.status, 404);
+    const signedInPrivate = await fetch(`${baseUrl}/share/${privateShare.id}/${privateShare.filename}`, { headers: { Cookie: cookie } });
+    assert.equal(signedInPrivate.status, 200);
+    assert.match(await signedInPrivate.text(), /PRIVATE_LEGACY_SHARE/);
+    const wrongUserPrivate = await fetch(`${baseUrl}/share/${privateShare.id}/${privateShare.filename}`, { headers: { Cookie: otherCookie } });
+    assert.equal(wrongUserPrivate.status, 404);
+
+    const publicShare = await createShareArtifact({
+      shareRoot: process.env.SHARE_ROOT!,
+      title: "Public legacy share",
+      summary: "legacy public",
+      filename: "public.html",
+      html: "<h1>PUBLIC_LEGACY_SHARE</h1>",
+      shareAccess: "anyone_with_link",
+      ownerUserId
+    });
+    const anonymousPublic = await fetch(`${baseUrl}/share/${publicShare.id}/${publicShare.filename}`);
+    assert.equal(anonymousPublic.status, 200);
+    assert.match(await anonymousPublic.text(), /PUBLIC_LEGACY_SHARE/);
   });
 });
 

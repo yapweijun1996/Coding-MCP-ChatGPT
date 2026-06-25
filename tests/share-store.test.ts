@@ -55,7 +55,7 @@ test("created shares are readable in the same process", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "share-"));
   try {
     await initializeShareStore(root);
-    const rec = await createShareArtifact({ shareRoot: root, title: "T", summary: "S", filename: "out.html", html: "<i>x</i>" });
+    const rec = await createShareArtifact({ shareRoot: root, title: "T", summary: "S", filename: "out.html", html: "<i>x</i>", ownerUserId: "test-user" });
     const got = await readShareArtifact(rec.id, "out.html");
     assert.equal(got?.html, "<i>x</i>");
   } finally {

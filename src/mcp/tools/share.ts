@@ -31,7 +31,7 @@ export const shareTools: ToolModule[] = [
     schema: createShareInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof createShareInputSchema>;
-      const share = await createShareArtifact({ shareRoot: ctx.shareRoot, title: parsed.title, summary: parsed.summary, filename: parsed.filename, html: parsed.html });
+      const share = await createShareArtifact({ shareRoot: ctx.shareRoot, title: parsed.title, summary: parsed.summary, filename: parsed.filename, html: parsed.html, ownerUserId: ctx.userId });
       const result = createJobResult(ctx, `Shared ${share.filename}`, parsed.summary, ["Share artifact created."], [`share/${share.id}/${share.filename}`]);
       return { ...result, shareUrl: makeShareUrl(ctx.publicBaseUrl, share.id, share.filename) };
     }

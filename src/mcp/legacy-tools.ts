@@ -4296,7 +4296,8 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
         title: input.title,
         summary: input.summary,
         filename: input.filename,
-        html: input.html
+        html: input.html,
+        ownerUserId: ctx.userId
       });
       const shareUrl = makeShareUrl(ctx.publicBaseUrl, share.id, share.filename);
       const result = createJobResult(ctx, `Shared ${share.filename}`, input.summary, ["Share artifact created."], [`share/${share.id}/${share.filename}`]);

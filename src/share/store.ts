@@ -10,6 +10,8 @@ export interface ShareRecord {
   summary: string;
   filePath: string;
   createdAt: string;
+  shareAccess: "private" | "anyone_with_link";
+  ownerUserId?: string;
 }
 
 const shares = new Map<string, ShareRecord>();
@@ -24,7 +26,8 @@ function reconstructRecord(shareRoot: string, id: string, filename: string, crea
     title: filename.replace(/\.html$/, ""),
     summary: "",
     filePath: path.join(shareRoot, id, filename),
-    createdAt
+    createdAt,
+    shareAccess: "private"
   };
 }
 
@@ -73,6 +76,8 @@ export async function createShareArtifact(input: {
   summary: string;
   filename: string;
   html: string;
+  shareAccess?: "private" | "anyone_with_link";
+  ownerUserId?: string;
 }): Promise<ShareRecord> {
   if (input.html.length > 1024 * 1024) {
     throw new Error("Shared HTML must be 1 MiB or smaller.");
@@ -91,7 +96,9 @@ export async function createShareArtifact(input: {
     title: input.title,
     summary: input.summary,
     filePath,
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    shareAccess: input.shareAccess ?? "private",
+    ownerUserId: input.ownerUserId
   };
   shares.set(`${id}/${filename}`, record);
   return record;

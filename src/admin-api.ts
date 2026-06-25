@@ -15,6 +15,7 @@ import {
   getProjectManifest,
   getProjectWithFiles,
   listProjects,
+  setProjectShareAccess,
   setProjectStatus
 } from "./projects/store.js";
 import { getResearchSummary } from "./research/store.js";
@@ -589,6 +590,21 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       ok(res, { project });
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Project status update failed.");
+    }
+  }));
+
+  api.post("/projects/:projectId/share-access", asyncRoute(async (req, res) => {
+    try {
+      const user = res.locals.currentUser as PublicUser;
+      if (!requireProjectMutation(user, res)) return;
+      const shareAccess = readBodyString(req, "shareAccess");
+      if (shareAccess !== "private" && shareAccess !== "anyone_with_link") throw new Error("Invalid project share access.");
+      const root = await findProjectRoot(req, user, req.params.projectId);
+      const project = await setProjectShareAccess(root, req.params.projectId, shareAccess);
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/projects/share-access", toolName: req.params.projectId, ok: true, summary: `Set project ${req.params.projectId} share access to ${shareAccess}.` });
+      ok(res, { project });
+    } catch (error) {
+      fail(res, 400, error instanceof Error ? error.message : "Project share access update failed.");
     }
   }));
 

@@ -445,7 +445,7 @@ export async function inspectWebpageUrl(url: string, options: Partial<BrowserIns
 }
 
 async function createHtmlReport(ctx: ToolContext, title: string, summary: string, filenamePrefix: string, html: string): Promise<string> {
-  const share = await createShareArtifact({ shareRoot: ctx.shareRoot, title, summary, filename: `${filenamePrefix}-${randomUUID()}.html`, html });
+  const share = await createShareArtifact({ shareRoot: ctx.shareRoot, title, summary, filename: `${filenamePrefix}-${randomUUID()}.html`, html, ownerUserId: ctx.userId });
   return makeShareUrl(ctx.publicBaseUrl, share.id, share.filename);
 }
 

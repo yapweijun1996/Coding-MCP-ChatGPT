@@ -16,6 +16,7 @@ type ToolContext = {
   publicBaseUrl: string;
   shareRoot: string;
   artifactRoot: string;
+  userId?: string;
 };
 
 type TempSession = {
@@ -336,7 +337,8 @@ async function makeShareArtifact(ctx: ToolContext, filename: string, title: stri
     title,
     summary: title,
     filename,
-    html: wrapHtml(title, body)
+    html: wrapHtml(title, body),
+    ownerUserId: ctx.userId
   });
   return makeShareUrl(ctx.publicBaseUrl, share.id, share.filename);
 }

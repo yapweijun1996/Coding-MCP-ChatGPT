@@ -131,7 +131,7 @@ export async function createBrowserSessionSnapshot(session: BrowserSession): Pro
 }
 
 async function buildScreenshotArtifact(
-  ctx: { publicBaseUrl: string; shareRoot: string },
+  ctx: { publicBaseUrl: string; shareRoot: string; userId?: string },
   sessionId: string,
   step: number,
   label: string,
@@ -147,7 +147,8 @@ async function buildScreenshotArtifact(
     title: `Browser Step ${step}`,
     summary: `Session ${sessionId} step ${step}: ${label}`,
     filename,
-    html
+    html,
+    ownerUserId: ctx.userId
   });
   const shareUrl = makeShareUrl(ctx.publicBaseUrl, share.id, share.filename);
   return { shareUrl, html };

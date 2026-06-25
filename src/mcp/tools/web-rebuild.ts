@@ -706,7 +706,8 @@ export const webRebuildTools: ToolModule[] = [
           title: "Design Conversion Browser Inspection",
           summary: `Browser validation for ${project.id}.`,
           filename: `design-conversion-inspection-${project.id}.html`,
-          html: renderWebpageInspectionReport(publishedUrl, browserResults)
+          html: renderWebpageInspectionReport(publishedUrl, browserResults),
+          ownerUserId: ctx.userId
         });
         inspectionReportUrl = makeShareUrl(ctx.publicBaseUrl, inspectionShare.id, inspectionShare.filename);
         const inspectionSummary = {
@@ -787,7 +788,8 @@ export const webRebuildTools: ToolModule[] = [
         title: "Webpage Capture Report",
         summary: `Captured ${capture.sourceUrl}.`,
         filename: `webpage-capture-${capture.captureId}.html`,
-        html: renderCaptureReport(capture)
+        html: renderCaptureReport(capture),
+        ownerUserId: ctx.userId
       });
       const reportUrl = makeShareUrl(ctx.publicBaseUrl, share.id, share.filename);
       const structuredContent = {
@@ -842,7 +844,8 @@ export const webRebuildTools: ToolModule[] = [
         title: "Webpage Analysis Report",
         summary: `Analyzed capture ${capture.captureId}.`,
         filename: `webpage-analysis-${analysis.analysisId}.html`,
-        html: renderAnalysisReport(capture, analysis)
+        html: renderAnalysisReport(capture, analysis),
+        ownerUserId: ctx.userId
       });
       const reportUrl = makeShareUrl(ctx.publicBaseUrl, share.id, share.filename);
       return {
@@ -934,7 +937,8 @@ export const webRebuildTools: ToolModule[] = [
           title: "Improved Page Browser Inspection",
           summary: `Browser validation for ${project.id}.`,
           filename: `improved-inspection-${project.id}.html`,
-          html: renderWebpageInspectionReport(published.publishedUrl!, browserResults)
+          html: renderWebpageInspectionReport(published.publishedUrl!, browserResults),
+          ownerUserId: ctx.userId
         });
         inspectionReportUrl = makeShareUrl(ctx.publicBaseUrl, inspectionShare.id, inspectionShare.filename);
         const inspectionSummary = {

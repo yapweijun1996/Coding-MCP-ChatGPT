@@ -1,4 +1,5 @@
 export type ProjectStatus = "draft" | "private" | "published" | "deleted";
+export type ProjectShareAccess = "private" | "anyone_with_link";
 export type ValidationStatus = "valid" | "warnings" | "failed" | "not_checked";
 
 export interface ApiResult {
@@ -81,6 +82,7 @@ export interface ProjectSummary {
   updatedAt: string;
   createdByClientId: string;
   status: ProjectStatus;
+  shareAccess?: ProjectShareAccess;
   entryFile: string;
   publishedUrl?: string;
   filesCount: number;

@@ -21,12 +21,52 @@ import {
   getProjectRootForUser,
   getPublicShareBasePathForUser,
   getUserByProjectRoot,
-  getUserByUsername
+  getUserByUsername,
+  getSession as getUserSession
 } from "../user-store.js";
 import { asyncRoute } from "./util.js";
 
 const homepageCsp = "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https:; base-uri 'none'; form-action 'self';";
 const blogCsp = "default-src 'self' 'unsafe-inline' data: https:; base-uri 'none'; form-action 'self';";
+const sessionCookieName = "coding_mcp_session";
+
+function parseCookies(header: string | undefined): Record<string, string> {
+  const cookies: Record<string, string> = {};
+  if (!header) return cookies;
+  for (const part of header.split(";")) {
+    const [rawName, ...rawValue] = part.trim().split("=");
+    if (!rawName || rawValue.length === 0) continue;
+    cookies[rawName] = decodeURIComponent(rawValue.join("="));
+  }
+  return cookies;
+}
+
+async function canViewPublishedProject(req: express.Request, root: string, shareAccess: string | undefined): Promise<boolean> {
+  if ((shareAccess ?? "private") === "anyone_with_link") return true;
+  const sessionId = parseCookies(req.header("cookie"))[sessionCookieName];
+  const session = await getUserSession(sessionId);
+  if (!session || session.user.status !== "active") return false;
+  if (session.user.role === "admin") return true;
+  return session.user.projectRoot === root;
+}
+
+async function canViewLegacyShare(req: express.Request, shareAccess: string | undefined, ownerUserId?: string): Promise<boolean> {
+  if ((shareAccess ?? "private") === "anyone_with_link") return true;
+  const sessionId = parseCookies(req.header("cookie"))[sessionCookieName];
+  const session = await getUserSession(sessionId);
+  if (!session || session.user.status !== "active") return false;
+  if (session.user.role === "admin") return true;
+  return ownerUserId ? session.user.id === ownerUserId : false;
+}
+
+function setShareCacheHeaders(res: express.Response, shareAccess: string | undefined, isPublicRoute: boolean): void {
+  if (isPublicRoute || (shareAccess ?? "private") === "anyone_with_link") {
+    res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=86400");
+    return;
+  }
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("Vary", "Cookie");
+}
 
 function getPublicShareLocale(req: express.Request): PublicShareLocale {
   if (req.query.lang === "zh" || req.query.lang === "en") return req.query.lang;
@@ -41,11 +81,17 @@ function injectCanonicalLink(html: string, canonicalUrl: string): string {
   return `${link}\n${html}`;
 }
 
-async function sendPublishedProjectFile(res: express.Response, root: string, projectId: string, filename: string, canonicalUrl?: string): Promise<boolean> {
+async function sendPublishedProjectFile(req: express.Request, res: express.Response, root: string, projectId: string, filename: string, canonicalUrl?: string, requireShareAccess = true): Promise<boolean> {
   const project = await getProject(root, projectId);
   if (project.status !== "published") return false;
+  if (requireShareAccess && !await canViewPublishedProject(req, root, project.shareAccess)) {
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("Vary", "Cookie");
+    res.status(404).type("text/plain").send("Share not found.");
+    return true;
+  }
   const contentType = getProjectFileContentType(filename);
-  res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=86400");
+  setShareCacheHeaders(res, project.shareAccess, !requireShareAccess);
   if (canonicalUrl && contentType === "text/html") res.setHeader("Link", `<${canonicalUrl}>; rel="canonical"`);
   if (isProjectTextFilePath(filename)) {
     const content = await readProjectFile(root, project.id, filename, 1024 * 1024);
@@ -94,7 +140,7 @@ function renderDefaultLanding(): string {
 export function registerContentRoutes(app: express.Express, config: ServerConfig): void {
   const { publicBaseUrl, artifactRoot } = config;
 
-  async function serveHomepageFile(res: express.Response, relativePath?: string): Promise<boolean> {
+  async function serveHomepageFile(req: express.Request, res: express.Response, relativePath?: string): Promise<boolean> {
     const home = getHomepage();
     if (!home.homeProjectId || !home.homeOwnerUserId) return false;
     try {
@@ -103,14 +149,14 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
       if (project.status !== "published") return false;
       const filename = relativePath && relativePath !== "/" ? relativePath.replace(/^\/+/, "") : project.entryFile;
       res.setHeader("Content-Security-Policy", homepageCsp);
-      return await sendPublishedProjectFile(res, root, home.homeProjectId, filename, `${publicBaseUrl.replace(/\/$/, "")}/`);
+      return await sendPublishedProjectFile(req, res, root, home.homeProjectId, filename, `${publicBaseUrl.replace(/\/$/, "")}/`, false);
     } catch {
       return false;
     }
   }
 
-  app.get("/", asyncRoute(async (_req, res) => {
-    if (await serveHomepageFile(res)) return;
+  app.get("/", asyncRoute(async (req, res) => {
+    if (await serveHomepageFile(req, res)) return;
     res.type("html").send(renderDefaultLanding());
   }));
 
@@ -125,7 +171,7 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
   app.get(["/share", "/share/"], asyncRoute(async (req, res) => {
     try {
       const roots = await getAllProjectRoots();
-      const projects = (await Promise.all(roots.map((root) => listProjects(root, false).catch(() => [])))).flat().filter((project) => project.status === "published");
+      const projects = (await Promise.all(roots.map((root) => listProjects(root, false).catch(() => [])))).flat().filter((project) => project.status === "published" && project.shareAccess === "anyone_with_link");
       res.type("html").send(renderPublicSharePage({
         publicBaseUrl,
         projects,
@@ -159,7 +205,7 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
         res.status(404).type("text/plain").send("Public profile not found.");
         return;
       }
-      const projects = (await listProjects(user.projectRoot, false)).filter((project) => project.status === "published");
+      const projects = (await listProjects(user.projectRoot, false)).filter((project) => project.status === "published" && project.shareAccess === "anyone_with_link");
       res.type("html").send(renderPublicSharePage({
         publicBaseUrl,
         projects,
@@ -178,7 +224,7 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
         return;
       }
       const canonicalUrl = `${publicBaseUrl.replace(/\/$/, "")}/@${user.username}/share/${req.params.shareId}/${req.params.filename}`;
-      if (await sendPublishedProjectFile(res, user.projectRoot, req.params.shareId, req.params.filename, canonicalUrl)) return;
+      if (await sendPublishedProjectFile(req, res, user.projectRoot, req.params.shareId, req.params.filename, canonicalUrl)) return;
     } catch {
       // Fall through to 404.
     }
@@ -192,7 +238,7 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
           const owner = await getUserByProjectRoot(root);
           const canonicalBase = getPublicShareBasePathForUser(owner);
           const canonicalUrl = `${publicBaseUrl.replace(/\/$/, "")}${canonicalBase}/${req.params.shareId}/${req.params.filename}`;
-          if (await sendPublishedProjectFile(res, root, req.params.shareId, req.params.filename, canonicalUrl)) return;
+          if (await sendPublishedProjectFile(req, res, root, req.params.shareId, req.params.filename, canonicalUrl)) return;
         } catch {
           continue;
         }
@@ -203,6 +249,10 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
 
     const artifact = await readShareArtifact(req.params.shareId, req.params.filename);
     if (!artifact || artifact.record.filename !== req.params.filename) {
+      res.status(404).type("text/plain").send("Share not found.");
+      return;
+    }
+    if (!await canViewLegacyShare(req, artifact.record.shareAccess, artifact.record.ownerUserId)) {
       res.status(404).type("text/plain").send("Share not found.");
       return;
     }
@@ -254,7 +304,7 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
   // Fallback: serve root-level assets of the homepage project (e.g. /styles.css, /assets/app.js).
   // Registered last so it never shadows a named route; falls through to 404 when no homepage is set.
   app.get("/:asset(*)", asyncRoute(async (req, res) => {
-    if (await serveHomepageFile(res, req.params.asset)) return;
+    if (await serveHomepageFile(req, res, req.params.asset)) return;
     res.status(404).type("text/plain").send("Not found.");
   }));
 }

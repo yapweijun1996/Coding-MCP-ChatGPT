@@ -320,7 +320,8 @@ export const docsKnowledgeTools: ToolModule[] = [
         title: parsed.title,
         summary: parsed.noteType,
         filename: safeFilename,
-        html: `<html><body style=\"font-family:ui-sans-serif\">${body}</body></html>`
+        html: `<html><body style=\"font-family:ui-sans-serif\">${body}</body></html>`,
+        ownerUserId: ctx.userId
       });
       return {
         ok: true,

@@ -2834,7 +2834,8 @@ export const projectTools: ToolModule[] = [
           title: "Delivery Browser Inspection Report",
           summary: `Browser validation for ${project.id}.`,
           filename: `delivery-inspection-${project.id}.html`,
-          html: inspectionReport
+          html: inspectionReport,
+          ownerUserId: ctx.userId
         });
         inspectionReportUrl = makeShareUrl(ctx.publicBaseUrl, inspectionShare.id, inspectionShare.filename);
         const inspectionWithoutScreenshots = withoutScreenshots(browserResults);
@@ -2958,7 +2959,8 @@ export const projectTools: ToolModule[] = [
         title: "Project Screenshot Inspection",
         summary: `Screenshot inspection for ${parsed.projectId}.`,
         filename: `project-screenshots-${parsed.projectId}.html`,
-        html: reportHtml
+        html: reportHtml,
+        ownerUserId: ctx.userId
       });
       const reportUrl = makeShareUrl(ctx.publicBaseUrl, reportShare.id, reportShare.filename);
       const resultForLogs = withoutScreenshots(results);
