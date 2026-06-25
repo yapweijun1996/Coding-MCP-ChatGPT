@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getToolModule } from "../src/mcp/registry.js";
-import { createProject, getProjectStoredFilePath, readProjectFile, writeProjectFile } from "../src/projects/store.js";
+import { createProject, getProjectStoredFilePath, readProjectFile, writeProjectAsset, writeProjectFile } from "../src/projects/store.js";
 import { skillRegistry } from "../src/skills/registry.js";
 import type { ToolContext } from "../src/mcp/types.js";
 
@@ -220,9 +220,15 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     const pianoSfz = "<region> sample=piano-C4.wav key=60\n";
     const bassSfz = "<region> sample=bass-E2.wav key=40\n";
     const brushesSfz = "<region> sample=brush-snare.wav key=38\n";
-    await writeProjectFile(ctx.projectRoot, project.id, "instruments/piano/warm-pack.json", pianoSfz);
-    await writeProjectFile(ctx.projectRoot, project.id, "instruments/bass/upright-pack.json", bassSfz);
-    await writeProjectFile(ctx.projectRoot, project.id, "instruments/brushes/soft-pack.json", brushesSfz);
+    const pianoSf2 = Buffer.concat([Buffer.from("RIFF", "ascii"), Buffer.from([0x04, 0x00, 0x00, 0x00]), Buffer.from("sfbk", "ascii"), Buffer.from("pdta", "ascii")]);
+    await writeProjectAsset(ctx.projectRoot, project.id, "instruments/piano/warm-pack.sfz", Buffer.from(pianoSfz, "utf8"), "text/plain");
+    await writeProjectAsset(ctx.projectRoot, project.id, "instruments/bass/upright-pack.sfz", Buffer.from(bassSfz, "utf8"), "text/plain");
+    await writeProjectAsset(ctx.projectRoot, project.id, "instruments/brushes/soft-pack.sfz", Buffer.from(brushesSfz, "utf8"), "text/plain");
+    await writeProjectAsset(ctx.projectRoot, project.id, "instruments/piano/warm-pack.sf2", pianoSf2, "audio/soundfont");
+    await assert.rejects(
+      writeProjectAsset(ctx.projectRoot, project.id, "instruments/piano/broken.sf2", Buffer.from("not-a-soundfont", "utf8"), "audio/soundfont"),
+      /SoundFont asset has invalid magic bytes/
+    );
 
     const blockedPackResult = await packManager!.handler({
       projectId: project.id,
@@ -233,7 +239,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
           displayName: "Warm Piano MIT",
           instrumentRole: "realistic_piano",
           format: "sfz",
-          assetPaths: ["instruments/piano/warm-pack.json"],
+          assetPaths: ["instruments/piano/warm-pack.sfz"],
           version: "1.0.0",
           declaredSha256: createHash("sha256").update(pianoSfz).digest("hex"),
           licenseType: "mit",
@@ -247,7 +253,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
           displayName: "Upright Bass LGPL",
           instrumentRole: "upright_bass",
           format: "sfz",
-          assetPaths: ["instruments/bass/upright-pack.json"],
+          assetPaths: ["instruments/bass/upright-pack.sfz"],
           licenseType: "lgpl",
           source: "external library",
           commercialUseAllowed: true,
@@ -258,7 +264,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
           displayName: "Brushes NC",
           instrumentRole: "brush_drums",
           format: "wav_multisample",
-          assetPaths: ["instruments/brushes/soft-pack.json"],
+          assetPaths: ["instruments/brushes/soft-pack.sfz"],
           licenseType: "non_commercial",
           source: "external sample pack",
           commercialUseAllowed: false,
@@ -303,7 +309,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
           displayName: "Warm Piano MIT",
           instrumentRole: "realistic_piano",
           format: "sfz",
-          assetPaths: ["instruments/piano/warm-pack.json"],
+          assetPaths: ["instruments/piano/warm-pack.sfz"],
           licenseType: "mit",
           source: "project fixture",
           commercialUseAllowed: true,
@@ -314,8 +320,8 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
           packId: "upright_bass_apache",
           displayName: "Upright Bass Apache",
           instrumentRole: "upright_bass",
-          format: "sfz",
-          assetPaths: ["instruments/bass/upright-pack.json"],
+          format: "soundfont",
+          assetPaths: ["instruments/piano/warm-pack.sf2"],
           licenseType: "apache_2",
           source: "project fixture",
           commercialUseAllowed: true,
@@ -327,7 +333,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
           displayName: "Brushes CC0",
           instrumentRole: "brush_drums",
           format: "wav_multisample",
-          assetPaths: ["instruments/brushes/soft-pack.json"],
+          assetPaths: ["instruments/brushes/soft-pack.sfz"],
           licenseType: "cc0",
           source: "project fixture",
           commercialUseAllowed: true,
@@ -341,6 +347,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
       readyPackIds: string[];
       reviewRequiredPackIds: string[];
       blockedPackIds: string[];
+      packs: Array<{ packId: string; format: string; computedSha256?: string }>;
       instrumentMapCandidates: Record<string, { packId?: string; rendererUse: string }>;
       rendererIntegration: { rule: string; safeProceduralFallbackMap: Record<string, string> };
       licenseManifest: { commercialUseStatus: string; unsafeAssets: unknown[] };
@@ -348,6 +355,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     assert.deepEqual(safePackPayload.readyPackIds.sort(), ["brushes_cc0", "upright_bass_apache", "warm_piano_mit"].sort());
     assert.deepEqual(safePackPayload.reviewRequiredPackIds, []);
     assert.deepEqual(safePackPayload.blockedPackIds, []);
+    assert.ok(safePackPayload.packs.some((pack) => pack.packId === "upright_bass_apache" && pack.format === "soundfont" && pack.computedSha256 === createHash("sha256").update(pianoSf2).digest("hex")));
     assert.equal(safePackPayload.instrumentMapCandidates.realistic_piano.packId, "warm_piano_mit");
     assert.equal(safePackPayload.instrumentMapCandidates.upright_bass.packId, "upright_bass_apache");
     assert.equal(safePackPayload.instrumentMapCandidates.brush_drums.packId, "brushes_cc0");
@@ -787,6 +795,52 @@ test("export_music_project creates a music package with README, playlist, checks
     assert.match(html, /Download package/);
     const report = await readProjectFile(ctx.projectRoot, project.id, payload.packageReportPath);
     assert.match(report, /missing-drums/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("export_music_project fails when requested encoded formats are missing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-export-format-gate-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Format gate", createdByClientId: "producer" });
+    const compose = getToolModule("compose_music");
+    const render = getToolModule("render_midi_to_audio");
+    const exportProject = getToolModule("export_music_project");
+    assert.ok(compose);
+    assert.ok(render);
+    assert.ok(exportProject);
+
+    await compose!.handler({
+      projectId: project.id,
+      title: "Format Gate Cue",
+      style: "cafe_jazz",
+      durationSeconds: 12,
+      outputManifestPath: "music/format-gate.json",
+      outputMidiPath: "music/format-gate.mid"
+    }, ctx);
+    await render!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/format-gate.json",
+      outputAudioPath: "music/format-gate.wav",
+      sampleRate: 12000
+    }, ctx);
+
+    const result = await exportProject!.handler({
+      projectId: project.id,
+      projectManifestPath: "music/format-gate.json",
+      exports: ["single_track_wav", "single_track_mp3", "midi", "project_manifest"],
+      renderedAudioPaths: ["music/format-gate.wav"],
+      midiPaths: ["music/format-gate.mid"],
+      publish: false
+    }, ctx);
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some((error) => error.includes("MP3 export was requested")));
+    const payload = result.structuredContent as { missingFiles: string[]; licenseWarnings: string[]; unsupportedFormats: string[] };
+    assert.deepEqual(payload.missingFiles, []);
+    assert.deepEqual(payload.licenseWarnings, []);
+    assert.ok(payload.unsupportedFormats.some((warning) => warning.includes("MP3")));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

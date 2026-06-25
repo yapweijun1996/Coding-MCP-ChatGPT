@@ -273,7 +273,8 @@ const filesDirectoryName = "files";
 const workspaceDirectoryName = "workspace";
 const maxTaskHistoryItems = 100;
 const allowedTextExtensions = new Set([".html", ".css", ".js", ".mjs", ".json", ".webmanifest", ".txt", ".md", ".csv", ".svg"]);
-const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".mp4", ".webm", ".pptx", ".zip"]);
+const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".mp4", ".webm", ".pptx", ".zip"]);
+const mediaAssetExtensions = new Set([".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".mp4", ".webm"]);
 const projectContentTypes = new Map([
   [".html", "text/html"],
   [".css", "text/css"],
@@ -300,6 +301,8 @@ const projectContentTypes = new Map([
   [".ogg", "audio/ogg"],
   [".mid", "audio/midi"],
   [".midi", "audio/midi"],
+  [".sfz", "text/plain"],
+  [".sf2", "audio/soundfont"],
   [".mp4", "video/mp4"],
   [".webm", "video/webm"],
   [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
@@ -459,7 +462,7 @@ function validateProjectAssetBytes(relativePath: string, buffer: Buffer, content
     if (buffer.length > maxProjectArchiveAssetBytes) throw new Error("ZIP asset exceeds 50 MiB.");
   } else if (extension === ".pptx") {
     if (buffer.length > maxProjectPresentationAssetBytes) throw new Error("PPTX asset exceeds 25 MiB.");
-  } else if ([".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".mp4", ".webm"].includes(extension)) {
+  } else if (mediaAssetExtensions.has(extension)) {
     if (buffer.length > maxProjectMediaAssetBytes) throw new Error("Media/model asset exceeds 100 MiB.");
   } else if (buffer.length > maxProjectImageAssetBytes) {
     throw new Error("Image asset exceeds 10 MiB.");
@@ -471,6 +474,15 @@ function validateProjectAssetBytes(relativePath: string, buffer: Buffer, content
   if (extension === ".webp" && (!includesAscii(buffer.subarray(0, 4), "RIFF") || !includesAscii(buffer.subarray(8, 12), "WEBP"))) throw new Error("WebP asset has invalid magic bytes.");
   if (extension === ".glb" && !includesAscii(buffer.subarray(0, 4), "glTF")) throw new Error("GLB asset has invalid magic bytes.");
   if ((extension === ".mid" || extension === ".midi") && !includesAscii(buffer.subarray(0, 4), "MThd")) throw new Error("MIDI asset has invalid magic bytes.");
+  if (extension === ".sf2" && (!includesAscii(buffer.subarray(0, 4), "RIFF") || !includesAscii(buffer.subarray(8, 12), "sfbk"))) throw new Error("SoundFont asset has invalid magic bytes.");
+  if (extension === ".sfz") {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    try {
+      decoder.decode(buffer);
+    } catch {
+      throw new Error("SFZ assets must be valid UTF-8.");
+    }
+  }
   if (extension === ".gltf") {
     const decoder = new TextDecoder("utf-8", { fatal: true });
     const parsed = JSON.parse(decoder.decode(buffer)) as { asset?: { version?: unknown } };
@@ -481,6 +493,14 @@ function validateProjectAssetBytes(relativePath: string, buffer: Buffer, content
   }
   if (extension === ".zip" && !hasBytes(buffer, [0x50, 0x4b])) throw new Error("ZIP asset has invalid magic bytes.");
   if (extension === ".svg") validateSvgAsset(buffer);
+}
+
+function maxProjectAssetBytesForExtension(extension: string): number {
+  if (extension === ".zip") return maxProjectArchiveAssetBytes;
+  if (extension === ".pptx") return maxProjectPresentationAssetBytes;
+  if (mediaAssetExtensions.has(extension)) return maxProjectMediaAssetBytes;
+  if (allowedAssetExtensions.has(extension)) return maxProjectImageAssetBytes;
+  return maxProjectFileBytes;
 }
 
 function normalizeProjectMetadata(metadata: ProjectMetadata): ProjectMetadata {
@@ -1318,7 +1338,7 @@ export async function importProjectAssetFromLocalFile(
 ): Promise<ProjectFileInfo> {
   const sourceStat = await stat(sourcePath);
   if (!sourceStat.isFile()) throw new Error("sourcePath must point to a file.");
-  const maxBytes = path.extname(relativePath).toLowerCase() === ".pptx" ? maxProjectPresentationAssetBytes : maxProjectImageAssetBytes;
+  const maxBytes = maxProjectAssetBytesForExtension(path.extname(relativePath).toLowerCase());
   if (sourceStat.size > maxBytes) throw new Error("Local asset exceeds the size limit.");
   const buffer = await readFile(sourcePath);
   return writeProjectAsset(projectRoot, projectId, relativePath, buffer, contentType);
@@ -1403,7 +1423,7 @@ export async function validateProject(projectRoot: string, projectId: string, en
       errors.push(`Invalid file path ${file.path}: ${error instanceof Error ? error.message : "invalid path"}`);
     }
     const extension = path.extname(file.path).toLowerCase();
-    const maxBytes = extension === ".zip" ? maxProjectArchiveAssetBytes : extension === ".pptx" ? maxProjectPresentationAssetBytes : allowedAssetExtensions.has(extension) ? maxProjectImageAssetBytes : maxProjectFileBytes;
+    const maxBytes = maxProjectAssetBytesForExtension(extension);
     if (file.size > maxBytes) {
       errors.push(`File exceeds max size: ${file.path}`);
     }
