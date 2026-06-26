@@ -1714,6 +1714,7 @@ export async function publishProjectAndReport(projectRoot: string, projectId: st
   ok: boolean;
   projectId: string;
   publishedUrl?: string;
+  shareAccess?: ProjectShareAccess;
   entryFile: string;
   files: ProjectFileInfo[];
   validation: ProjectValidationResult;
@@ -1752,10 +1753,11 @@ export async function publishProjectAndReport(projectRoot: string, projectId: st
     ok: true,
     projectId,
     publishedUrl: published.publishedUrl,
+    shareAccess: published.shareAccess,
     entryFile: published.entryFile,
     files: manifest.files,
     validation,
-    summary: `Published project ${projectId} at ${published.publishedUrl}.`,
+    summary: `Published project ${projectId} as ${published.shareAccess} at ${published.publishedUrl}.`,
     nextActions: ["Return the publishedUrl to the user."]
   };
 }

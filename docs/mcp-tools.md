@@ -88,6 +88,8 @@ ChatGPT and other coding agents should use the persistent Project workflow for d
 
 `deliver_static_project` is the preferred delivery tool because it writes all files, validates local references, temporarily publishes, runs browser validation through Playwright, blocks on serious runtime/layout failures, and returns a structured report with the public `publishedUrl`.
 
+Agent-facing delivery tools publish final handoff links with `shareAccess: "anyone_with_link"` by default so users and sandboxed preview sessions can load HTML plus referenced assets such as images, audio, and video. Use `shareAccess: "private"` only for internal previews that should require the owner/admin session cookie.
+
 ### Project workflow recipes
 
 Use these exact argument names when calling project tools. `projectId` is the persistent Project identifier used by follow-up tools. Many tool results also set `jobId` to the same value for compatibility with generic job UIs, but follow-up project calls should pass `projectId`.
@@ -131,7 +133,9 @@ Capture `structuredContent.projectId` or `jobId`, then use that value as `projec
 { "tool": "publish_and_report", "arguments": { "projectId": "proj_123", "entryFile": "index.html" } }
 ```
 
-Use `publish_project` only when the project has already passed validation and a browser report is not needed. Use `publish_and_report` when handing off a fixed project because it publishes and returns a structured delivery report. Use `inspect_webpage`, `audit_accessibility`, `auto_fix_accessibility`, or `get_project_activity` after a failed validation or visual/runtime concern.
+Use `publish_project` only when the project has already passed validation and a browser report is not needed. It defaults to `shareAccess: "anyone_with_link"`; pass `shareAccess: "private"` only for owner-only internal previews. Use `publish_and_report` when handing off a fixed project because it publishes and returns a structured delivery report including `shareAccess`. Use `inspect_webpage`, `audit_accessibility`, `auto_fix_accessibility`, or `get_project_activity` after a failed validation or visual/runtime concern.
+
+If published share pages show `Access to XMLHttpRequest at '.../cdn-cgi/rum?' from origin 'null' has been blocked by CORS policy`, treat it as Cloudflare Web Analytics/RUM injection in a sandboxed/null-origin preview context. Disable RUM injection for `/share/*` at the Cloudflare layer, or avoid injecting analytics into sandboxed project content.
 
 Safe recovery from blocked writes:
 

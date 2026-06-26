@@ -480,7 +480,7 @@ async function copyPublishedDist(ctx: ToolContext, projectId: string, distRoot: 
   }
   const validation = await validateProject(ctx.projectRoot, projectId, entryFile);
   if (!validation.ok) throw new Error(`Published dist validation failed: ${validation.errors.join("; ")}`);
-  const published = await publishProject(ctx.projectRoot, projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
+  const published = await publishProject(ctx.projectRoot, projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath, shareAccess: "anyone_with_link" });
   const report = { projectId, publishedUrl: published.publishedUrl, entryFile, files: written, validation };
   await appendProjectTaskHistory(ctx.projectRoot, projectId, {
     toolName: "publish_project_workspace",

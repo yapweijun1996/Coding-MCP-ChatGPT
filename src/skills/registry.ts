@@ -618,6 +618,7 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
 
 - Prefer \`deliver_static_project\` for complete static HTML/CSS/JS deliverables.
 - For first-pass static pages, call \`deliver_static_project\` with \`title\`, \`entryFile\`, and a \`files\` array of \`{ path, content }\`; return the resulting \`shareUrl\` or \`publishedUrl\`.
+- Final handoff publish tools default to \`shareAccess: "anyone_with_link"\` so users and sandboxed previews can load referenced assets. Use \`shareAccess: "private"\` only for internal previews.
 - Treat \`projectId\` as the persistent Project identifier for follow-up calls. Tool results may also set \`jobId\` to the same value for generic job UIs, but follow-up Project tools should receive \`projectId\`.
 - For incremental repairs, use \`create_project\` or inspect an existing project, then \`write_project_file\`, \`validate_project\`, and \`publish_and_report\`. Use \`publish_project\` only when validation already passed and a browser/report handoff is not needed.
 - When blocked by validation or a failed write, call \`get_project_activity\`, \`get_project_manifest\`, and \`read_project_file\` before overwriting files; use \`create_project_backup\` before broad rewrites and \`restore_latest_project_backup\` if the repair regresses.

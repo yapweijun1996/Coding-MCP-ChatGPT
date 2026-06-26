@@ -41,15 +41,15 @@ This MCP stores ChatGPT-created coding projects on disk under `.projects/`.
 - `read_project_file`: read a text file inside the project.
 - `delete_project_file`: delete a project file with `confirm=true`.
 - `validate_project`: validate entry file, safe paths, file sizes, basic HTML structure, and public URL readiness.
-- `publish_project`: publish the project entry file.
-- `publish_and_report`: validate, publish, and return a stable delivery report with `publishedUrl`.
+- `publish_project`: publish the project entry file. MCP tool calls default to public `anyone_with_link` access for final handoff; pass `shareAccess: "private"` for internal previews.
+- `publish_and_report`: validate, publish, and return a stable delivery report with `publishedUrl` and `shareAccess`.
 - `delete_project`: soft-delete a project with `confirm=true`; disabled by default in Admin tool access.
 - `create_app_project`: create a Vite app source workspace for React, Vue, or vanilla demos.
 - `write_app_project_file` / `read_app_project_file`: edit and inspect source files under the project `workspace/`.
 - `install_project_dependencies`: run controlled `npm install` in the app workspace.
 - `run_project_dev` / `stop_project_dev`: start or stop a local Vite dev preview.
 - `run_project_build`: run controlled `npm run build`.
-- `publish_project_dist`: publish built `dist/` output to the stable `/share/:projectId/index.html` URL. New published projects default to private link access.
+- `publish_project_dist`: publish built `dist/` output to the stable `/share/:projectId/index.html` URL. MCP delivery tools publish final handoff links as `anyone_with_link` so referenced assets are anonymously loadable.
 - `get_app_project_report`: return manifest plus app dev server state.
 - `bind_project_workspace`: bind an existing `projectId` to a real local Git repository under `WORKSPACE_ROOT`.
 - `list_project_files`: list files in the bound workspace, excluding heavy generated folders by default.
@@ -61,7 +61,7 @@ This MCP stores ChatGPT-created coding projects on disk under `.projects/`.
 - `run_shell_command`: run a bounded shell command in the bound workspace with a scrubbed environment; disabled by default.
 - `inspect_project_workspace`: start the bound workspace dev server and inspect desktop/tablet/mobile screenshots, layout, console errors, and optional accessibility.
 - `record_project_workspace_video`: start the bound workspace dev server and record real browser output to WebM, or MP4 when `ffmpeg` is installed; failed MP4 conversion still returns the WebM artifact.
-- `publish_project_workspace`: copy a built output directory such as `dist/` into the project files and publish it to `/share/:projectId/index.html`. Anonymous access requires setting project sharing to `anyone_with_link`.
+- `publish_project_workspace`: copy a built output directory such as `dist/` into the project files and publish it to `/share/:projectId/index.html` with `anyone_with_link` access for user handoff.
 - `record_project_task`: append queued/in-progress/completed/blocked task state to project history.
 
 Recommended ChatGPT workflow:

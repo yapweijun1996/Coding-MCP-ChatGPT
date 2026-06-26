@@ -126,15 +126,25 @@ const deleteProjectFileInputSchema = z.object({
   confirm: z.boolean().refine((value) => value === true, { message: "Deletion requires confirm=true." })
 });
 
-const publishProjectInputSchema = z.object({
-  projectId: z.string().min(8).max(80),
-  entryFile: z.string().min(1).max(240).optional()
-});
-
 const validateProjectInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   entryFile: z.string().min(1).max(240).optional(),
   profile: z.literal("static_html").optional().default("static_html")
+});
+
+const projectShareAccessSchema = z.enum(["private", "anyone_with_link"]);
+
+const publishProjectToolInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  entryFile: z.string().min(1).max(240).optional(),
+  shareAccess: projectShareAccessSchema.optional().default("anyone_with_link")
+});
+
+const publishAndReportInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  entryFile: z.string().min(1).max(240).optional(),
+  profile: z.literal("static_html").optional().default("static_html"),
+  shareAccess: projectShareAccessSchema.optional().default("anyone_with_link")
 });
 
 const auditProjectPwaInputSchema = z.object({
@@ -332,6 +342,7 @@ const deliverStaticProjectInputSchema = z.object({
   entryFile: z.string().min(1).max(240).optional().default("index.html"),
   profile: z.literal("static_html").optional().default("static_html"),
   browserValidation: z.boolean().optional().default(true),
+  shareAccess: projectShareAccessSchema.optional().default("anyone_with_link"),
   files: z.array(z.object({
     path: z.string().min(1).max(240),
     content: z.string().max(1024 * 1024)
@@ -829,6 +840,14 @@ function bufferFromDataUrl(dataUrl: string): { contentType: string; buffer: Buff
   const match = /^data:([^;,]+);base64,(.+)$/i.exec(dataUrl);
   if (!match) throw new Error("Screenshot data URL is not valid base64.");
   return { contentType: match[1], buffer: Buffer.from(match[2], "base64") };
+}
+
+function agentPublishOptions(ctx: Parameters<ToolModule["handler"]>[1], shareAccess: z.infer<typeof projectShareAccessSchema> = "anyone_with_link") {
+  return {
+    privateBaseUrl: ctx.publicBaseUrl,
+    shareBasePath: ctx.publicShareBasePath,
+    shareAccess
+  };
 }
 
 type PwaAuditSeverity = "pass" | "warn" | "error";
@@ -2753,6 +2772,7 @@ export const projectTools: ToolModule[] = [
           entryFile: { type: "string", description: "Entry file, default index.html." },
           profile: { type: "string", enum: ["static_html"], description: "Validation profile. Only static_html is supported in v1." },
           browserValidation: { type: "boolean", description: "Run browser validation after publish. Defaults to true." },
+          shareAccess: { type: "string", enum: ["private", "anyone_with_link"], description: "Link access for the published project. Defaults to anyone_with_link for user handoff; use private for internal preview only." },
           files: {
             type: "array",
             items: {
@@ -2813,7 +2833,7 @@ export const projectTools: ToolModule[] = [
         };
       }
 
-      const published = await publishProject(ctx.projectRoot, project.id, ctx.contentBaseUrl ?? ctx.publicBaseUrl, validation.entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
+      const published = await publishProject(ctx.projectRoot, project.id, ctx.contentBaseUrl ?? ctx.publicBaseUrl, validation.entryFile, agentPublishOptions(ctx, parsed.shareAccess));
       let browserInspection: Record<string, unknown> | undefined;
       let inspectionReportUrl: string | undefined;
       if (parsed.browserValidation) {
@@ -2876,6 +2896,7 @@ export const projectTools: ToolModule[] = [
         ok: true,
         projectId: project.id,
         publishedUrl: published.publishedUrl,
+        shareAccess: published.shareAccess,
         entryFile: published.entryFile,
         files,
         validation,
@@ -2926,7 +2947,7 @@ export const projectTools: ToolModule[] = [
     schema: screenshotProjectInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof screenshotProjectInputSchema>;
-      const published = await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
+      const published = await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.entryFile, agentPublishOptions(ctx));
       const results = await inspectWebpageUrl(published.publishedUrl!, {
         viewports: parsed.viewports,
         waitUntil: "networkidle",
@@ -3062,7 +3083,7 @@ export const projectTools: ToolModule[] = [
         }
 
         if (parsed.browserValidation) {
-          const published = await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, validation.entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
+          const published = await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, validation.entryFile, agentPublishOptions(ctx));
           attempt.publishedUrl = published.publishedUrl;
           const browserResults = await inspectWebpageUrl(published.publishedUrl!, {
             viewports: ["desktop", "tablet", "mobile"],
@@ -3290,36 +3311,56 @@ export const projectTools: ToolModule[] = [
   {
     definition: {
       name: "publish_project",
-      description: "Publish a project entry file and return a public share URL.",
-      inputSchema: { type: "object", properties: { projectId: { type: "string" }, entryFile: { type: "string", description: "Entry file to publish. Defaults to project entryFile." } }, required: ["projectId"], additionalProperties: false }
-    },
-    enabledByDefault: true,
-    schema: publishProjectInputSchema,
-    handler: async (input, ctx) => {
-      const parsed = input as z.infer<typeof publishProjectInputSchema>;
-      const project = await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
-      return { ok: true, summary: `Published project ${parsed.projectId}.`, jobId: parsed.projectId, previewUrl: project.publishedUrl, shareUrl: project.publishedUrl, artifacts: [project.entryFile], logs: [JSON.stringify(project, null, 2)], errors: [] };
-    }
-  },
-  {
-    definition: {
-      name: "publish_and_report",
-      description: "Recommended ChatGPT project delivery tool. Validate the project, publish it if valid, and return a stable public URL plus structured delivery report.",
+      description: "Publish a project entry file and return a share URL. Defaults to anyone-with-link public access for user handoff; pass shareAccess=private for internal preview only.",
       inputSchema: {
         type: "object",
         properties: {
           projectId: { type: "string" },
-          entryFile: { type: "string", description: "Entry file to publish. Defaults to project entryFile." }
+          entryFile: { type: "string", description: "Entry file to publish. Defaults to project entryFile." },
+          shareAccess: { type: "string", enum: ["private", "anyone_with_link"], description: "Link access. Defaults to anyone_with_link." }
         },
         required: ["projectId"],
         additionalProperties: false
       }
     },
     enabledByDefault: true,
-    schema: validateProjectInputSchema,
+    schema: publishProjectToolInputSchema,
     handler: async (input, ctx) => {
-      const parsed = input as z.infer<typeof validateProjectInputSchema>;
-      const report = await publishProjectAndReport(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
+      const parsed = input as z.infer<typeof publishProjectToolInputSchema>;
+      const project = await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.entryFile, agentPublishOptions(ctx, parsed.shareAccess));
+      return {
+        ok: true,
+        summary: `Published project ${parsed.projectId} as ${project.shareAccess} at ${project.publishedUrl}.`,
+        jobId: parsed.projectId,
+        previewUrl: project.publishedUrl,
+        shareUrl: project.publishedUrl,
+        artifacts: [project.entryFile],
+        structuredContent: { projectId: project.id, entryFile: project.entryFile, publishedUrl: project.publishedUrl, shareAccess: project.shareAccess },
+        logs: [JSON.stringify(project, null, 2)],
+        errors: []
+      };
+    }
+  },
+  {
+    definition: {
+      name: "publish_and_report",
+      description: "Recommended ChatGPT project delivery tool. Validate the project, publish it if valid, and return a stable share URL plus structured delivery report. Defaults to anyone-with-link public access for user handoff.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          entryFile: { type: "string", description: "Entry file to publish. Defaults to project entryFile." },
+          shareAccess: { type: "string", enum: ["private", "anyone_with_link"], description: "Link access. Defaults to anyone_with_link." }
+        },
+        required: ["projectId"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: publishAndReportInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = input as z.infer<typeof publishAndReportInputSchema>;
+      const report = await publishProjectAndReport(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.entryFile, agentPublishOptions(ctx, parsed.shareAccess));
       return {
         ok: report.ok,
         summary: report.summary,

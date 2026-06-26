@@ -4,7 +4,9 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createProject, publishProject, writeProjectFile } from "../src/projects/store.js";
+import { createProject, publishProject, writeProjectAsset, writeProjectFile } from "../src/projects/store.js";
+import { callTool } from "../src/mcp/router.js";
+import type { ToolContext } from "../src/mcp/types.js";
 import { createShareArtifact } from "../src/share/store.js";
 import { clearHomepage, getHomepage } from "../src/site/store.js";
 import { siteTools } from "../src/mcp/tools/site.js";
@@ -29,6 +31,15 @@ process.env.OAUTH_STATE_PATH = path.join(root, "state", "oauth-state.json");
 process.env.ADMIN_UI_DIST = path.join(root, "missing-admin-dist");
 
 const { app } = await import("../src/server.js");
+
+const tinyWav = Buffer.concat([
+  Buffer.from("RIFF"),
+  Buffer.from([36, 0, 0, 0]),
+  Buffer.from("WAVEfmt "),
+  Buffer.from([16, 0, 0, 0, 1, 0, 1, 0, 0x44, 0xac, 0, 0, 0x88, 0x58, 1, 0, 2, 0, 16, 0]),
+  Buffer.from("data"),
+  Buffer.from([0, 0, 0, 0])
+]);
 
 async function withServer<T>(fn: (baseUrl: string) => Promise<T>): Promise<T> {
   const server = createServer(app);
@@ -73,6 +84,21 @@ async function login(baseUrl: string): Promise<{ cookie: string; csrfToken: stri
   const body = await response.json() as { csrfToken?: string };
   assert.ok(body.csrfToken);
   return { cookie, csrfToken: body.csrfToken };
+}
+
+function mcpContext(projectRoot: string): ToolContext {
+  return {
+    publicBaseUrl: "https://example.test",
+    contentBaseUrl: "https://content.example.test",
+    workspaceRoot: process.env.WORKSPACE_ROOT!,
+    commandTimeoutMs: 1000,
+    shareRoot: process.env.SHARE_ROOT!,
+    artifactRoot: process.env.ARTIFACT_ROOT!,
+    feedbackRoot: path.join(root, "feedback"),
+    projectRoot,
+    clientId: "admin-api-test",
+    userId: "admin-api-test-user"
+  };
 }
 
 async function loginResponse(baseUrl: string, headers: Record<string, string> = {}, password = "test-admin-password", email = "admin@example.test"): Promise<Response> {
@@ -257,6 +283,62 @@ test("profile username controls public username share URLs", async () => {
 
     const wrongUserShare = await fetch(`${baseUrl}/@other_user/share/${project.id}/index.html`);
     assert.equal(wrongUserShare.status, 404);
+  });
+});
+
+test("MCP publish_project defaults to public access and serves binary project assets", async () => {
+  await withServer(async (baseUrl) => {
+    const { cookie } = await login(baseUrl);
+    const session = await fetch(`${baseUrl}/admin/api/session`, { headers: { Cookie: cookie } });
+    const sessionBody = await session.json() as { user?: { projectRoot?: string } };
+    const userProjectRoot = sessionBody.user?.projectRoot;
+    assert.ok(userProjectRoot);
+    const ctx = mcpContext(userProjectRoot);
+
+    const publicProject = await createProject(userProjectRoot, {
+      title: "Public WAV Project",
+      createdByClientId: "test-client"
+    });
+    await writeProjectFile(userProjectRoot, publicProject.id, "index.html", "<!doctype html><html><head><title>WAV</title></head><body><audio src=\"music/test.wav\"></audio></body></html>");
+    await writeProjectAsset(userProjectRoot, publicProject.id, "music/test.wav", tinyWav, "audio/wav");
+
+    const published = await callTool("publish_project", { projectId: publicProject.id, entryFile: "index.html" }, ctx);
+    assert.equal(published.ok, true);
+    assert.equal((published.structuredContent as { shareAccess?: string }).shareAccess, "anyone_with_link");
+    assert.equal(published.shareUrl, `https://content.example.test/share/${publicProject.id}/index.html`);
+
+    const publicHtml = await fetch(`${baseUrl}/share/${publicProject.id}/index.html`);
+    assert.equal(publicHtml.status, 200);
+    const publicWav = await fetch(`${baseUrl}/share/${publicProject.id}/music/test.wav`);
+    assert.equal(publicWav.status, 200);
+    assert.match(publicWav.headers.get("content-type") ?? "", /^audio\/wav\b/);
+    assert.equal(Buffer.from(await publicWav.arrayBuffer()).subarray(0, 4).toString("ascii"), "RIFF");
+
+    const reportProject = await createProject(userProjectRoot, {
+      title: "Report Project",
+      createdByClientId: "test-client"
+    });
+    await writeProjectFile(userProjectRoot, reportProject.id, "index.html", "<!doctype html><html><head><title>Report</title></head><body>Report</body></html>");
+    const report = await callTool("publish_and_report", { projectId: reportProject.id, entryFile: "index.html" }, ctx);
+    assert.equal(report.ok, true);
+    assert.equal((report.structuredContent as { shareAccess?: string }).shareAccess, "anyone_with_link");
+    assert.match(report.summary, /anyone_with_link/);
+
+    const privateProject = await createProject(userProjectRoot, {
+      title: "Private WAV Project",
+      createdByClientId: "test-client"
+    });
+    await writeProjectFile(userProjectRoot, privateProject.id, "index.html", "<!doctype html><html><head><title>Private WAV</title></head><body><audio src=\"music/private.wav\"></audio></body></html>");
+    await writeProjectAsset(userProjectRoot, privateProject.id, "music/private.wav", tinyWav, "audio/wav");
+    const privatePublished = await callTool("publish_project", { projectId: privateProject.id, entryFile: "index.html", shareAccess: "private" }, ctx);
+    assert.equal(privatePublished.ok, true);
+    assert.equal((privatePublished.structuredContent as { shareAccess?: string }).shareAccess, "private");
+
+    const anonymousPrivateWav = await fetch(`${baseUrl}/share/${privateProject.id}/music/private.wav`);
+    assert.equal(anonymousPrivateWav.status, 404);
+    const ownerPrivateWav = await fetch(`${baseUrl}/share/${privateProject.id}/music/private.wav`, { headers: { Cookie: cookie } });
+    assert.equal(ownerPrivateWav.status, 200);
+    assert.match(ownerPrivateWav.headers.get("content-type") ?? "", /^audio\/wav\b/);
   });
 });
 
