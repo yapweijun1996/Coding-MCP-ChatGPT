@@ -13,7 +13,7 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit && tsc -p admin-ui/tsconfig.json --noEmit",
     "lint": "eslint \"src/**/*.ts\" \"tests/**/*.ts\"",
-    "test": "npm run typecheck && tsx --test --test-timeout=120000 tests/*.test.ts",
+    "test": "npm run typecheck && tsx --test --test-timeout=120000 --test-concurrency=1 tests/*.test.ts",
     "check:mcp": "npm run build && node scripts/check-mcp-registry.mjs",
     "check:tools": "npm run build:server && node scripts/check-mcp-registry.mjs",
     "docker:build": "docker compose build",
