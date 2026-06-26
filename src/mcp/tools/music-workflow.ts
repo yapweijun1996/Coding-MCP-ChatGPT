@@ -702,13 +702,22 @@ async function importMusicXmlScore(ctx: ToolContext, input: z.infer<typeof impor
 }
 
 function keyRoot(key: string) {
-  return noteBase[key.replace(/m$/, "")] ?? 60;
+  const root = normalizeKeyRoot(key);
+  return noteBase[root] ?? 60;
 }
 
 function progressionFor(style: string, key: string) {
   const root = keyRoot(key);
-  const names = style === "bossa_nova" ? ["Dm9", "G13", "Cmaj7", "A7"] : style === "lo_fi" ? ["Cmaj7", "Am7", "Dm7", "G7"] : style === "cinematic_background" ? ["Am", "Fmaj7", "C", "G"] : ["Dm9", "G13", "Cmaj7", "Cmaj7"];
-  const roots = [root + 2, root + 7, root, root + 9];
+  const names = style === "bossa_nova"
+    ? ["Dm9", "G13", "Cmaj7", "A7"]
+    : style === "lo_fi"
+      ? ["Cmaj7", "Am7", "Dm7", "G7"]
+      : style === "smooth_piano"
+        ? ["Am7", "Fmaj7", "Cmaj7", "G13", "Dm9", "Am7", "Fmaj7", "E7"]
+        : style === "cinematic_background"
+          ? ["Am", "Fmaj7", "C", "G"]
+          : ["Dm9", "G13", "Cmaj7", "Am7", "Dm9", "G13sus", "Cmaj7", "C6/9"];
+  const roots = names.map((name) => chordRootMidi(transposeChordSymbol(name, normalizeKeyRoot(key)), key));
   return { names, roots };
 }
 
@@ -781,24 +790,67 @@ function buildComposition(input: z.infer<typeof composeMusicInputSchema>): Compo
     : [{ name: "intro", bars: 4, intensity: 0.25 }, { name: "A", bars: Math.max(4, bars - 8), intensity: 0.55 }, { name: "outro", bars: 4, intensity: 0.25 }];
   const progression = progressionFor(input.style, input.key);
   const tracks: Composition["tracks"] = {};
+  const maxBeats = input.durationSeconds / (60 / input.tempo);
   const add = (track: string, midi: number, startBeat: number, durationBeats: number, velocity: number) => {
+    if (startBeat < 0 || startBeat >= maxBeats) return;
+    const boundedDuration = Math.max(0.05, Math.min(durationBeats, maxBeats - startBeat));
     tracks[track] ??= [];
-    tracks[track].push({ track, midi, startBeat: Number(startBeat.toFixed(3)), durationBeats: Number(durationBeats.toFixed(3)), velocity });
+    tracks[track].push({
+      track,
+      midi: Math.max(0, Math.min(127, midi)),
+      startBeat: Number(startBeat.toFixed(3)),
+      durationBeats: Number(boundedDuration.toFixed(3)),
+      velocity: Math.max(1, Math.min(127, velocity))
+    });
   };
+  const hasPiano = input.instruments.includes("piano") || input.instruments.includes("electric_piano");
+  const hasBass = input.instruments.includes("upright_bass") || input.instruments.includes("acoustic_bass");
+  const hasDrums = input.instruments.includes("drums") || input.instruments.includes("brushes");
+  const hasPad = input.instruments.includes("pads") || input.instruments.includes("strings");
+  const hasLead = input.instruments.includes("violin") || input.instruments.includes("sax_like_lead");
+  const pianoPattern = input.style === "smooth_piano" ? [0, 2, 3, 4, 3, 2, 1, 2] : [0, 1, 2, 3, 2, 1, 3, 4];
+  const melodyDegrees = input.style === "smooth_piano" ? [12, 14, 15, 19, 17, 15, 14, 12, 10, 12, 15, 14] : [12, 14, 16, 19, 17, 16, 14, 12, 11, 12, 16, 14];
   for (let bar = 0; bar < bars; bar += 1) {
     const chordIndex = bar % progression.names.length;
     const start = bar * 4;
-    if (input.instruments.includes("piano") || input.instruments.includes("electric_piano")) {
-      for (const midi of chordNotes(progression.roots[chordIndex], progression.names[chordIndex])) add("piano", midi, start, input.loopable ? 3.8 : 3.6, 54);
+    const sectionPosition = bars <= 1 ? 0 : bar / (bars - 1);
+    const phraseLift = Math.sin(Math.PI * sectionPosition);
+    const dynamic = Math.round(44 + phraseLift * 22 + (bar % 4) * 2);
+    const chord = chordNotes(progression.roots[chordIndex], progression.names[chordIndex])
+      .map((midi) => midi < 48 ? midi + 12 : midi)
+      .filter((midi) => midi >= 40 && midi <= 88);
+    if (hasPiano) {
+      const low = chord[0] ?? progression.roots[chordIndex];
+      const voicing = [low - 12, ...chord.slice(0, 4), (chord[2] ?? low) + 12].filter((midi) => midi >= 36 && midi <= 88);
+      const step = input.style === "smooth_piano" || input.complexity !== "simple" ? 0.5 : 1;
+      const notesThisBar = step === 0.5 ? pianoPattern : [0, 2, 3, 1];
+      notesThisBar.forEach((index, offset) => {
+        add("piano", voicing[index % voicing.length], start + offset * step, step * 0.9, dynamic - 8 + (offset % 4) * 2);
+      });
+      if (bar % 4 === 0 || input.complexity === "rich") {
+        for (const midi of chord.slice(1, 4)) add("piano", midi + 12, start, input.loopable ? 3.7 : 3.4, Math.max(34, dynamic - 18));
+      }
+      if (bar > 0 && (input.style === "smooth_piano" || bar % 2 === 1)) {
+        const degree = melodyDegrees[bar % melodyDegrees.length];
+        const root = progression.roots[chordIndex];
+        add("piano", root + degree, start + 1, 1.35, dynamic + 8);
+        add("piano", root + melodyDegrees[(bar + 2) % melodyDegrees.length], start + 2.5, 0.85, dynamic + 4);
+        if (input.complexity === "rich" || input.style === "smooth_piano") add("piano", root + melodyDegrees[(bar + 4) % melodyDegrees.length], start + 3.25, 0.55, dynamic);
+      }
     }
-    if (input.instruments.includes("upright_bass") || input.instruments.includes("acoustic_bass")) add("bass", progression.roots[chordIndex] - 24, start, 1.8, 68);
-    if (input.instruments.includes("violin") || input.instruments.includes("sax_like_lead")) add(input.instruments.includes("violin") ? "violin" : "lead", progression.roots[chordIndex] + 12 + (bar % 2 ? 2 : 7), start + 1, 1.75, 58);
-    if (input.instruments.includes("drums") || input.instruments.includes("brushes")) {
-      add("drums", 42, start, 0.25, 42);
-      add("drums", 38, start + 2, 0.25, 38);
-      add("drums", 42, start + 2.67, 0.25, 32);
+    if (hasBass) {
+      const root = progression.roots[chordIndex] - 24;
+      add("bass", root, start, 1.45, 58 + Math.round(phraseLift * 10));
+      add("bass", root + (bar % 2 ? 7 : 12), start + 2, 1.2, 50 + Math.round(phraseLift * 8));
     }
-    if (input.instruments.includes("pads") || input.instruments.includes("strings")) add("pad", progression.roots[chordIndex], start, 3.9, 35);
+    if (hasLead) add(input.instruments.includes("violin") ? "violin" : "lead", progression.roots[chordIndex] + melodyDegrees[(bar + 1) % melodyDegrees.length], start + 1, 1.75, 48 + Math.round(phraseLift * 12));
+    if (hasDrums) {
+      add("drums", 42, start, 0.18, 32 + Math.round(phraseLift * 8));
+      add("drums", 38, start + 2, 0.2, 34 + Math.round(phraseLift * 10));
+      add("drums", 42, start + 2.67, 0.16, 25 + Math.round(phraseLift * 6));
+      if (input.complexity === "rich" && bar % 4 === 3) add("drums", 38, start + 3.5, 0.18, 38);
+    }
+    if (hasPad) add("pad", progression.roots[chordIndex], start, 3.85, 28 + Math.round(phraseLift * 10));
   }
   return {
     title: input.title,
@@ -2411,7 +2463,7 @@ function buildMidiComposition(input: z.infer<typeof composeEditMidiInputSchema>)
   for (const track of requestedTracks) composition.tracks[track] ??= [];
   const warnings: string[] = [];
   const allNotes = () => Object.values(composition.tracks).flat();
-  if (input.constraints.backgroundFriendly && allNotes().length / Math.max(1, input.durationSec / 60) > 180) warnings.push("MIDI density may be too busy for background use.");
+  if (input.constraints.backgroundFriendly && allNotes().length / Math.max(1, input.durationSec / 60) > 420) warnings.push("MIDI density may be too busy for background use.");
   if (input.constraints.avoidHarshRegister && allNotes().some((note) => note.midi > 96)) warnings.push("Some notes are in a harsh high register.");
   if (input.constraints.stableDynamics) {
     for (const notes of Object.values(composition.tracks)) {
