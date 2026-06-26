@@ -8,6 +8,7 @@ import { jsonRpcError } from "./http/json-rpc.js";
 import { registerMcpRoutes } from "./http/mcp-routes.js";
 import { registerOAuthRoutes } from "./http/oauth-routes.js";
 import { registerContentRoutes } from "./http/content-routes.js";
+import { configuredHost } from "./http/hosts.js";
 import { assignUnownedClientsToUser, initializeOAuthState } from "./oauth.js";
 import { initializeBlogStore } from "./blog/store.js";
 import { initializeSiteState } from "./site/store.js";
@@ -45,14 +46,6 @@ if (legacyUser) assignUnownedClientsToUser(legacyUser.id);
 
 app.use(express.json({ limit: "40mb" }));
 app.use(express.urlencoded({ extended: false, limit: "64kb" }));
-
-function configuredHost(value: string): string {
-  try {
-    return new URL(value).host.toLowerCase();
-  } catch {
-    return "";
-  }
-}
 
 const publicHost = configuredHost(config.publicBaseUrl);
 const contentHost = configuredHost(config.contentBaseUrl);

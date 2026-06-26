@@ -33,6 +33,7 @@ import {
   writeProjectFile
 } from "../../projects/store.js";
 import type { ProjectManifest, ProjectStatus, ProjectSummary, ProjectTaskEvidenceLink, ProjectTaskGraphNode, ProjectTaskHistoryItem, ProjectTaskItem, ProjectTaskPriority, ProjectTaskStatus, ReviewFinding } from "../../projects/store.js";
+import { buildProjectPublishOptions, projectShareAccessSchema } from "../../projects/publish-policy.js";
 import { makeShareUrl } from "../result.js";
 import type { ToolModule } from "../types.js";
 import { inspectWebpageUrl, renderWebpageInspectionReport, summarizeBrowserInspection } from "./web-inspect.js";
@@ -131,8 +132,6 @@ const validateProjectInputSchema = z.object({
   entryFile: z.string().min(1).max(240).optional(),
   profile: z.literal("static_html").optional().default("static_html")
 });
-
-const projectShareAccessSchema = z.enum(["private", "anyone_with_link"]);
 
 const publishProjectToolInputSchema = z.object({
   projectId: z.string().min(8).max(80),
@@ -842,12 +841,8 @@ function bufferFromDataUrl(dataUrl: string): { contentType: string; buffer: Buff
   return { contentType: match[1], buffer: Buffer.from(match[2], "base64") };
 }
 
-function agentPublishOptions(ctx: Parameters<ToolModule["handler"]>[1], shareAccess: z.infer<typeof projectShareAccessSchema> = "anyone_with_link") {
-  return {
-    privateBaseUrl: ctx.publicBaseUrl,
-    shareBasePath: ctx.publicShareBasePath,
-    shareAccess
-  };
+function agentPublishPolicy(ctx: Parameters<ToolModule["handler"]>[1], shareAccess: z.infer<typeof projectShareAccessSchema> = "anyone_with_link") {
+  return buildProjectPublishOptions(ctx, shareAccess);
 }
 
 type PwaAuditSeverity = "pass" | "warn" | "error";
@@ -2833,7 +2828,8 @@ export const projectTools: ToolModule[] = [
         };
       }
 
-      const published = await publishProject(ctx.projectRoot, project.id, ctx.contentBaseUrl ?? ctx.publicBaseUrl, validation.entryFile, agentPublishOptions(ctx, parsed.shareAccess));
+      const publishPolicy = agentPublishPolicy(ctx, parsed.shareAccess);
+      const published = await publishProject(ctx.projectRoot, project.id, publishPolicy.publicBaseUrl, validation.entryFile, publishPolicy.options);
       let browserInspection: Record<string, unknown> | undefined;
       let inspectionReportUrl: string | undefined;
       if (parsed.browserValidation) {
@@ -2947,7 +2943,8 @@ export const projectTools: ToolModule[] = [
     schema: screenshotProjectInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof screenshotProjectInputSchema>;
-      const published = await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.entryFile, agentPublishOptions(ctx));
+      const publishPolicy = agentPublishPolicy(ctx);
+      const published = await publishProject(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, parsed.entryFile, publishPolicy.options);
       const results = await inspectWebpageUrl(published.publishedUrl!, {
         viewports: parsed.viewports,
         waitUntil: "networkidle",
@@ -3083,7 +3080,8 @@ export const projectTools: ToolModule[] = [
         }
 
         if (parsed.browserValidation) {
-          const published = await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, validation.entryFile, agentPublishOptions(ctx));
+          const publishPolicy = agentPublishPolicy(ctx);
+          const published = await publishProject(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, validation.entryFile, publishPolicy.options);
           attempt.publishedUrl = published.publishedUrl;
           const browserResults = await inspectWebpageUrl(published.publishedUrl!, {
             viewports: ["desktop", "tablet", "mobile"],
@@ -3327,7 +3325,8 @@ export const projectTools: ToolModule[] = [
     schema: publishProjectToolInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof publishProjectToolInputSchema>;
-      const project = await publishProject(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.entryFile, agentPublishOptions(ctx, parsed.shareAccess));
+      const publishPolicy = agentPublishPolicy(ctx, parsed.shareAccess);
+      const project = await publishProject(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, parsed.entryFile, publishPolicy.options);
       return {
         ok: true,
         summary: `Published project ${parsed.projectId} as ${project.shareAccess} at ${project.publishedUrl}.`,
@@ -3360,7 +3359,8 @@ export const projectTools: ToolModule[] = [
     schema: publishAndReportInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof publishAndReportInputSchema>;
-      const report = await publishProjectAndReport(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, parsed.entryFile, agentPublishOptions(ctx, parsed.shareAccess));
+      const publishPolicy = agentPublishPolicy(ctx, parsed.shareAccess);
+      const report = await publishProjectAndReport(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, parsed.entryFile, publishPolicy.options);
       return {
         ok: report.ok,
         summary: report.summary,

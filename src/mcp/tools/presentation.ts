@@ -14,6 +14,7 @@ import {
   writeProjectFile
 } from "../../projects/store.js";
 import type { ProjectMetadata } from "../../projects/store.js";
+import { buildProjectPublishOptions } from "../../projects/publish-policy.js";
 import type { ToolModule, ToolResult, ToolContext } from "../types.js";
 
 const require = createRequire(import.meta.url);
@@ -346,7 +347,8 @@ async function maybePublish(ctx: ToolContext, projectId: string, publish: boolea
   if (!publish) return {};
   const validation = await validateProject(ctx.projectRoot, projectId, "index.html");
   if (!validation.ok) throw new Error(`Generated project did not validate: ${validation.errors.join("; ")}`);
-  const metadata = await publishProject(ctx.projectRoot, projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, "index.html", { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath, shareAccess: "anyone_with_link" });
+  const publishPolicy = buildProjectPublishOptions(ctx);
+  const metadata = await publishProject(ctx.projectRoot, projectId, publishPolicy.publicBaseUrl, "index.html", publishPolicy.options);
   return { metadata, previewUrl: metadata.publishedUrl, shareUrl: metadata.publishedUrl };
 }
 

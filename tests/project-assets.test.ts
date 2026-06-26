@@ -17,6 +17,7 @@ import {
   writeProjectAsset,
   writeProjectFile
 } from "../src/projects/store.js";
+import { buildProjectPublishOptions, publishBaseUrlForShareAccess } from "../src/projects/publish-policy.js";
 import { projectTools } from "../src/mcp/tools/project.js";
 import type { ToolContext } from "../src/mcp/types.js";
 
@@ -292,5 +293,25 @@ test("publishProject can use a username share base path", async () => {
     const published = await publishProject(root, projectId, "https://example.test", "index.html", { shareBasePath: "/@demo_user/share" });
 
     assert.equal(published.publishedUrl, `https://example.test/@demo_user/share/${projectId}/index.html`);
+  });
+});
+
+test("publish policy centralizes public and private base URL selection", () => {
+  const context = {
+    publicBaseUrl: "https://app.example.test",
+    contentBaseUrl: "https://content.example.test",
+    publicShareBasePath: "/@demo_user/share"
+  };
+
+  assert.equal(publishBaseUrlForShareAccess(context, "anyone_with_link"), "https://content.example.test");
+  assert.equal(publishBaseUrlForShareAccess(context, "private"), "https://app.example.test");
+  assert.equal(publishBaseUrlForShareAccess(context, undefined), "https://app.example.test");
+
+  const policy = buildProjectPublishOptions(context);
+  assert.equal(policy.publicBaseUrl, "https://content.example.test");
+  assert.deepEqual(policy.options, {
+    privateBaseUrl: "https://app.example.test",
+    shareBasePath: "/@demo_user/share",
+    shareAccess: "anyone_with_link"
   });
 });

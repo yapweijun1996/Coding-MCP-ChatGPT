@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { buildProjectPublishOptions } from "../../projects/publish-policy.js";
 import type { ToolModule } from "../types.js";
 import {
   addResearchNote,
@@ -302,7 +303,8 @@ export const researchTools: ToolModule[] = [
     schema: projectIdSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof projectIdSchema>;
-      const report = await publishResearchReport(ctx.projectRoot, parsed.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
+      const publishPolicy = buildProjectPublishOptions(ctx);
+      const report = await publishResearchReport(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, publishPolicy.options);
       return {
         ok: report.ok,
         summary: report.summary,

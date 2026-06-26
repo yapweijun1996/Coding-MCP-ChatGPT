@@ -12,6 +12,8 @@ import {
   listProjects,
   readProjectFile
 } from "../projects/store.js";
+import { resolveProjectAcrossRoots } from "../projects/project-resolution.js";
+import { canViewLegacyShare, canViewPublishedProjectShare, setShareCacheHeaders } from "../share/access-policy.js";
 import { readShareArtifact } from "../share/store.js";
 import { getBlogPostBySlug, getBlogTheme, listBlogPosts } from "../blog/store.js";
 import { renderBlogIndex, renderBlogPost, renderBlogRss } from "../blog/render.js";
@@ -20,86 +22,14 @@ import {
   getAllProjectRoots,
   getProjectRootForUser,
   getPublicShareBasePathForUser,
-  getUserByProjectRoot,
-  getUserByUsername,
-  getSession as getUserSession
+  getUserByUsername
 } from "../user-store.js";
+import { configuredHostsAreSeparate, contentUrl, sameConfiguredHost } from "./hosts.js";
 import { asyncRoute } from "./util.js";
 
 const strictProjectContentCsp = "sandbox allow-scripts allow-popups allow-modals; form-action 'none';";
 const contentHostProjectCsp = "sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads; base-uri 'none'; form-action 'self';";
 const blogCsp = "default-src 'self' 'unsafe-inline' data: https:; base-uri 'none'; form-action 'self';";
-const sessionCookieName = "coding_mcp_session";
-
-function configuredHost(value: string): string {
-  try {
-    return new URL(value).host.toLowerCase();
-  } catch {
-    return "";
-  }
-}
-
-function requestHost(req: express.Request): string {
-  return (req.get("host") ?? "").toLowerCase();
-}
-
-function sameConfiguredHost(req: express.Request, baseUrl: string): boolean {
-  const host = configuredHost(baseUrl);
-  return Boolean(host && requestHost(req) === host);
-}
-
-function configuredHostsAreSeparate(publicBaseUrl: string, contentBaseUrl: string): boolean {
-  const publicHost = configuredHost(publicBaseUrl);
-  const contentHost = configuredHost(contentBaseUrl);
-  return Boolean(publicHost && contentHost && publicHost !== contentHost);
-}
-
-function contentUrl(config: ServerConfig, pathAndQuery: string): string {
-  return `${config.contentBaseUrl.replace(/\/$/, "")}${pathAndQuery.startsWith("/") ? pathAndQuery : `/${pathAndQuery}`}`;
-}
-
-function parseCookies(header: string | undefined): Record<string, string> {
-  const cookies: Record<string, string> = {};
-  if (!header) return cookies;
-  for (const part of header.split(";")) {
-    const [rawName, ...rawValue] = part.trim().split("=");
-    if (!rawName || rawValue.length === 0) continue;
-    try {
-      cookies[rawName] = decodeURIComponent(rawValue.join("="));
-    } catch {
-      continue;
-    }
-  }
-  return cookies;
-}
-
-async function canViewPublishedProject(req: express.Request, root: string, shareAccess: string | undefined): Promise<boolean> {
-  if ((shareAccess ?? "private") === "anyone_with_link") return true;
-  const sessionId = parseCookies(req.header("cookie"))[sessionCookieName];
-  const session = await getUserSession(sessionId);
-  if (!session || session.user.status !== "active") return false;
-  if (session.user.role === "admin") return true;
-  return session.user.projectRoot === root;
-}
-
-async function canViewLegacyShare(req: express.Request, shareAccess: string | undefined, ownerUserId?: string): Promise<boolean> {
-  if ((shareAccess ?? "private") === "anyone_with_link") return true;
-  const sessionId = parseCookies(req.header("cookie"))[sessionCookieName];
-  const session = await getUserSession(sessionId);
-  if (!session || session.user.status !== "active") return false;
-  if (session.user.role === "admin") return true;
-  return ownerUserId ? session.user.id === ownerUserId : false;
-}
-
-function setShareCacheHeaders(res: express.Response, shareAccess: string | undefined, isPublicRoute: boolean): void {
-  if (isPublicRoute || (shareAccess ?? "private") === "anyone_with_link") {
-    res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=86400");
-    return;
-  }
-  res.setHeader("Cache-Control", "private, no-store");
-  res.setHeader("Vary", "Cookie");
-}
-
 function getPublicShareLocale(req: express.Request): PublicShareLocale {
   if (req.query.lang === "zh" || req.query.lang === "en") return req.query.lang;
   const preferredLanguage = req.acceptsLanguages("zh-CN", "zh", "en");
@@ -116,7 +46,7 @@ function injectCanonicalLink(html: string, canonicalUrl: string): string {
 async function sendPublishedProjectFile(req: express.Request, res: express.Response, root: string, projectId: string, filename: string, canonicalUrl?: string, requireShareAccess = true, htmlCsp = strictProjectContentCsp): Promise<boolean> {
   const project = await getProject(root, projectId);
   if (project.status !== "published") return false;
-  if (requireShareAccess && !await canViewPublishedProject(req, root, project.shareAccess)) {
+  if (requireShareAccess && !await canViewPublishedProjectShare({ cookieHeader: req.header("cookie"), projectRoot: root, shareAccess: project.shareAccess })) {
     res.setHeader("Cache-Control", "private, no-store");
     res.setHeader("Vary", "Cookie");
     res.status(404).type("text/plain").send("Share not found.");
@@ -324,21 +254,14 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
 
   app.get("/share/:shareId/:filename(*)", asyncRoute(async (req, res) => {
     try {
-      for (const root of await getAllProjectRoots()) {
-        try {
-          const owner = await getUserByProjectRoot(root);
-          const canonicalBase = getPublicShareBasePathForUser(owner);
-          const canonicalUrl = `${contentBaseUrl.replace(/\/$/, "")}${canonicalBase}/${req.params.shareId}/${req.params.filename}`;
-          const project = await getProject(root, req.params.shareId);
-          if (isAppHostRequest(req) && project.shareAccess === "anyone_with_link") {
-            res.redirect(302, canonicalUrl);
-            return;
-          }
-          if (await sendPublishedProjectFile(req, res, root, req.params.shareId, req.params.filename, canonicalUrl, true, projectHtmlCspForRequest(req))) return;
-        } catch {
-          continue;
-        }
+      const { root, project, owner } = await resolveProjectAcrossRoots(req.params.shareId);
+      const canonicalBase = getPublicShareBasePathForUser(owner);
+      const canonicalUrl = `${contentBaseUrl.replace(/\/$/, "")}${canonicalBase}/${req.params.shareId}/${req.params.filename}`;
+      if (isAppHostRequest(req) && project.shareAccess === "anyone_with_link") {
+        res.redirect(302, canonicalUrl);
+        return;
       }
+      if (await sendPublishedProjectFile(req, res, root, req.params.shareId, req.params.filename, canonicalUrl, true, projectHtmlCspForRequest(req))) return;
     } catch {
       // Not a published project share; fall back to legacy standalone shares.
     }
@@ -348,7 +271,7 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
       res.status(404).type("text/plain").send("Share not found.");
       return;
     }
-    if (!await canViewLegacyShare(req, artifact.record.shareAccess, artifact.record.ownerUserId)) {
+    if (!await canViewLegacyShare({ cookieHeader: req.header("cookie"), shareAccess: artifact.record.shareAccess, ownerUserId: artifact.record.ownerUserId })) {
       res.status(404).type("text/plain").send("Share not found.");
       return;
     }

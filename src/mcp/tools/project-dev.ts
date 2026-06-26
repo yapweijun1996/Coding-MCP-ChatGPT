@@ -18,6 +18,7 @@ import {
   writeProjectAsset,
   writeProjectFile
 } from "../../projects/store.js";
+import { buildProjectPublishOptions } from "../../projects/publish-policy.js";
 import type { ToolContext, ToolModule, ToolResult } from "../types.js";
 import { childEnv, gitChildEnv } from "../child-env.js";
 import { webInspectTools } from "./web-inspect.js";
@@ -481,7 +482,8 @@ async function copyPublishedDist(ctx: ToolContext, projectId: string, distRoot: 
   }
   const validation = await validateProject(ctx.projectRoot, projectId, entryFile);
   if (!validation.ok) throw new Error(`Published dist validation failed: ${validation.errors.join("; ")}`);
-  const published = await publishProject(ctx.projectRoot, projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath, shareAccess: "anyone_with_link" });
+  const publishPolicy = buildProjectPublishOptions(ctx);
+  const published = await publishProject(ctx.projectRoot, projectId, publishPolicy.publicBaseUrl, entryFile, publishPolicy.options);
   const report = { projectId, publishedUrl: published.publishedUrl, entryFile, files: written, validation };
   await appendProjectTaskHistory(ctx.projectRoot, projectId, {
     toolName: "publish_project_workspace",

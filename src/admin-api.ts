@@ -17,6 +17,8 @@ import {
   setProjectShareAccess,
   setProjectStatus
 } from "./projects/store.js";
+import { listVisibleProjectsForUser, requestedProjectRootForUser, resolveProjectForUser, resolveProjectRootForUser } from "./projects/project-resolution.js";
+import { publishBaseUrlForShareAccess } from "./projects/publish-policy.js";
 import { getResearchSummary } from "./research/store.js";
 import { getIssueStats, listIssues, updateIssueStatus, type IssueStatus } from "./feedback/store.js";
 import { summarizeTelemetry } from "./telemetry/aggregate.js";
@@ -42,9 +44,7 @@ import {
   createUserSession,
   deleteSession as deleteUserSession,
   disableUser,
-  getAllProjectRoots,
   getPublicShareBasePathForUser,
-  getUserByProjectRoot,
   getProjectRootForUser,
   getRegistrationSettings,
   getSession as getUserSession,
@@ -67,10 +67,6 @@ interface AdminApiConfig {
   shareRoot: string;
   artifactRoot: string;
   feedbackRoot: string;
-}
-
-function projectPublishBaseUrl(config: AdminApiConfig, shareAccess: "private" | "anyone_with_link" | undefined): string {
-  return shareAccess === "anyone_with_link" ? config.contentBaseUrl : config.publicBaseUrl;
 }
 
 type SortDirection = "asc" | "desc";
@@ -276,38 +272,6 @@ function requireProjectMutation(user: PublicUser, res: express.Response): boolea
   return true;
 }
 
-async function listVisibleProjects(user: PublicUser, includeDeleted: boolean): Promise<ProjectSummary[]> {
-  if (user.role !== "admin") return listProjects(await getProjectRootForUser(user.id), includeDeleted);
-  const roots = await getAllProjectRoots();
-  const projects = await Promise.all(roots.map((root) => listProjects(root, includeDeleted).catch(() => [] as ProjectSummary[])));
-  return projects.flat();
-}
-
-async function requestedProjectRoot(req: express.Request, user: PublicUser): Promise<string> {
-  const requestedUserId = readStringQuery(req, "userId");
-  if (user.role === "admin" && requestedUserId) return getProjectRootForUser(requestedUserId);
-  return getProjectRootForUser(user.id);
-}
-
-async function findProjectRoot(req: express.Request, user: PublicUser, projectId: string): Promise<string> {
-  const firstRoot = await requestedProjectRoot(req, user);
-  try {
-    await getProject(firstRoot, projectId);
-    return firstRoot;
-  } catch {
-    if (user.role !== "admin") throw new Error("Project not found.");
-  }
-  for (const root of await getAllProjectRoots()) {
-    try {
-      await getProject(root, projectId);
-      return root;
-    } catch {
-      continue;
-    }
-  }
-  throw new Error("Project not found.");
-}
-
 function staleDraftCount(projects: ProjectSummary[]): number {
   const cutoff = now() - 7 * 24 * 60 * 60 * 1000;
   return projects.filter((project) => {
@@ -510,7 +474,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
 
   api.get("/overview", asyncRoute(async (_req, res) => {
     const user = res.locals.currentUser as PublicUser;
-    const projects = await listVisibleProjects(user, true);
+    const projects = await listVisibleProjectsForUser(user, true);
     const activeProjects = projects.filter((project) => project.status !== "deleted");
     const activity = filterActivityForUser(user, listActivity(200));
     const specialTools = getSpecialToolStates();
@@ -539,14 +503,14 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     const user = res.locals.currentUser as PublicUser;
     const { page, pageSize } = readPageQuery(req);
     const sort = readStringQuery(req, "sort") || "updated-desc";
-    const projects = sortProjects(filterProjects(req, await listVisibleProjects(user, true)), sort);
+    const projects = sortProjects(filterProjects(req, await listVisibleProjectsForUser(user, true)), sort);
     ok(res, { ...paginate(projects, page, pageSize), sort });
   }));
 
   api.get("/projects/:projectId", asyncRoute(async (req, res) => {
     try {
       const user = res.locals.currentUser as PublicUser;
-      const root = await findProjectRoot(req, user, req.params.projectId);
+      const root = await resolveProjectRootForUser(user, req.params.projectId, readStringQuery(req, "userId"));
       const project = await getProjectWithFiles(root, req.params.projectId);
       const manifest = await getProjectManifest(root, req.params.projectId);
       const researchSummary = await getResearchSummary(root, req.params.projectId);
@@ -559,7 +523,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
   api.get("/projects/:projectId/download.zip", asyncRoute(async (req, res) => {
     try {
       const user = res.locals.currentUser as PublicUser;
-      const root = await findProjectRoot(req, user, req.params.projectId);
+      const root = await resolveProjectRootForUser(user, req.params.projectId, readStringQuery(req, "userId"));
       const project = await getProject(root, req.params.projectId);
       if (project.status === "deleted") {
         fail(res, 404, "Project is deleted.");
@@ -592,10 +556,8 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       if (!requireProjectMutation(user, res)) return;
       const status = readBodyString(req, "status");
       if (status !== "published" && status !== "private" && status !== "draft") throw new Error("Invalid project status.");
-      const root = await findProjectRoot(req, user, req.params.projectId);
-      const owner = await getUserByProjectRoot(root);
-      const current = await getProject(root, req.params.projectId);
-      const project = await setProjectStatus(root, req.params.projectId, status, projectPublishBaseUrl(config, current.shareAccess), {
+      const { root, project: current, owner } = await resolveProjectForUser(user, req.params.projectId, readStringQuery(req, "userId"));
+      const project = await setProjectStatus(root, req.params.projectId, status, publishBaseUrlForShareAccess(config, current.shareAccess), {
         privateBaseUrl: config.publicBaseUrl,
         shareBasePath: getPublicShareBasePathForUser(owner)
       });
@@ -612,10 +574,9 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       if (!requireProjectMutation(user, res)) return;
       const shareAccess = readBodyString(req, "shareAccess");
       if (shareAccess !== "private" && shareAccess !== "anyone_with_link") throw new Error("Invalid project share access.");
-      const root = await findProjectRoot(req, user, req.params.projectId);
-      const owner = await getUserByProjectRoot(root);
+      const { root, owner } = await resolveProjectForUser(user, req.params.projectId, readStringQuery(req, "userId"));
       const project = await setProjectShareAccess(root, req.params.projectId, shareAccess, {
-        publicBaseUrl: config.contentBaseUrl,
+        publicBaseUrl: publishBaseUrlForShareAccess(config, shareAccess),
         privateBaseUrl: config.publicBaseUrl,
         shareBasePath: getPublicShareBasePathForUser(owner)
       });
@@ -630,7 +591,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     try {
       const user = res.locals.currentUser as PublicUser;
       if (!requireProjectMutation(user, res)) return;
-      const root = await findProjectRoot(req, user, req.params.projectId);
+      const root = await resolveProjectRootForUser(user, req.params.projectId, readStringQuery(req, "userId"));
       const project = await deleteProject(root, req.params.projectId);
       recordActivity({ userId: user.id, clientId: "admin", method: "admin/projects/delete", toolName: req.params.projectId, ok: true, summary: `Soft-deleted project ${req.params.projectId}.` });
       ok(res, { project });
@@ -658,7 +619,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     try {
       const user = res.locals.currentUser as PublicUser;
       if (!requireAdmin(user, res)) return;
-      const preferredProjectRoot = await requestedProjectRoot(req, user);
+      const preferredProjectRoot = await requestedProjectRootForUser(user, readStringQuery(req, "userId"));
       const { project, owner } = await resolveHomepageProjectForSet(req.params.projectId, { preferredProjectRoot });
       setHomepage({ projectId: req.params.projectId, ownerUserId: owner.id });
       recordActivity({ userId: user.id, clientId: "admin", method: "admin/site/home", toolName: req.params.projectId, ok: true, summary: `Set project ${req.params.projectId} as the homepage.` });
@@ -912,7 +873,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       const shareBasePath = getPublicShareBasePathForUser(updated);
       const publishedProjects = (await listProjects(projectRoot, true)).filter((project) => project.status === "published");
       for (const project of publishedProjects) {
-        await setProjectStatus(projectRoot, project.id, "published", projectPublishBaseUrl(config, project.shareAccess), {
+        await setProjectStatus(projectRoot, project.id, "published", publishBaseUrlForShareAccess(config, project.shareAccess), {
           privateBaseUrl: config.publicBaseUrl,
           shareBasePath
         });
