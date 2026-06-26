@@ -1184,7 +1184,15 @@ Use this skill when an agent needs to understand or manage MCP plugin capabiliti
       "add_media_captions",
       "attach_media_voice_audio",
       "preview_media_frames",
-      "export_media_project"
+      "export_media_project",
+      "create_video_project",
+      "import_video_asset_from_local_file",
+      "probe_video_asset",
+      "extract_video_frames",
+      "create_video_scene_asset",
+      "write_video_timeline",
+      "preview_video_timeline",
+      "render_video_timeline"
     ],
     protocolMarkdown: `# File Conversion
 
@@ -1196,6 +1204,7 @@ Use this skill for safe file inspection, conversion planning, bounded table conv
 - Use \`create_file_conversion_plan\` and \`export_file_conversion_report\` when a durable handoff or audit trail is needed.
 - Use \`create_media_conversion_manifest\` for image/audio/video transcode requirements; actual byte transcoding requires a separate verified converter step.
 - Use \`create_media_scene_timeline\`, \`add_media_captions\`, \`attach_media_voice_audio\`, \`preview_media_frames\`, and \`export_media_project\` for scripted media export handoff from project files/data; keep the workflow on Code-MCP project files, browser standards, and commercially usable open dependencies, and record license status for any optional encoder.
+- Use \`create_video_project\`, \`import_video_asset_from_local_file\`, \`probe_video_asset\`, \`extract_video_frames\`, \`create_video_scene_asset\`, \`write_video_timeline\`, \`preview_video_timeline\`, and \`render_video_timeline\` when ChatGPT needs to CRUD an AI-operable video project, inspect uploaded video, create SVG/WebGL scene assets, preview an edit timeline, or render the MVP ffmpeg video-only output.
 - Reject traversal paths, hidden archive paths, oversized files, and high compression-ratio entries before extraction.`
   },
   {

@@ -44,6 +44,7 @@ import { notificationTools } from "./notifications.js";
 import { imageWorkflowTools } from "./image-workflow.js";
 import { svgDesignStudioTools } from "./svg-design-studio.js";
 import { musicWorkflowTools } from "./music-workflow.js";
+import { videoEditorTools } from "./video-editor.js";
 import { threeDGameTools } from "./three-d-game.js";
 import { asyncJobTools } from "./async-jobs.js";
 import { docsKnowledgeTools } from "./docs-knowledge.js";
@@ -96,6 +97,7 @@ export const allToolModules: ToolModule[] = [
   ...imageWorkflowTools,
   ...svgDesignStudioTools,
   ...musicWorkflowTools,
+  ...videoEditorTools,
   ...threeDGameTools,
   ...docsKnowledgeTools,
   ...knowledgeBaseTools,

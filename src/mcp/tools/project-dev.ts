@@ -28,7 +28,7 @@ const maxFileListResults = 2000;
 const defaultTimeoutMs = 300000;
 const ignoredDirectoryNames = new Set([".git", "node_modules", "dist", "build", ".next", ".turbo", "coverage"]);
 const textPublishExtensions = new Set([".html", ".css", ".js", ".mjs", ".json", ".webmanifest", ".txt", ".md", ".svg"]);
-const assetPublishExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mp4", ".webm"]);
+const assetPublishExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mp4", ".webm", ".mov"]);
 const workspaceAssetExtensions = new Set([...assetPublishExtensions]);
 const maxWorkspaceAssetBytes = 100 * 1024 * 1024;
 
@@ -189,7 +189,8 @@ function contentTypeForWorkspaceAsset(relativePath: string): string {
     [".wav", "audio/wav"],
     [".ogg", "audio/ogg"],
     [".mp4", "video/mp4"],
-    [".webm", "video/webm"]
+    [".webm", "video/webm"],
+    [".mov", "video/quicktime"]
   ]);
   return map.get(extension) ?? "application/octet-stream";
 }

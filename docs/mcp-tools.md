@@ -44,6 +44,8 @@ Enabled by default:
 - Browser validation: `inspect_webpage`.
 - Webpage rebuild workflow: `capture_webpage`, `analyze_webpage_capture`, `generate_improved_static_page`.
 - Presentation and media generation: `create_html_deck`, `create_pptx_deck`, `create_immersive_page`, `create_video_presentation`, `create_media_scene_timeline`, `add_media_captions`, `attach_media_voice_audio`, `preview_media_frames`, `export_media_project`.
+- Video editor workflow: `create_video_project`, `import_video_asset_from_local_file`, `probe_video_asset`, `extract_video_frames`, `create_video_scene_asset`, `write_video_timeline`, `preview_video_timeline`, `render_video_timeline`.
+- Music workflow: `import_musicxml_score`, `compose_music`, `edit_midi`, `render_midi_with_soundfont`, `render_midi_to_audio`, `inspect_audio_quality`, `manage_jazz_instrument_packs`, `build_music_license_manifest`, `publish_music_audition_demo`, `export_music_project`, and supporting arrangement/export tools.
 - Stable command checks backed by current package scripts: `run_command`, `run_typecheck`, `run_tests`, `run_build`.
 - Workspace and git tools delegated from the legacy implementation.
 

@@ -279,8 +279,8 @@ const filesDirectoryName = "files";
 const workspaceDirectoryName = "workspace";
 const maxTaskHistoryItems = 100;
 const allowedTextExtensions = new Set([".html", ".css", ".js", ".mjs", ".json", ".webmanifest", ".txt", ".md", ".csv", ".svg"]);
-const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".sf3", ".mp4", ".webm", ".pptx", ".zip"]);
-const mediaAssetExtensions = new Set([".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".sf3", ".mp4", ".webm"]);
+const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".sf3", ".mp4", ".webm", ".mov", ".pptx", ".zip"]);
+const mediaAssetExtensions = new Set([".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".sf3", ".mp4", ".webm", ".mov"]);
 const projectContentTypes = new Map([
   [".html", "text/html"],
   [".css", "text/css"],
@@ -312,6 +312,7 @@ const projectContentTypes = new Map([
   [".sf3", "audio/soundfont"],
   [".mp4", "video/mp4"],
   [".webm", "video/webm"],
+  [".mov", "video/quicktime"],
   [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
   [".zip", "application/zip"]
 ]);
