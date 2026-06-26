@@ -52,13 +52,6 @@ type FlowStepResult = {
   snapshot?: string;
 };
 
-type SmokeStep =
-  | { action: "click"; selector: string; timeoutMs?: number }
-  | { action: "fill"; selector: string; value: string; timeoutMs?: number }
-  | { action: "assert"; text: string; timeoutMs?: number }
-  | { action: "screenshot"; label?: string }
-  | { action: "waitForUrl"; url: string; timeoutMs?: number }
-  | { action: "waitForSelector"; selector: string; timeoutMs?: number };
 
 type RecordedInteractionStep =
   | { action: "click"; selector: string; label?: string; timestampMs?: number; timeoutMs?: number }
@@ -1040,6 +1033,7 @@ export const browserObservabilityTools: ToolModule[] = [
           };
         }
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- AxeBuilder constructor type is not exported
         const builder = new (AxeBuilder as any)({ page: session.page });
         const result = typeof builder.withRules === "function" && parsed.rules.length > 0
           ? await builder.withRules(parsed.rules).analyze()

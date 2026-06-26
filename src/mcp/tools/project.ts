@@ -17,7 +17,6 @@ import {
   getProjectWithFiles,
   importProjectAssetFromLocalFile,
   isProjectTextFilePath,
-  listProjectTasks,
   listProjects,
   patchProjectFile,
   publishProjectAndReport,
@@ -622,10 +621,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value : undefined;
-}
-
 function collectUrlsFromDetails(value: unknown, keys: Set<string>, urls: string[] = []): string[] {
   if (Array.isArray(value)) {
     for (const item of value) collectUrlsFromDetails(item, keys, urls);
@@ -826,7 +821,7 @@ async function fetchProjectAsset(url: string, relativePath: string): Promise<{ b
 }
 
 function withoutScreenshots(results: Awaited<ReturnType<typeof inspectWebpageUrl>>) {
-  return results.map(({ screenshotDataUrl, ...result }) => result);
+  return results.map(({ screenshotDataUrl: _screenshotDataUrl, ...result }) => result);
 }
 
 function bufferFromDataUrl(dataUrl: string): { contentType: string; buffer: Buffer } {

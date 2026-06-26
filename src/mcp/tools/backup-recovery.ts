@@ -10,7 +10,6 @@ import {
   getProjectFileContentType,
   getProjectStoredFilePath,
   isProjectTextFilePath,
-  readProjectFile,
   writeProjectAsset,
   writeProjectFile
 } from "../../projects/store.js";

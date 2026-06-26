@@ -221,7 +221,7 @@ const checkUrlTool: ToolModule = {
   },
   enabledByDefault: false,
   schema: checkUrlSchema,
-  handler: async (input, ctx) => {
+  handler: async (input, _ctx) => {
     const parsed = input as z.infer<typeof checkUrlSchema>;
     const target = parseUrl(parsed.url);
     const controller = new AbortController();

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { writeProjectFile } from "../../projects/store.js";
-import type { ToolContext, ToolModule } from "../types.js";
+import type { ToolModule } from "../types.js";
 
 const triggerSchema = z.object({
   type: z.enum(["manual", "schedule", "webhook", "event", "file_change"]),

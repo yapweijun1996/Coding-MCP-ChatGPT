@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { createProject, publishProject, writeProjectFile } from "../src/projects/store.js";
 import { createShareArtifact } from "../src/share/store.js";
-import { clearHomepage, getHomepage, setHomepage } from "../src/site/store.js";
+import { clearHomepage, getHomepage } from "../src/site/store.js";
 import { siteTools } from "../src/mcp/tools/site.js";
 import { approveUser, registerUser, updateRegistrationSettings } from "../src/user-store.js";
 
