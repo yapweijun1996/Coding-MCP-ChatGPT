@@ -26,6 +26,43 @@ function fakeSoundfontBytes() {
   return Buffer.concat([Buffer.from("RIFF", "ascii"), Buffer.from([0x04, 0x00, 0x00, 0x00]), Buffer.from("sfbk", "ascii"), Buffer.from("pdta", "ascii")]);
 }
 
+const simplePianoMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <work><work-title>Simple Piano Score</work-title></work>
+  <part-list>
+    <score-part id="P1"><part-name>Piano</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>2</divisions>
+        <key><fifths>1</fifths></key>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+      </attributes>
+      <direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>96</per-minute></metronome></direction-type><sound tempo="96"/></direction>
+      <harmony><root><root-step>G</root-step></root><kind text="maj7">major-seventh</kind></harmony>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type></note>
+      <note><chord/><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><type>quarter</type></note>
+      <note><rest/><duration>2</duration><type>quarter</type></note>
+      <note dynamics="88"><pitch><step>G</step><alter>1</alter><octave>4</octave></pitch><duration>4</duration><type>half</type></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>8</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+const noTempoMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
 async function installFakeFluidSynth(root: string) {
   const bin = path.join(root, "bin");
   await mkdir(bin, { recursive: true });
@@ -76,6 +113,140 @@ fs.writeFileSync(out, Buffer.concat([header, pcm]));
   await chmod(scriptPath, 0o755);
   return bin;
 }
+
+test("music workflow imports MusicXML score into manifest and MIDI", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "musicxml-import-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "MusicXML import", createdByClientId: "composer" });
+    const importer = getToolModule("import_musicxml_score");
+    assert.ok(importer);
+
+    const result = await importer!.handler({
+      projectId: project.id,
+      musicXmlString: simplePianoMusicXml,
+      outputManifestPath: "music/imported-score.json",
+      outputMidiPath: "music/imported-score.mid"
+    }, ctx);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.artifacts.sort(), ["music/imported-score.json", "music/imported-score.mid"].sort());
+    const payload = result.structuredContent as {
+      title: string;
+      tempo: number;
+      key: string;
+      tracks: Record<string, Array<{ midi: number; startBeat: number; durationBeats: number; velocity: number }>>;
+      chordProgression: string[];
+      scoreSource: { format: string; noteCount: number; scoreDriven: boolean };
+      warnings: string[];
+      recommendedNextTools: string[];
+      recommendedPianoPack: { licenseType: string; commercialUseAllowed: boolean };
+    };
+    assert.equal(payload.title, "Simple Piano Score");
+    assert.equal(payload.tempo, 96);
+    assert.equal(payload.key, "G major");
+    assert.equal(payload.scoreSource.format, "MusicXML");
+    assert.equal(payload.scoreSource.scoreDriven, true);
+    assert.equal(payload.scoreSource.noteCount, 4);
+    assert.ok(payload.chordProgression.some((chord) => chord.includes("major-seventh")));
+    assert.equal(payload.tracks.piano.length, 4);
+    assert.equal(payload.tracks.piano[0].startBeat, 0);
+    assert.equal(payload.tracks.piano[1].startBeat, 0, "MusicXML chord notes share the previous note start");
+    assert.equal(payload.tracks.piano[2].startBeat, 2, "Rest advances score time");
+    assert.equal(payload.tracks.piano[2].midi, 68, "Altered G#4 imports as MIDI 68");
+    assert.equal(payload.tracks.piano[2].velocity, 88);
+    assert.ok(payload.recommendedNextTools.includes("render_midi_with_soundfont"));
+    assert.equal(payload.recommendedPianoPack.licenseType, "cc_by");
+    assert.equal(payload.recommendedPianoPack.commercialUseAllowed, true);
+    const midi = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/imported-score.mid"));
+    assert.equal(midi.subarray(0, 4).toString("ascii"), "MThd");
+    assert.ok([...midi].some((byte) => byte >= 0x90 && byte <= 0x9f));
+
+    const noTempoResult = await importer!.handler({
+      projectId: project.id,
+      musicXmlString: noTempoMusicXml,
+      defaultTempo: 84,
+      outputManifestPath: "music/no-tempo.json",
+      outputMidiPath: "music/no-tempo.mid"
+    }, ctx);
+    assert.equal(noTempoResult.ok, true);
+    const noTempoPayload = noTempoResult.structuredContent as { tempo: number; warnings: string[] };
+    assert.equal(noTempoPayload.tempo, 84);
+    assert.ok(noTempoPayload.warnings.some((warning) => warning.includes("No explicit tempo")));
+
+    await assert.rejects(
+      () => importer!.handler({ projectId: project.id, musicXmlString: "<score-partwise><part>" }, ctx),
+      /Invalid MusicXML/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("MusicXML score can render through a commercial-safe CC BY piano SoundFont pack", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "musicxml-soundfont-"));
+  const oldPath = process.env.PATH;
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "MusicXML SoundFont", createdByClientId: "producer" });
+    const importer = getToolModule("import_musicxml_score");
+    const packManager = getToolModule("manage_jazz_instrument_packs");
+    const soundfontRender = getToolModule("render_midi_with_soundfont");
+    assert.ok(importer);
+    assert.ok(packManager);
+    assert.ok(soundfontRender);
+
+    await importer!.handler({
+      projectId: project.id,
+      musicXmlString: simplePianoMusicXml,
+      outputManifestPath: "music/score.json",
+      outputMidiPath: "music/score.mid"
+    }, ctx);
+    await writeProjectAsset(ctx.projectRoot, project.id, "instruments/salamander-cc-by.sf2", fakeSoundfontBytes(), "audio/soundfont");
+    const packResult = await packManager!.handler({
+      projectId: project.id,
+      intendedUse: "streaming_demo",
+      packs: [{
+        packId: "salamander_cc_by",
+        displayName: "Salamander Grand Piano Fixture",
+        instrumentRole: "realistic_piano",
+        format: "soundfont",
+        assetPaths: ["instruments/salamander-cc-by.sf2"],
+        licenseType: "cc_by",
+        source: "fixture",
+        attribution: "Salamander Grand Piano sample fixture, CC BY attribution captured.",
+        commercialUseAllowed: true,
+        redistributionAllowed: true,
+        modificationsAllowed: true
+      }]
+    }, ctx);
+    assert.equal(packResult.ok, true);
+    const packPayload = packResult.structuredContent as { readyPackIds: string[]; licenseManifest: { assetLicenseTable: Array<{ path: string; license: string; attribution?: string; commercialUseAllowed?: boolean }> } };
+    assert.deepEqual(packPayload.readyPackIds, ["salamander_cc_by"]);
+    assert.ok(packPayload.licenseManifest.assetLicenseTable.some((asset) => asset.path === "instruments/salamander-cc-by.sf2" && asset.license === "cc_by" && asset.commercialUseAllowed === true && asset.attribution));
+
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${oldPath}`;
+    const renderResult = await soundfontRender!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/score.json",
+      soundfontPackId: "salamander_cc_by",
+      outputAudioPath: "music/score-soundfont.wav",
+      outputReportPath: "music/score-soundfont-report.json"
+    }, ctx);
+    assert.equal(renderResult.ok, true);
+    const renderPayload = renderResult.structuredContent as { qualityTier: string; productionReady: boolean; soundfont: { licenseType: string; attribution: string; commercialUseAllowed: boolean }; fullMixPath: string };
+    assert.equal(renderPayload.qualityTier, "production_candidate");
+    assert.equal(renderPayload.productionReady, true);
+    assert.equal(renderPayload.soundfont.licenseType, "cc_by");
+    assert.equal(renderPayload.soundfont.commercialUseAllowed, true);
+    assert.match(renderPayload.soundfont.attribution, /Salamander/);
+    assert.equal(renderPayload.fullMixPath, "music/score-soundfont.wav");
+    const wav = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/score-soundfont.wav"));
+    assert.equal(wav.subarray(0, 4).toString("ascii"), "RIFF");
+  } finally {
+    process.env.PATH = oldPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("music workflow composes, edits, renders, audits, and exports music assets", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "music-workflow-"));

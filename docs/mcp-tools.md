@@ -21,6 +21,7 @@ The MCP server uses a single source of truth registry for tool metadata, handler
 - `src/mcp/tools/share.ts`: legacy standalone HTML share tool, disabled by default.
 - `src/mcp/tools/web-rebuild.ts`: webpage capture, analysis, and static rebuild tools backed by Playwright and Project publish.
 - `src/mcp/tools/presentation.ts`: HTML deck, PPTX deck, immersive page, and browser-rendered video presentation tools.
+- `src/mcp/tools/music-workflow.ts`: score import, MIDI editing, SoundFont rendering, audition, audio QA, licensing, and music export tools.
 - `src/mcp/tools/workspace.ts`: workspace file tools delegated to legacy implementation.
 - `src/mcp/tools/command.ts`: stable npm checks plus disabled high-risk diagnostics/server helpers.
 - `src/mcp/tools/git.ts`: git tools delegated to legacy implementation.
@@ -162,7 +163,26 @@ Use `create_video_presentation` when an agent needs a presentation-style video p
 
 Use the scripted media workflow tools when the agent needs a reusable export handoff: create a scene timeline, add WebVTT captions, attach voice/audio alignment metadata, generate frame preview contact sheets, then create an export manifest for MP4/WebM/GIF/PNG sequence/HTML preview. The workflow is designed around Code-MCP project files, browser standards, and MIT-compatible muxing where used; it does not require a paid video engine. Byte encoding remains an explicit verified encoder step, and any optional external encoder must have its license and commercial-use status recorded before delivery.
 
-The MCP server does not render MP4 files server-side. If WebCodecs is unavailable, the generated page shows a clear browser capability error and remains usable as an animated HTML preview.
+Use the video editor workflow when ChatGPT needs to operate on uploaded video or CRUD an edit timeline: create a project, import MP4/WebM/MOV assets, probe metadata with `ffprobe`, extract bounded review frames, add SVG/WebGL scene assets, write the timeline JSON, generate an HTML preview, and render the MVP video-only timeline with `ffmpeg`. The initial renderer supports sequential video clip trimming and concatenation without audio mixing; SVG/WebGL clips are previewable references and require a later browser-scene recording step for final byte render.
+
+The presentation generator does not render MP4 files server-side. If WebCodecs is unavailable, the generated page shows a clear browser capability error and remains usable as an animated HTML preview.
+
+## Score-first music workflow
+
+Use `import_musicxml_score` when a user provides MusicXML or asks for score-driven music. This path converts MusicXML into the normal composition manifest and writes a standard `.mid` file. Missing tempo, instrument, or meter metadata falls back conservatively to piano, 90 BPM, and 4/4-style timing, and the manifest records warnings.
+
+Preferred professional path:
+
+1. `import_musicxml_score` with `musicXmlPath` or `musicXmlString`.
+2. Register a commercial-safe piano SoundFont with `manage_jazz_instrument_packs`, including source URL, license, attribution, SHA-256, and redistribution notes.
+3. Use `edit_midi` only if arrangement cleanup is needed.
+4. Render with `render_midi_with_soundfont`.
+5. Run `inspect_audio_quality`.
+6. Export with `export_music_project`.
+
+`render_midi_with_soundfont` is preferred for production-candidate piano output when a ready SoundFont pack exists. `render_midi_to_audio` remains a procedural fallback and should be treated as `preview_only`; exported audition pages should make that status visible.
+
+Do not commit large `.sf2`, `.sf3`, SFZ sample sets, or other instrument binaries into git. Store local packs in project data or a configured workspace path such as `.music-packs/`, then register metadata and attribution before rendering or export.
 
 ## Refactor hint workflow
 

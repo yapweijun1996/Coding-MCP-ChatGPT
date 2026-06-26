@@ -308,6 +308,7 @@ Use this skill to discover the available workspace/project context before taking
       "review_music_production_export",
       "export_music_project",
       "process_music_revision_feedback",
+      "import_musicxml_score",
       "compose_music",
       "edit_midi",
       "render_midi_to_audio",
@@ -751,6 +752,7 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "review_music_production_export",
       "export_music_project",
       "process_music_revision_feedback",
+      "import_musicxml_score",
       "compose_music",
       "edit_midi",
       "render_midi_to_audio",
@@ -1300,7 +1302,7 @@ Use this skill for project-local 3D assets, game scene planning, gameplay QA, an
     id: "music-workflow",
     label: "Music Workflow",
     category: "media",
-    description: "Compose original music, edit MIDI, render WAV previews, generate harmony/drum grooves, QA audio, and export music assets.",
+    description: "Import MusicXML scores, compose original music, edit MIDI, render WAV previews, generate harmony/drum grooves, QA audio, and export music assets.",
     enabledByDefault: true,
     status: "beta",
     riskLevel: "medium",
@@ -1319,6 +1321,7 @@ Use this skill for project-local 3D assets, game scene planning, gameplay QA, an
       "review_music_production_export",
       "export_music_project",
       "process_music_revision_feedback",
+      "import_musicxml_score",
       "compose_music",
       "edit_midi",
       "render_midi_to_audio",
@@ -1333,9 +1336,10 @@ Use this skill for project-local 3D assets, game scene planning, gameplay QA, an
     ],
     protocolMarkdown: `# Music Workflow
 
-Use this skill for original background music, MIDI sketches, WAV previews, jazz harmony, grooves, and export handoff.
+Use this skill for score-driven MusicXML import, original background music, MIDI sketches, WAV previews, jazz harmony, grooves, and export handoff.
 
 - Start with \`create_music_style_brief\` when the user references a venue, brand, artist, or vibe; convert it into broad non-copying musical traits.
+- Use \`import_musicxml_score\` when the user provides MusicXML or wants score-first generation; it writes the normal composition manifest plus standard MIDI, defaults missing tempo/instrument metadata conservatively, and records warnings in the manifest.
 - Use \`compose_music\` to generate the structured composition manifest and MIDI.
 - Use \`edit_midi\` for quantize, transpose, humanize, swing, and velocity shaping.
 - Use \`render_midi_to_audio\` for a project WAV preview from the built-in safe synth; it is always \`preview_only\`. Use \`render_midi_with_soundfont\` for FluidSynth + ready .sf2/.sf3 SoundFont \`production_candidate\` renders. MP3/OGG require a verified encoder step.

@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { z } from "zod";
 import { getProjectStoredFilePath, publishProject, readProjectFile, writeProjectAsset, writeProjectFile } from "../../projects/store.js";
 import type { ToolContext, ToolModule } from "../types.js";
@@ -14,6 +15,18 @@ const instrumentSchema = z.enum(["piano", "electric_piano", "upright_bass", "aco
 const complexitySchema = z.enum(["simple", "medium", "rich"]);
 const sectionSchema = z.object({ name: z.string().min(1).max(40), bars: z.number().int().min(1).max(64), intensity: z.number().min(0).max(1).optional().default(0.5) });
 const noteSchema = z.object({ track: z.string().min(1).max(80), midi: z.number().int().min(0).max(127), startBeat: z.number().min(0), durationBeats: z.number().min(0.05).max(64), velocity: z.number().int().min(1).max(127) });
+
+const importMusicXmlScoreInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  musicXmlPath: z.string().min(1).max(240).optional(),
+  musicXmlString: z.string().min(1).max(2 * 1024 * 1024).optional(),
+  title: z.string().min(1).max(160).optional(),
+  defaultTempo: z.number().int().min(40).max(220).optional().default(90),
+  outputManifestPath: z.string().min(1).max(240).optional().default("music/imported-score-manifest.json"),
+  outputMidiPath: z.string().min(1).max(240).optional().default("music/imported-score.mid")
+}).refine((value) => Boolean(value.musicXmlPath || value.musicXmlString), {
+  message: "musicXmlPath or musicXmlString is required."
+});
 
 const composeMusicInputSchema = z.object({
   projectId: z.string().min(8).max(80),
@@ -226,7 +239,14 @@ const auditionVersionSchema = z.object({
   instruments: z.array(z.string().min(1).max(80)).max(20).optional().default([]),
   moodTags: z.array(z.string().min(1).max(80)).max(20).optional().default([]),
   styleNotes: z.array(z.string().min(1).max(160)).max(20).optional().default([]),
-  generatedPrompt: z.string().min(1).max(500).optional()
+  generatedPrompt: z.string().min(1).max(500).optional(),
+  scoreSourcePath: z.string().min(1).max(240).optional(),
+  renderReportPath: z.string().min(1).max(240).optional(),
+  renderer: z.string().min(1).max(80).optional(),
+  qualityTier: z.string().min(1).max(80).optional(),
+  soundfontName: z.string().min(1).max(160).optional(),
+  licenseStatus: z.string().min(1).max(160).optional(),
+  qaScore: z.number().min(0).max(100).optional()
 });
 const publishMusicAuditionDemoInputSchema = z.object({
   projectId: z.string().min(8).max(80),
@@ -424,8 +444,261 @@ type Composition = {
   license: { output: string; dependencies: string[] };
 };
 
+type MusicXmlImportResult = {
+  composition: Composition & {
+    scoreSource: Record<string, unknown>;
+    warnings: string[];
+    recommendedNextTools: string[];
+    recommendedPianoPack: Record<string, unknown>;
+  };
+  sourceXml: string;
+};
+
 const noteBase: Record<string, number> = { C: 60, Db: 61, D: 62, Eb: 63, E: 64, F: 65, Gb: 66, G: 67, Ab: 68, A: 69, Bb: 70, B: 71 };
 const chordIntervals: Record<string, number[]> = { maj7: [0, 4, 7, 11], m7: [0, 3, 7, 10], "7": [0, 4, 7, 10], m9: [0, 3, 7, 10, 14], "13": [0, 4, 7, 10, 21], dim: [0, 3, 6, 9] };
+
+function asArray<T>(value: T | T[] | undefined): T[] {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function textValue(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (record["#text"] !== undefined) return textValue(record["#text"]);
+  }
+  return undefined;
+}
+
+function numericValue(value: unknown): number | undefined {
+  const text = textValue(value);
+  if (text === undefined) return undefined;
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function attrNumber(value: unknown, attr: string): number | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  return numericValue(record[`@_${attr}`]);
+}
+
+function attrText(value: unknown, attr: string): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  return textValue(record[`@_${attr}`]);
+}
+
+function firstNumber(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const parsed = numericValue(value);
+    if (parsed !== undefined) return parsed;
+  }
+  return undefined;
+}
+
+const musicXmlStepSemitones: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+const keyNamesByFifths: Record<number, string> = {
+  "-7": "Cb major",
+  "-6": "Gb major",
+  "-5": "Db major",
+  "-4": "Ab major",
+  "-3": "Eb major",
+  "-2": "Bb major",
+  "-1": "F major",
+  0: "C major",
+  1: "G major",
+  2: "D major",
+  3: "A major",
+  4: "E major",
+  5: "B major",
+  6: "F# major",
+  7: "C# major"
+};
+
+function midiFromMusicXmlPitch(pitch: unknown): number | undefined {
+  if (!pitch || typeof pitch !== "object") return undefined;
+  const record = pitch as Record<string, unknown>;
+  const step = textValue(record.step);
+  const octave = numericValue(record.octave);
+  if (!step || octave === undefined || musicXmlStepSemitones[step] === undefined) return undefined;
+  const alter = numericValue(record.alter) ?? 0;
+  return Math.max(0, Math.min(127, Math.round((octave + 1) * 12 + musicXmlStepSemitones[step] + alter)));
+}
+
+function musicXmlVelocity(note: Record<string, unknown>, directionVelocity: number | undefined): number {
+  const noteDynamics = attrNumber(note, "dynamics");
+  const velocity = noteDynamics ?? directionVelocity ?? 72;
+  return Math.max(1, Math.min(127, Math.round(velocity)));
+}
+
+function directionTempo(direction: Record<string, unknown>): number | undefined {
+  const soundTempo = attrNumber(direction.sound, "tempo");
+  if (soundTempo !== undefined) return soundTempo;
+  const directionTypes = asArray(direction["direction-type"] as unknown);
+  for (const item of directionTypes) {
+    if (!item || typeof item !== "object") continue;
+    const metronome = (item as Record<string, unknown>).metronome as Record<string, unknown> | undefined;
+    const perMinute = firstNumber(metronome?.["per-minute"]);
+    if (perMinute !== undefined) return perMinute;
+  }
+  return undefined;
+}
+
+function directionDynamics(direction: Record<string, unknown>): number | undefined {
+  const soundDynamics = attrNumber(direction.sound, "dynamics");
+  if (soundDynamics !== undefined) return soundDynamics;
+  const directionTypes = asArray(direction["direction-type"] as unknown);
+  for (const item of directionTypes) {
+    if (!item || typeof item !== "object") continue;
+    const dynamics = (item as Record<string, unknown>).dynamics as Record<string, unknown> | undefined;
+    if (!dynamics) continue;
+    if (dynamics.pp || dynamics.p) return 44;
+    if (dynamics.mp) return 56;
+    if (dynamics.mf) return 72;
+    if (dynamics.f) return 88;
+    if (dynamics.ff) return 104;
+  }
+  return undefined;
+}
+
+function scoreTitle(score: Record<string, unknown>, fallback?: string) {
+  return fallback ?? textValue(score["movement-title"]) ?? textValue((score.work as Record<string, unknown> | undefined)?.["work-title"]) ?? "Imported MusicXML Score";
+}
+
+function defaultCommercialSafePianoPackRecommendation() {
+  return {
+    packId: "salamander-grand-piano-sf2",
+    displayName: "Salamander Grand Piano SF2 compatible pack",
+    instrumentRole: "realistic_piano",
+    format: "soundfont",
+    targetDirectory: ".music-packs/",
+    licenseType: "cc_by",
+    commercialUseAllowed: true,
+    attributionRequired: true,
+    source: "https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html",
+    notes: "Large SoundFont binaries must be user-provided or downloaded outside git, then registered with manage_jazz_instrument_packs using the local project asset path and computed SHA-256."
+  };
+}
+
+async function importMusicXmlScore(ctx: ToolContext, input: z.infer<typeof importMusicXmlScoreInputSchema>): Promise<MusicXmlImportResult> {
+  const sourceXml = input.musicXmlString ?? await readProjectFile(ctx.projectRoot, input.projectId, input.musicXmlPath!, 2 * 1024 * 1024);
+  const validation = XMLValidator.validate(sourceXml);
+  if (validation !== true) {
+    const message = typeof validation === "object" ? validation.err.msg : "Invalid MusicXML document.";
+    throw new Error(`Invalid MusicXML: ${message}`);
+  }
+  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_", textNodeName: "#text", trimValues: true });
+  const parsed = parser.parse(sourceXml) as Record<string, unknown>;
+  const score = parsed["score-partwise"] as Record<string, unknown> | undefined;
+  if (!score || typeof score !== "object") throw new Error("Invalid MusicXML: expected score-partwise root.");
+
+  const warnings: string[] = [];
+  const parts = asArray(score.part as Record<string, unknown> | Record<string, unknown>[] | undefined);
+  if (!parts.length) throw new Error("Invalid MusicXML: no score parts found.");
+  if (parts.length > 1) warnings.push("Multiple MusicXML parts were imported and mapped conservatively to piano-style tracks.");
+
+  let tempo = input.defaultTempo;
+  let key = "C major";
+  let divisions = 1;
+  let maxBeat = 0;
+  const tracks: Composition["tracks"] = {};
+  const chordNames = new Set<string>();
+  const sections: Composition["sections"] = [];
+
+  for (const [partIndex, part] of parts.entries()) {
+    const partId = attrText(part, "id") ?? `P${partIndex + 1}`;
+    const track = partIndex === 0 ? "piano" : `piano_${partIndex + 1}`;
+    tracks[track] ??= [];
+    let beat = 0;
+    let lastNoteStartBeat = 0;
+    let directionVelocity: number | undefined;
+    const measures = asArray(part.measure as Record<string, unknown> | Record<string, unknown>[] | undefined);
+    if (!measures.length) warnings.push(`Part ${partId} has no measures.`);
+    for (const [measureIndex, measure] of measures.entries()) {
+      const measureStartBeat = beat;
+      const attributes = measure.attributes as Record<string, unknown> | undefined;
+      const nextDivisions = numericValue(attributes?.divisions);
+      if (nextDivisions && nextDivisions > 0) divisions = nextDivisions;
+      const fifths = firstNumber((attributes?.key as Record<string, unknown> | undefined)?.fifths);
+      if (fifths !== undefined) key = keyNamesByFifths[fifths] ?? key;
+      for (const direction of asArray(measure.direction as Record<string, unknown> | Record<string, unknown>[] | undefined)) {
+        const parsedTempo = directionTempo(direction);
+        if (parsedTempo !== undefined) tempo = Math.max(40, Math.min(220, Math.round(parsedTempo)));
+        directionVelocity = directionDynamics(direction) ?? directionVelocity;
+      }
+      for (const harmonyNode of asArray(measure.harmony as Record<string, unknown> | Record<string, unknown>[] | undefined)) {
+        const rootStep = textValue((harmonyNode.root as Record<string, unknown> | undefined)?.["root-step"]);
+        const kind = textValue(harmonyNode.kind);
+        if (rootStep) chordNames.add(kind ? `${rootStep} ${kind}` : rootStep);
+      }
+      for (const note of asArray(measure.note as Record<string, unknown> | Record<string, unknown>[] | undefined)) {
+        const durationDivisions = numericValue(note.duration) ?? divisions;
+        const durationBeats = Math.max(0.05, Math.min(64, durationDivisions / Math.max(1, divisions)));
+        const isChord = Object.prototype.hasOwnProperty.call(note, "chord");
+        const isRest = Object.prototype.hasOwnProperty.call(note, "rest");
+        const startBeat = isChord ? lastNoteStartBeat : beat;
+        if (!isChord) lastNoteStartBeat = startBeat;
+        if (!isRest) {
+          const midi = midiFromMusicXmlPitch(note.pitch);
+          if (midi === undefined) {
+            warnings.push(`Skipped note with missing/unsupported pitch in part ${partId}, measure ${measureIndex + 1}.`);
+          } else {
+            tracks[track].push({
+              track,
+              midi,
+              startBeat: Number(startBeat.toFixed(3)),
+              durationBeats: Number(durationBeats.toFixed(3)),
+              velocity: musicXmlVelocity(note, directionVelocity)
+            });
+          }
+        }
+        if (!isChord) beat += durationBeats;
+      }
+      const measureBeats = Math.max(1, beat - measureStartBeat);
+      sections.push({ name: `measure_${measureIndex + 1}`, bars: Math.max(1, Math.round(measureBeats / 4)), intensity: 0.5 });
+    }
+    maxBeat = Math.max(maxBeat, beat);
+  }
+
+  const notes = Object.values(tracks).flat();
+  if (!notes.length) throw new Error("Invalid MusicXML: no pitched notes could be imported.");
+  if (tempo === input.defaultTempo) warnings.push(`No explicit tempo found; used defaultTempo ${input.defaultTempo} BPM.`);
+  if (key === "C major") warnings.push("No explicit key signature found; used C major.");
+
+  const durationSeconds = Math.max(1, Math.ceil(maxBeat * 60 / tempo));
+  const composition: MusicXmlImportResult["composition"] = {
+    title: scoreTitle(score, input.title),
+    style: "score_import",
+    mood: "score-driven piano performance",
+    tempo,
+    key,
+    durationSeconds,
+    loopable: false,
+    instruments: Object.keys(tracks),
+    sections: sections.length ? sections.slice(0, 64) : [{ name: "score", bars: Math.max(1, Math.round(maxBeat / 4)), intensity: 0.5 }],
+    chordProgression: chordNames.size ? [...chordNames] : ["score_notated"],
+    tracks,
+    license: {
+      output: "generated_from_user_or_project_score",
+      dependencies: ["MusicXML score content supplied by project/user.", "Audio render should use render_midi_with_soundfont with a registered commercial-safe piano SoundFont for production_candidate output."]
+    },
+    scoreSource: {
+      format: "MusicXML",
+      sourcePath: input.musicXmlPath,
+      importedAt: new Date().toISOString(),
+      partCount: parts.length,
+      noteCount: notes.length,
+      scoreDriven: true
+    },
+    warnings,
+    recommendedNextTools: ["manage_jazz_instrument_packs", "render_midi_with_soundfont", "inspect_audio_quality", "export_music_project"],
+    recommendedPianoPack: defaultCommercialSafePianoPackRecommendation()
+  };
+  return { composition, sourceXml };
+}
 
 function keyRoot(key: string) {
   return noteBase[key.replace(/m$/, "")] ?? 60;
@@ -1496,9 +1769,10 @@ function createProductionRenderPlan(input: z.infer<typeof createProductionMusicR
   ];
   const licenseGate = {
     policy: input.licensePolicy,
-    allowed: ["generated_original", "public_domain", "cc0", "mit", "apache_2", "commercial_license"],
-    reviewRequired: ["cc_by", "unknown", "lgpl", "gpl", "proprietary", "non_commercial"],
-    rule: "Do not use third-party samples, soundfonts, drum kits, or impulse responses until build_music_license_manifest marks them commercial-safe."
+    allowed: ["generated_original", "public_domain", "cc0", "cc_by_with_attribution", "mit", "apache_2", "commercial_license"],
+    reviewRequired: ["cc_by_missing_attribution", "unknown", "lgpl", "gpl", "proprietary", "non_commercial"],
+    recommendedPianoPack: defaultCommercialSafePianoPackRecommendation(),
+    rule: "Do not use third-party samples, soundfonts, drum kits, or impulse responses until manage_jazz_instrument_packs/build_music_license_manifest marks them commercial-safe. CC BY packs require attribution text before use."
   };
   return {
     styleProfile: input.styleProfile,
@@ -1795,8 +2069,8 @@ const jazzPackAllowedFormats: Record<z.infer<typeof jazzInstrumentPackSchema>["i
   room_ambience: ["impulse_response", "wav_multisample", "virtual_instrument"]
 };
 
-const jazzPackSafeLicenses = new Set(["generated_original", "public_domain", "cc0", "mit", "apache_2", "commercial_license"]);
-const jazzPackReviewLicenses = new Set(["cc_by", "user_provided", "lgpl", "gpl", "proprietary", "unknown"]);
+const jazzPackSafeLicenses = new Set(["generated_original", "public_domain", "cc0", "cc_by", "mit", "apache_2", "commercial_license"]);
+const jazzPackReviewLicenses = new Set(["user_provided", "lgpl", "gpl", "proprietary", "unknown"]);
 
 function jazzPackAssetType(format: z.infer<typeof jazzInstrumentPackSchema>["format"]): z.infer<typeof musicLicenseDependencySchema>["type"] {
   if (format === "soundfont" || format === "sfz") return "soundfont";
@@ -1930,18 +2204,26 @@ function renderAuditionHtml(title: string, variations: Array<Record<string, unkn
   const cards = variations.map((variation) => {
     const audioPath = String(variation.audioPath ?? "");
     const midiPath = String(variation.midiPath ?? "");
+    const scoreSourcePath = String(variation.scoreSourcePath ?? "");
     const notes = Array.isArray(variation.styleNotes) ? variation.styleNotes.join(", ") : String(variation.rationale ?? "");
     const versionId = String(variation.id ?? variation.label ?? "version");
     const titleText = String(variation.title ?? variation.label ?? variation.id ?? "Version");
     const duration = Number(variation.durationSeconds ?? variation.durationSec ?? 0);
     const tempo = variation.tempo ?? variation.bpm ?? "";
     const moodTags = Array.isArray(variation.moodTags) ? variation.moodTags : [];
+    const renderer = String(variation.renderer ?? "unknown");
+    const qualityTier = String(variation.qualityTier ?? (renderer === "fluidsynth" ? "production_candidate" : "preview_only"));
+    const renderClass = qualityTier === "production_candidate" ? "ok" : "warn";
     return `<article class="card">
       <header><h2>${escapeHtml(titleText)}</h2><label class="winner"><input type="radio" name="winner" value="${escapeHtml(versionId)}"> Choose this version</label></header>
       <audio controls preload="metadata" src="${escapeHtml(audioPath)}"></audio>
       <dl>
         <dt>Style</dt><dd>${escapeHtml(String(variation.style ?? ""))}</dd>
         <dt>BPM / Key</dt><dd>${escapeHtml(String(tempo))} / ${escapeHtml(String(variation.key ?? ""))}</dd>
+        <dt>Renderer</dt><dd><span class="${renderClass}">${escapeHtml(renderer)} / ${escapeHtml(qualityTier)}</span></dd>
+        <dt>SoundFont</dt><dd>${escapeHtml(String(variation.soundfontName ?? "not registered"))}</dd>
+        <dt>License</dt><dd>${escapeHtml(String(variation.licenseStatus ?? "review required before production use"))}</dd>
+        <dt>QA</dt><dd>${variation.qaScore === undefined ? "not supplied" : `${Number(variation.qaScore).toFixed(0)} / 100`}</dd>
         <dt>Instruments</dt><dd>${escapeHtml(Array.isArray(variation.instruments) ? variation.instruments.join(", ") : "")}</dd>
         <dt>Mood</dt><dd>${escapeHtml(moodTags.join(", "))}</dd>
         <dt>Notes</dt><dd>${escapeHtml(notes)}</dd>
@@ -1949,7 +2231,7 @@ function renderAuditionHtml(title: string, variations: Array<Record<string, unkn
       </dl>
       <div class="timeline" aria-label="Timeline"><span style="width:${Math.max(10, Math.min(100, (duration || 30) / 1.2))}%"></span></div>
       <label class="rating">Rating <input type="range" min="1" max="5" value="3" data-version="${escapeHtml(versionId)}"></label>
-      ${allowDownloads ? `<p class="downloads"><a href="${escapeHtml(audioPath)}" download>Download audio</a>${midiPath ? ` <a href="${escapeHtml(midiPath)}" download>Download MIDI</a>` : ""}</p>` : ""}
+      ${allowDownloads ? `<p class="downloads"><a href="${escapeHtml(audioPath)}" download>Download audio</a>${midiPath ? ` <a href="${escapeHtml(midiPath)}" download>Download MIDI</a>` : ""}${scoreSourcePath ? ` <a href="${escapeHtml(scoreSourcePath)}" download>Download score</a>` : ""}</p>` : ""}
     </article>`;
   }).join("\n");
   return `<!doctype html>
@@ -1963,7 +2245,7 @@ body{margin:0;font-family:Inter,system-ui,sans-serif;background:#f6f4ef;color:#1
 header,main{max-width:1120px;margin:auto;padding:28px}
 h1{font-size:32px;margin:0 0 8px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
 .card{background:#fff;border:1px solid #ddd7ca;border-radius:8px;padding:18px}.card header{display:flex;gap:12px;align-items:start;justify-content:space-between}audio{width:100%}
-dt{font-weight:700;margin-top:10px}.timeline{height:8px;background:#ece7dc;border-radius:999px;overflow:hidden}.timeline span{display:block;height:100%;background:#5b7f95}
+dt{font-weight:700;margin-top:10px}.ok{color:#166534}.warn{color:#9a3412}.timeline{height:8px;background:#ece7dc;border-radius:999px;overflow:hidden}.timeline span{display:block;height:100%;background:#5b7f95}
 .feedback{margin-top:20px;background:#fff;border:1px solid #ddd7ca;border-radius:8px;padding:16px}textarea{width:100%;min-height:92px}.checks{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}.rating{display:block;margin-top:14px}.winner{font-size:13px}
 </style>
 </head>
@@ -2431,13 +2713,13 @@ export const musicWorkflowTools: ToolModule[] = [
         writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(composition), "audio/midi")
       ]);
       return {
-        ok: composition.warnings.length === 0,
+        ok: true,
         summary: `Created editable MIDI with ${composition.trackList.length} track(s), ${composition.sectionMap.length} section marker(s), and ${composition.warnings.length} warning(s).`,
         jobId: parsed.projectId,
         artifacts: [manifestFile.path, midiFile.path],
         structuredContent: { midiPath: midiFile.path, manifestPath: manifestFile.path, trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart, warnings: composition.warnings, editableOperations: composition.editableOperations },
         logs: [JSON.stringify({ trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart }, null, 2)],
-        errors: composition.warnings
+        errors: []
       };
     }
   },
@@ -2739,6 +3021,28 @@ export const musicWorkflowTools: ToolModule[] = [
         artifacts: [file.path],
         structuredContent: { ...plan, outputPath: file.path },
         logs: [JSON.stringify({ revisionPlan: plan.revisionPlan, nextToolSequence: plan.nextToolSequence }, null, 2)],
+        errors: []
+      };
+    }
+  },
+  {
+    definition: { name: "import_musicxml_score", description: "Import a piano-first MusicXML score into the existing composition manifest shape and write a standard MIDI file for SoundFont rendering.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, musicXmlPath: { type: "string" }, musicXmlString: { type: "string" }, title: { type: "string" }, defaultTempo: { type: "number" }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    enabledByDefault: true,
+    schema: importMusicXmlScoreInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = importMusicXmlScoreInputSchema.parse(input);
+      const { composition } = await importMusicXmlScore(ctx, parsed);
+      const [manifestFile, midiFile] = await Promise.all([
+        writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(composition, null, 2)}\n`),
+        writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(composition), "audio/midi")
+      ]);
+      return {
+        ok: true,
+        summary: `Imported MusicXML score with ${Object.values(composition.tracks).flat().length} note(s) into ${midiFile.path}.`,
+        jobId: parsed.projectId,
+        artifacts: [manifestFile.path, midiFile.path],
+        structuredContent: { ...composition, manifestPath: manifestFile.path, midiPath: midiFile.path },
+        logs: [JSON.stringify({ manifestPath: manifestFile.path, midiPath: midiFile.path, warnings: composition.warnings, scoreSource: composition.scoreSource, recommendedPianoPack: composition.recommendedPianoPack }, null, 2)],
         errors: []
       };
     }
