@@ -22,6 +22,7 @@ import { getIssueStats, listIssues, updateIssueStatus, type IssueStatus } from "
 import { summarizeTelemetry } from "./telemetry/aggregate.js";
 import { deleteBlogPost, getBlogPostBySlug, getBlogTheme, listBlogPosts, setBlogTheme, upsertBlogPost } from "./blog/store.js";
 import { clearHomepage, getHomepage, setHomepage } from "./site/store.js";
+import { resolveHomepageProjectForSet } from "./site/homepage.js";
 import type { SkillState } from "./skills/state.js";
 import { listSkillStates, setSkillEnabled } from "./skills/state.js";
 import {
@@ -657,11 +658,8 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     try {
       const user = res.locals.currentUser as PublicUser;
       if (!requireAdmin(user, res)) return;
-      const root = await findProjectRoot(req, user, req.params.projectId);
-      const project = await getProject(root, req.params.projectId);
-      if (project.status !== "published") throw new Error("Project must be published before it can be the homepage.");
-      const owner = await getUserByProjectRoot(root);
-      if (!owner) throw new Error("Could not resolve the project owner.");
+      const preferredProjectRoot = await requestedProjectRoot(req, user);
+      const { project, owner } = await resolveHomepageProjectForSet(req.params.projectId, { preferredProjectRoot });
       setHomepage({ projectId: req.params.projectId, ownerUserId: owner.id });
       recordActivity({ userId: user.id, clientId: "admin", method: "admin/site/home", toolName: req.params.projectId, ok: true, summary: `Set project ${req.params.projectId} as the homepage.` });
       ok(res, { homepage: { projectId: req.params.projectId, title: project.title } });

@@ -1,8 +1,8 @@
 import { z } from "zod";
 import type { ToolModule, ToolContext, ToolResult } from "../types.js";
-import { getProject } from "../../projects/store.js";
 import { getUserById } from "../../user-store.js";
 import { clearHomepage, getHomepage, setHomepage } from "../../site/store.js";
+import { resolveHomepageProjectForSet } from "../../site/homepage.js";
 
 const setHomepageSchema = z.object({ projectId: z.string().min(1) });
 const emptySchema = z.object({}).strip();
@@ -37,12 +37,15 @@ export const siteTools: ToolModule[] = [
       const denied = await requireAdmin(ctx);
       if (denied) return denied;
       const { projectId } = input as z.infer<typeof setHomepageSchema>;
-      const project = await getProject(ctx.projectRoot, projectId);
-      if (project.status !== "published") {
-        return { ok: false, summary: "Project must be published before it can be the homepage.", artifacts: [], logs: [], errors: ["Project is not published."] };
+      let resolved: Awaited<ReturnType<typeof resolveHomepageProjectForSet>>;
+      try {
+        resolved = await resolveHomepageProjectForSet(projectId, { preferredProjectRoot: ctx.projectRoot });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to resolve homepage project.";
+        return { ok: false, summary: message, artifacts: [], logs: [], errors: [message] };
       }
-      setHomepage({ projectId, ownerUserId: ctx.userId as string });
-      return { ok: true, summary: `Homepage set to project ${projectId}.`, previewUrl: rootUrl(ctx), shareUrl: rootUrl(ctx), artifacts: [], logs: [`Visitors to ${rootUrl(ctx)} now see "${project.title}".`], errors: [] };
+      setHomepage({ projectId, ownerUserId: resolved.owner.id });
+      return { ok: true, summary: `Homepage set to project ${projectId}.`, previewUrl: rootUrl(ctx), shareUrl: rootUrl(ctx), artifacts: [], logs: [`Visitors to ${rootUrl(ctx)} now see "${resolved.project.title}".`], errors: [] };
     }
   },
   {

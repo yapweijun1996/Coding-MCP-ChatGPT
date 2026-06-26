@@ -172,6 +172,29 @@ function renderDefaultLanding(): string {
 </html>`;
 }
 
+function renderHomepageUnavailable(): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Homepage unavailable</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: ui-sans-serif, system-ui, sans-serif; background: #141718; color: #edf2f0; }
+  main { max-width: 640px; padding: 32px; text-align: center; }
+  h1 { font-size: clamp(28px, 5vw, 42px); margin: 0 0 12px; }
+  p { color: #aab7b2; margin: 0; line-height: 1.55; }
+</style>
+</head>
+<body>
+  <main>
+    <h1>Homepage unavailable</h1>
+    <p>Configured homepage is unavailable. An administrator can publish a valid project or clear the homepage setting.</p>
+  </main>
+</body>
+</html>`;
+}
+
 export function registerContentRoutes(app: express.Express, config: ServerConfig): void {
   const { publicBaseUrl, contentBaseUrl, artifactRoot } = config;
   const hasSeparateContentHost = configuredHostsAreSeparate(publicBaseUrl, contentBaseUrl);
@@ -192,23 +215,32 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
       : strictProjectContentCsp;
   }
 
-  async function serveHomepageFile(req: express.Request, res: express.Response, relativePath?: string): Promise<boolean> {
-    if (isAppHostRequest(req)) return false;
+  type HomepageServeResult = "served" | "not_configured" | "unavailable" | "not_found";
+
+  async function serveHomepageFile(req: express.Request, res: express.Response, relativePath?: string): Promise<HomepageServeResult> {
+    if (isAppHostRequest(req)) return "not_configured";
     const home = getHomepage();
-    if (!home.homeProjectId || !home.homeOwnerUserId) return false;
+    if (!home.homeProjectId || !home.homeOwnerUserId) return "not_configured";
     try {
       const root = await getProjectRootForUser(home.homeOwnerUserId);
       const project = await getProject(root, home.homeProjectId);
-      if (project.status !== "published") return false;
+      if (project.status !== "published") return "unavailable";
       const filename = relativePath && relativePath !== "/" ? relativePath.replace(/^\/+/, "") : project.entryFile;
-      return await sendPublishedProjectFile(req, res, root, home.homeProjectId, filename, `${contentBaseUrl.replace(/\/$/, "")}/`, false, projectHtmlCspForRequest(req));
+      return await sendPublishedProjectFile(req, res, root, home.homeProjectId, filename, `${contentBaseUrl.replace(/\/$/, "")}/`, false, projectHtmlCspForRequest(req))
+        ? "served"
+        : relativePath ? "not_found" : "unavailable";
     } catch {
-      return false;
+      return relativePath ? "not_found" : "unavailable";
     }
   }
 
   app.get("/", asyncRoute(async (req, res) => {
-    if (await serveHomepageFile(req, res)) return;
+    const homeResult = await serveHomepageFile(req, res);
+    if (homeResult === "served") return;
+    if (homeResult === "unavailable") {
+      res.status(503).type("html").send(renderHomepageUnavailable());
+      return;
+    }
     res.type("html").send(renderDefaultLanding());
   }));
 
@@ -372,7 +404,12 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
   // Fallback: serve root-level assets of the homepage project (e.g. /styles.css, /assets/app.js).
   // Registered last so it never shadows a named route; falls through to 404 when no homepage is set.
   app.get("/:asset(*)", asyncRoute(async (req, res) => {
-    if (await serveHomepageFile(req, res, req.params.asset)) return;
+    const homeResult = await serveHomepageFile(req, res, req.params.asset);
+    if (homeResult === "served") return;
+    if (homeResult === "unavailable") {
+      res.status(503).type("text/plain").send("Configured homepage is unavailable.");
+      return;
+    }
     res.status(404).type("text/plain").send("Not found.");
   }));
 }

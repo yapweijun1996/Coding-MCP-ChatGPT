@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, request } from "node:http";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -410,6 +410,7 @@ test("site homepage serves at root and set_homepage is admin-gated", async () =>
     await writeProjectFile(adminRoot, project.id, "index.html", "<!doctype html><title>Home</title><link rel=stylesheet href=./styles.css><h1>HOMEPAGE_MARKER</h1>");
     await writeProjectFile(adminRoot, project.id, "styles.css", "h1{color:rebeccapurple}");
     await publishProject(adminRoot, project.id, "https://example.test", "index.html");
+    const draftProject = await createProject(adminRoot, { title: "Draft home", createdByClientId: "test-client" });
 
     // set_homepage must reject a non-admin caller (no userId).
     const setHomepageTool = siteTools.find((tool) => tool.definition.name === "set_homepage");
@@ -418,11 +419,36 @@ test("site homepage serves at root and set_homepage is admin-gated", async () =>
     const denied = await setHomepageTool.handler({ projectId: project.id }, { ...ctxBase, userId: undefined });
     assert.equal(denied.ok, false);
     assert.equal(getHomepage().homeProjectId, null);
+    const rejectedDraft = await setHomepageTool.handler({ projectId: draftProject.id }, { ...ctxBase, userId: adminId });
+    assert.equal(rejectedDraft.ok, false);
+    assert.match(rejectedDraft.summary, /published/);
+    assert.equal(getHomepage().homeProjectId, null);
+
+    await updateRegistrationSettings({ allowRegistration: true, allowedEmailDomains: [] });
+    const otherUser = await registerUser(`homepage-owner-${Date.now()}@example.test`, "test-user-password");
+    const approvedOtherUser = await approveUser(otherUser.id, adminId);
+    const otherProject = await createProject(approvedOtherUser.projectRoot, { title: "Other User Landing", createdByClientId: "test-client" });
+    await writeProjectFile(approvedOtherUser.projectRoot, otherProject.id, "index.html", "<!doctype html><title>OtherHome</title><h1>OTHER_HOME_MARKER</h1>");
+    await publishProject(approvedOtherUser.projectRoot, otherProject.id, "https://example.test", "index.html");
+    const deniedDeveloper = await setHomepageTool.handler(
+      { projectId: otherProject.id },
+      { ...ctxBase, projectRoot: approvedOtherUser.projectRoot, userId: approvedOtherUser.id }
+    );
+    assert.equal(deniedDeveloper.ok, false);
+    assert.equal(getHomepage().homeProjectId, null);
+
+    // Admin MCP set_homepage can target a published project owned by another user.
+    const crossUser = await setHomepageTool.handler({ projectId: otherProject.id }, { ...ctxBase, userId: adminId });
+    assert.equal(crossUser.ok, true);
+    assert.equal(getHomepage().homeProjectId, otherProject.id);
+    assert.equal(getHomepage().homeOwnerUserId, approvedOtherUser.id);
+    assert.match(await (await fetch(`${baseUrl}/`)).text(), /OTHER_HOME_MARKER/);
 
     // set_homepage succeeds for an admin caller.
     const allowed = await setHomepageTool.handler({ projectId: project.id }, { ...ctxBase, userId: adminId });
     assert.equal(allowed.ok, true);
     assert.equal(getHomepage().homeProjectId, project.id);
+    assert.equal(getHomepage().homeOwnerUserId, adminId);
 
     // Root now serves the homepage entry file and its sibling asset.
     const home = await fetch(`${baseUrl}/`);
@@ -469,6 +495,13 @@ test("admin API sets and clears the homepage", async () => {
     assert.equal(current.homepage?.title, "Admin Set Home");
 
     assert.match(await (await fetch(`${baseUrl}/`)).text(), /ADMIN_HOME_MARKER/);
+
+    await rm(path.join(adminRoot, project.id, "files", "index.html"));
+    const unavailable = await fetch(`${baseUrl}/`);
+    assert.equal(unavailable.status, 503);
+    assert.match(await unavailable.text(), /Configured homepage is unavailable/);
+    const stillConfigured = await (await fetch(`${baseUrl}/admin/api/site/home`, { headers: { Cookie: cookie } })).json() as { homepage?: { projectId?: string; title?: string } };
+    assert.equal(stillConfigured.homepage?.projectId, project.id);
 
     const clearRes = await fetch(`${baseUrl}/admin/api/site/home`, { method: "DELETE", headers });
     assert.equal(clearRes.status, 200);
