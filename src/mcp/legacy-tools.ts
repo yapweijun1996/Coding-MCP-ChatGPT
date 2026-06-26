@@ -6,17 +6,6 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { saveJob } from "../jobs/store.js";
-import {
-  createProject,
-  deleteProject,
-  deleteProjectFile,
-  getProjectWithFiles,
-  listProjects,
-  publishProject,
-  readProjectFile,
-  writeProjectFile
-} from "../projects/store.js";
-import { createShareArtifact } from "../share/store.js";
 import { childEnv, gitChildEnv } from "./child-env.js";
 
 const execFileAsync = promisify(execFile);
@@ -98,30 +87,6 @@ export interface ToolContext {
 
 export const toolDefinitions: ToolDefinition[] = [
   {
-    name: "ping",
-    description: "Check that the Coding MCP server is reachable.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        message: { type: "string", description: "Optional message to echo." }
-      },
-      additionalProperties: false
-    }
-  },
-  {
-    name: "create_preview",
-    description: "Create a demo preview result and return an outcome URL.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        title: { type: "string" },
-        summary: { type: "string" }
-      },
-      required: ["title", "summary"],
-      additionalProperties: false
-    }
-  },
-  {
     name: "write_file",
     description: "Write a UTF-8 text file inside the configured workspace only.",
     inputSchema: {
@@ -197,27 +162,6 @@ export const toolDefinitions: ToolDefinition[] = [
         }
       },
       required: ["command"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "git_status",
-    description: "Show git status in the configured workspace.",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      additionalProperties: false
-    }
-  },
-  {
-    name: "git_diff",
-    description: "Show git diff in the configured workspace, optionally scoped to a file.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "Optional workspace-relative path." },
-        cached: { type: "boolean", description: "Show staged diff only." }
-      },
       additionalProperties: false
     }
   },
@@ -1021,22 +965,6 @@ export const toolDefinitions: ToolDefinition[] = [
     }
   },
   {
-    name: "git_push",
-    description: "Push commits to a remote branch.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        remote: { type: "string", description: "Remote name (default: origin)." },
-        source: { type: "string", description: "Source branch/ref." },
-        forceWithLease: { type: "boolean", description: "Use --force-with-lease." },
-        setUpstream: { type: "boolean", description: "Use --set-upstream." },
-        all: { type: "boolean", description: "Push all branches." }
-      },
-      required: [],
-      additionalProperties: false
-    }
-  },
-  {
     name: "git_remote",
     description: "Manage git remotes for the workspace repository.",
     inputSchema: {
@@ -1048,22 +976,6 @@ export const toolDefinitions: ToolDefinition[] = [
         newName: { type: "string", description: "New remote name for rename." }
       },
       required: ["action"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "git_commit",
-    description: "Create a git commit in the configured repository.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        message: { type: "string", description: "Commit message. Optional for amend (uses --no-edit by default)." },
-        all: { type: "boolean", description: "Stage all tracked changes before commit." },
-        amend: { type: "boolean", description: "Amend HEAD commit." },
-        allowEmpty: { type: "boolean", description: "Allow creating an empty commit." },
-        path: { type: "string", description: "Optional workspace-relative path to include with --only." }
-      },
-      required: [],
       additionalProperties: false
     }
   },
@@ -1160,136 +1072,7 @@ export const toolDefinitions: ToolDefinition[] = [
       additionalProperties: false
     }
   },
-  {
-    name: "create_project",
-    description: "Create a persistent coding project and return its projectId.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        title: { type: "string", description: "Project title." },
-        summary: { type: "string", description: "Short project summary." },
-        entryFile: { type: "string", description: "Entry file, default index.html." }
-      },
-      required: ["title"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "list_projects",
-    description: "List persistent coding projects created through this MCP.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        includeDeleted: { type: "boolean", description: "Include soft-deleted projects." }
-      },
-      additionalProperties: false
-    }
-  },
-  {
-    name: "get_project",
-    description: "Get project metadata, file list, and published URL if available.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        projectId: { type: "string" }
-      },
-      required: ["projectId"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "write_project_file",
-    description: "Write a UTF-8 file inside a persistent project.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        projectId: { type: "string" },
-        relativePath: { type: "string", description: "Project-relative path. No absolute paths, dotfiles, or parent traversal." },
-        content: { type: "string", description: "UTF-8 text content. Max 1 MiB." }
-      },
-      required: ["projectId", "relativePath", "content"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "read_project_file",
-    description: "Read a UTF-8 file from a persistent project.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        projectId: { type: "string" },
-        relativePath: { type: "string" },
-        maxBytes: { type: "number", minimum: 1, maximum: 1048576 }
-      },
-      required: ["projectId", "relativePath"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "delete_project_file",
-    description: "Delete one file from a persistent project.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        projectId: { type: "string" },
-        relativePath: { type: "string" },
-        confirm: { type: "boolean", description: "Set true to confirm delete." }
-      },
-      required: ["projectId", "relativePath", "confirm"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "publish_project",
-    description: "Publish a project entry file and return a public share URL.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        projectId: { type: "string" },
-        entryFile: { type: "string", description: "Entry file to publish. Defaults to project entryFile." }
-      },
-      required: ["projectId"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "delete_project",
-    description: "Soft-delete a persistent project. Disabled by default in admin tool access.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        projectId: { type: "string" },
-        confirm: { type: "boolean", description: "Set true to confirm delete." }
-      },
-      required: ["projectId", "confirm"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "create_share",
-    description: "Publish a standalone HTML artifact and return a public share URL.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        title: { type: "string" },
-        summary: { type: "string" },
-        filename: { type: "string", description: "Simple .html filename, for example index.html or report.html." },
-        html: { type: "string", description: "Complete standalone HTML document. Max 1 MiB." }
-      },
-      required: ["title", "summary", "filename", "html"],
-      additionalProperties: false
-    }
-  }
 ];
-
-const pingInputSchema = z.object({
-  message: z.string().optional()
-});
-
-const previewInputSchema = z.object({
-  title: z.string().min(1).max(160),
-  summary: z.string().min(1).max(2000)
-});
 
 const writeFileInputSchema = z.object({
   relativePath: z.string().min(1).max(240),
@@ -1320,13 +1103,6 @@ const searchFilesInputSchema = z.object({
 
 const runCommandInputSchema = z.object({
   command: z.enum(["npm test", "npm run build", "npm run typecheck"])
-});
-
-const gitStatusInputSchema = z.object({});
-
-const gitDiffInputSchema = z.object({
-  path: z.string().min(1).max(240).optional(),
-  cached: z.boolean().optional().default(false)
 });
 
 const replaceInFileInputSchema = z.object({
@@ -1697,14 +1473,6 @@ const gitPullInputSchema = z.object({
   depth: z.number().int().min(1).max(64).optional()
 });
 
-const gitPushInputSchema = z.object({
-  remote: z.string().min(1).max(80).optional(),
-  source: z.string().min(1).max(160).optional(),
-  forceWithLease: z.boolean().optional().default(false),
-  setUpstream: z.boolean().optional().default(false),
-  all: z.boolean().optional().default(false)
-});
-
 const gitRemoteInputSchema = z.object({
   action: z.enum(["list", "show", "add", "remove", "rename", "get-url", "set-url", "prune"]),
   name: z.string().min(1).max(80).optional(),
@@ -1716,14 +1484,6 @@ const gitMergeInputSchema = z.object({
   source: z.string().min(1).max(160).optional(),
   noFF: z.boolean().optional().default(false),
   abort: z.boolean().optional().default(false)
-});
-
-const gitCommitInputSchema = z.object({
-  message: z.string().min(1).max(2000).optional(),
-  all: z.boolean().optional().default(false),
-  amend: z.boolean().optional().default(false),
-  allowEmpty: z.boolean().optional().default(false),
-  path: z.string().min(1).max(240).optional()
 });
 
 const chmodModeInputSchema = z.object({
@@ -1781,61 +1541,8 @@ const gitLogInputSchema = z.object({
   path: z.string().min(1).max(240).optional()
 });
 
-const createProjectInputSchema = z.object({
-  title: z.string().min(1).max(160),
-  summary: z.string().max(2000).optional().default(""),
-  entryFile: z.string().min(1).max(240).optional().default("index.html")
-});
-
-const listProjectsInputSchema = z.object({
-  includeDeleted: z.boolean().optional().default(false)
-});
-
-const projectIdInputSchema = z.object({
-  projectId: z.string().min(8).max(80)
-});
-
-const writeProjectFileInputSchema = z.object({
-  projectId: z.string().min(8).max(80),
-  relativePath: z.string().min(1).max(240),
-  content: z.string().max(1024 * 1024)
-});
-
-const readProjectFileInputSchema = z.object({
-  projectId: z.string().min(8).max(80),
-  relativePath: z.string().min(1).max(240),
-  maxBytes: z.number().int().min(1).max(1024 * 1024).optional().default(65536)
-});
-
-const deleteProjectFileInputSchema = z.object({
-  projectId: z.string().min(8).max(80),
-  relativePath: z.string().min(1).max(240),
-  confirm: z.boolean().refine((value) => value === true, { message: "Deletion requires confirm=true." })
-});
-
-const publishProjectInputSchema = z.object({
-  projectId: z.string().min(8).max(80),
-  entryFile: z.string().min(1).max(240).optional()
-});
-
-const deleteProjectInputSchema = z.object({
-  projectId: z.string().min(8).max(80),
-  confirm: z.boolean().refine((value) => value === true, { message: "Deletion requires confirm=true." })
-});
-
-const createShareInputSchema = z.object({
-  title: z.string().min(1).max(160),
-  summary: z.string().min(1).max(2000),
-  filename: z.string().min(6).max(86),
-  html: z.string().min(1).max(1024 * 1024)
-});
-
 function makePreviewUrl(publicBaseUrl: string, jobId: string): string {
   return `${publicBaseUrl.replace(/\/$/, "")}/outcome/${jobId}`;
-}
-
-function makeShareUrl(publicBaseUrl: string, shareId: string, filename: string): string {
-  return `${publicBaseUrl.replace(/\/$/, "")}/share/${shareId}/${filename}`;
 }
 
 async function computeFileHash(filePath: string, algorithm: string): Promise<string> {
@@ -2151,22 +1858,6 @@ function commandToExecArgs(command: "npm test" | "npm run build" | "npm run type
 
 export async function callTool(name: string, rawInput: unknown, ctx: ToolContext): Promise<ToolResult> {
   try {
-    if (name === "ping") {
-      const input = pingInputSchema.parse(rawInput ?? {});
-      return {
-        ok: true,
-        summary: "Coding MCP server is reachable.",
-        artifacts: [],
-        logs: [input.message ? `Echo: ${input.message}` : "pong"],
-        errors: []
-      };
-    }
-
-    if (name === "create_preview") {
-      const input = previewInputSchema.parse(rawInput);
-      return createJobResult(ctx, input.title, input.summary, ["Preview job created."], []);
-    }
-
     if (name === "write_file") {
       const input = writeFileInputSchema.parse(rawInput);
       assertWritableWorkspacePath(input.relativePath);
@@ -2268,35 +1959,6 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
         env: childEnv()
       });
       return createJobResult(ctx, `Ran ${input.command}`, `${input.command} completed successfully.`, [stdout.trim(), stderr.trim()].filter(Boolean), []);
-    }
-
-    if (name === "git_status") {
-      gitStatusInputSchema.parse(rawInput);
-      const { stdout, stderr } = await gitCommand(ctx.workspaceRoot, ctx.commandTimeoutMs, ["status", "--short"]);
-      return {
-        ok: true,
-        summary: "Read git status.",
-        artifacts: [],
-        logs: [safePreview(stdout), safePreview(stderr)].filter(Boolean),
-        errors: []
-      };
-    }
-
-    if (name === "git_diff") {
-      const input = gitDiffInputSchema.parse(rawInput);
-      const args = ["diff", input.cached ? "--cached" : ""].filter(Boolean);
-      if (input.path) {
-        const targetPath = resolveSafeWorkspacePath(ctx.workspaceRoot, input.path);
-        args.push(formatPathForWorkspace(ctx.workspaceRoot, targetPath));
-      }
-      const { stdout, stderr } = await gitCommand(ctx.workspaceRoot, ctx.commandTimeoutMs, args);
-      return {
-        ok: true,
-        summary: "Read git diff.",
-        artifacts: [],
-        logs: [safePreview(stdout), safePreview(stderr)].filter(Boolean),
-        errors: []
-      };
     }
 
     if (name === "replace_in_file") {
@@ -3956,28 +3618,6 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
       };
     }
 
-    if (name === "git_push") {
-      const input = gitPushInputSchema.parse(rawInput);
-      const args = ["push"];
-      if (input.forceWithLease) args.push("--force-with-lease");
-      if (input.setUpstream) args.push("--set-upstream");
-      if (input.all) {
-        args.push("--all");
-      } else {
-        if (input.remote) args.push(input.remote);
-        if (input.source) args.push(input.source);
-      }
-
-      const { stdout, stderr } = await gitCommand(ctx.workspaceRoot, ctx.commandTimeoutMs, args);
-      return {
-        ok: true,
-        summary: "Ran git push.",
-        artifacts: [],
-        logs: [safePreview(stdout), safePreview(stderr)].filter(Boolean),
-        errors: []
-      };
-    }
-
     if (name === "git_remote") {
       const input = gitRemoteInputSchema.parse(rawInput);
       const args = ["remote"];
@@ -4021,42 +3661,6 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
       return {
         ok: true,
         summary: `Ran git remote ${input.action}.`,
-        artifacts: [],
-        logs: [safePreview(stdout), safePreview(stderr)].filter(Boolean),
-        errors: []
-      };
-    }
-
-    if (name === "git_commit") {
-      const input = gitCommitInputSchema.parse(rawInput);
-
-      if (!input.amend && !input.message) {
-        throw new Error("message is required unless amend is true.");
-      }
-
-      const args = ["commit"];
-      if (input.all) args.push("-a");
-      if (input.allowEmpty) args.push("--allow-empty");
-      if (input.amend) {
-        args.push("--amend");
-        if (input.message) {
-          args.push("-m", input.message);
-        } else {
-          args.push("--no-edit");
-        }
-      } else if (input.message) {
-        args.push("-m", input.message);
-      }
-
-      if (input.path) {
-        const targetPath = resolveSafeWorkspacePath(ctx.workspaceRoot, input.path);
-        args.push("--only", "--", formatPathForWorkspace(ctx.workspaceRoot, targetPath));
-      }
-
-      const { stdout, stderr } = await gitCommand(ctx.workspaceRoot, ctx.commandTimeoutMs, args);
-      return {
-        ok: true,
-        summary: input.amend ? "Amended git commit." : "Created git commit.",
         artifacts: [],
         logs: [safePreview(stdout), safePreview(stderr)].filter(Boolean),
         errors: []
@@ -4175,137 +3779,6 @@ export async function callTool(name: string, rawInput: unknown, ctx: ToolContext
         artifacts: [],
         logs: [safePreview(stdout), safePreview(stderr)].filter(Boolean),
         errors: []
-      };
-    }
-
-    if (name === "create_project") {
-      const input = createProjectInputSchema.parse(rawInput);
-      const project = await createProject(ctx.projectRoot, {
-        title: input.title,
-        summary: input.summary,
-        entryFile: input.entryFile,
-        createdByClientId: ctx.clientId
-      });
-      return {
-        ok: true,
-        summary: `Created project ${project.id}.`,
-        jobId: project.id,
-        artifacts: [project.id],
-        logs: [JSON.stringify(project, null, 2)],
-        errors: []
-      };
-    }
-
-    if (name === "list_projects") {
-      const input = listProjectsInputSchema.parse(rawInput);
-      const projects = await listProjects(ctx.projectRoot, input.includeDeleted);
-      return {
-        ok: true,
-        summary: `Found ${projects.length} project(s).`,
-        artifacts: projects.map((project) => project.id),
-        logs: [JSON.stringify(projects, null, 2)],
-        errors: []
-      };
-    }
-
-    if (name === "get_project") {
-      const input = projectIdInputSchema.parse(rawInput);
-      const project = await getProjectWithFiles(ctx.projectRoot, input.projectId);
-      return {
-        ok: true,
-        summary: `Loaded project ${input.projectId}.`,
-        jobId: input.projectId,
-        shareUrl: project.metadata.publishedUrl,
-        previewUrl: project.metadata.publishedUrl,
-        artifacts: project.files.map((file) => file.path),
-        logs: [JSON.stringify(project, null, 2)],
-        errors: []
-      };
-    }
-
-    if (name === "write_project_file") {
-      const input = writeProjectFileInputSchema.parse(rawInput);
-      const file = await writeProjectFile(ctx.projectRoot, input.projectId, input.relativePath, input.content);
-      return {
-        ok: true,
-        summary: `Wrote ${file.path} in project ${input.projectId}.`,
-        jobId: input.projectId,
-        artifacts: [file.path],
-        logs: [JSON.stringify(file, null, 2)],
-        errors: []
-      };
-    }
-
-    if (name === "read_project_file") {
-      const input = readProjectFileInputSchema.parse(rawInput);
-      const content = await readProjectFile(ctx.projectRoot, input.projectId, input.relativePath, input.maxBytes);
-      return {
-        ok: true,
-        summary: `Read ${input.relativePath} from project ${input.projectId}.`,
-        jobId: input.projectId,
-        artifacts: [input.relativePath],
-        logs: [content],
-        errors: []
-      };
-    }
-
-    if (name === "delete_project_file") {
-      const input = deleteProjectFileInputSchema.parse(rawInput);
-      await deleteProjectFile(ctx.projectRoot, input.projectId, input.relativePath);
-      return {
-        ok: true,
-        summary: `Deleted ${input.relativePath} from project ${input.projectId}.`,
-        jobId: input.projectId,
-        artifacts: [input.relativePath],
-        logs: [],
-        errors: []
-      };
-    }
-
-    if (name === "publish_project") {
-      const input = publishProjectInputSchema.parse(rawInput);
-      const project = await publishProject(ctx.projectRoot, input.projectId, ctx.contentBaseUrl ?? ctx.publicBaseUrl, input.entryFile, { privateBaseUrl: ctx.publicBaseUrl, shareBasePath: ctx.publicShareBasePath });
-      return {
-        ok: true,
-        summary: `Published project ${input.projectId}.`,
-        jobId: input.projectId,
-        previewUrl: project.publishedUrl,
-        shareUrl: project.publishedUrl,
-        artifacts: [project.entryFile],
-        logs: [JSON.stringify(project, null, 2)],
-        errors: []
-      };
-    }
-
-    if (name === "delete_project") {
-      const input = deleteProjectInputSchema.parse(rawInput);
-      const project = await deleteProject(ctx.projectRoot, input.projectId);
-      return {
-        ok: true,
-        summary: `Soft-deleted project ${input.projectId}.`,
-        jobId: input.projectId,
-        artifacts: [],
-        logs: [JSON.stringify(project, null, 2)],
-        errors: []
-      };
-    }
-
-    if (name === "create_share") {
-      const input = createShareInputSchema.parse(rawInput);
-      const share = await createShareArtifact({
-        shareRoot: ctx.shareRoot,
-        title: input.title,
-        summary: input.summary,
-        filename: input.filename,
-        html: input.html,
-        ownerUserId: ctx.userId
-      });
-      const shareUrl = makeShareUrl(ctx.publicBaseUrl, share.id, share.filename);
-      const result = createJobResult(ctx, `Shared ${share.filename}`, input.summary, ["Share artifact created."], [`share/${share.id}/${share.filename}`]);
-      return {
-        ...result,
-        previewUrl: shareUrl,
-        shareUrl
       };
     }
 
