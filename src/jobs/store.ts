@@ -7,6 +7,11 @@ export type JobStatus = "created" | "running" | "success" | "error" | "cancelled
 export interface JobRecord {
   id: string;
   status: JobStatus;
+  // The tenant (OAuth-bound userId) that created the job. undefined only for the shared
+  // legacy/dev-token domain. Job tools authorize by exact match against ctx.userId so one
+  // tenant cannot read, cancel, or re-execute another tenant's jobs. Jobs persisted before
+  // this field existed load as undefined — a safe (deny) default for real users.
+  ownerUserId?: string;
   title: string;
   summary: string;
   logs: string[];
@@ -106,6 +111,18 @@ export function getJob(id: string): JobRecord | undefined {
 export function listJobs(options: { status?: JobStatus; sourceToolName?: string; limit?: number } = {}): JobRecord[] {
   const limit = options.limit ?? 100;
   return [...jobs.values()]
+    .filter((job) => !options.status || job.status === options.status)
+    .filter((job) => !options.sourceToolName || job.sourceToolName === options.sourceToolName || job.title === options.sourceToolName)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, limit);
+}
+
+// Tenant-scoped listing for the user-facing job tools: filters to the caller's own jobs
+// BEFORE applying the limit, so one tenant's jobs can never appear in another's results.
+export function listJobsForOwner(ownerUserId: string | undefined, options: { status?: JobStatus; sourceToolName?: string; limit?: number } = {}): JobRecord[] {
+  const limit = options.limit ?? 100;
+  return [...jobs.values()]
+    .filter((job) => job.ownerUserId === ownerUserId)
     .filter((job) => !options.status || job.status === options.status)
     .filter((job) => !options.sourceToolName || job.sourceToolName === options.sourceToolName || job.title === options.sourceToolName)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))

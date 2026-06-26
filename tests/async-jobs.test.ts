@@ -114,6 +114,58 @@ test("background job queue tools list, cancel, retry, and recover partial result
   assert.equal(retryJob?.attempt, 2);
 });
 
+function tenantContext(userId: string): ToolContext {
+  return { ...toolContext(), userId };
+}
+
+test("background jobs are tenant-isolated: a non-owner cannot read, cancel, or re-execute another tenant's job", async () => {
+  // Alice owns a terminal, retry-eligible job (has sourceToolName + sourceArgs).
+  const aliceJobId = "job_tenant_alice_secret";
+  saveJob({ ...job(aliceJobId, "error"), ownerUserId: "alice" });
+
+  const alice = tenantContext("alice");
+  const bob = tenantContext("bob");
+
+  const get = getToolModule("get_job_status")!;
+  const list = getToolModule("list_background_jobs")!;
+  const cancel = getToolModule("cancel_background_job")!;
+  const retry = getToolModule("retry_background_job")!;
+  const recover = getToolModule("recover_job_partial_result")!;
+
+  // Bob (a different tenant) is denied on every id-addressed tool, with a generic not-found
+  // that does not distinguish "exists but not yours" from "missing" (no enumeration).
+  for (const [name, tool] of [["get", get], ["cancel", cancel], ["recover", recover], ["retry", retry]] as const) {
+    const res = await tool.handler({ jobId: aliceJobId }, bob);
+    assert.equal(res.ok, false, `${name} must deny a non-owner`);
+    assert.match(res.errors[0] ?? "", /Unknown jobId/, `${name} returns a generic not-found`);
+    assert.equal(res.jobId, undefined, `${name} must not return the job to a non-owner`);
+  }
+
+  // The blocker, directly: Bob's retry must NOT re-execute Alice's stored sourceArgs. A
+  // not-found with no new jobId proves the auth check short-circuits before saveJob/runJob.
+  const bobRetry = await retry.handler({ jobId: aliceJobId }, bob);
+  assert.equal(bobRetry.ok, false);
+  assert.equal(bobRetry.jobId, undefined, "Bob's retry must not spawn a job from Alice's args");
+
+  // Bob's cancel did not mutate Alice's job.
+  assert.equal(getJob(aliceJobId)?.status, "error", "a non-owner's cancel must not change the job");
+
+  // Bob's listing never includes Alice's job.
+  const bobList = await list.handler({ limit: 500 }, bob);
+  const bobJobs = (bobList.structuredContent as { jobs: JobRecord[] }).jobs;
+  assert.equal(bobJobs.some((j) => j.id === aliceJobId), false, "Bob must not see Alice's job in a listing");
+
+  // Alice still has full access to her own job.
+  const aliceGet = await get.handler({ jobId: aliceJobId }, alice);
+  assert.equal(aliceGet.ok, false); // status "error" -> ok:false, but it's FOUND (not a not-found)
+  assert.equal(aliceGet.jobId, aliceJobId, "the owner resolves her own job");
+  const aliceList = await list.handler({ limit: 500 }, alice);
+  const aliceJobs = (aliceList.structuredContent as { jobs: JobRecord[] }).jobs;
+  assert.equal(aliceJobs.some((j) => j.id === aliceJobId), true, "the owner sees her own job in a listing");
+  const aliceRecover = await recover.handler({ jobId: aliceJobId }, alice);
+  assert.equal(aliceRecover.ok, true, "the owner recovers her own partial result");
+});
+
 test("job-queue skill exposes queue tools through core, coding, and debug skills", () => {
   const toolNames = [
     "run_tool_async",

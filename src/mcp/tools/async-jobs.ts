@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { ToolContext, ToolModule, ToolResult } from "../types.js";
-import { cancelJob, getJob, listJobs, saveJob, updateJob, type JobRecord } from "../../jobs/store.js";
+import { cancelJob, getJob, listJobsForOwner, saveJob, updateJob, type JobRecord } from "../../jobs/store.js";
 
 // Tools that can blow past a proxy's request timeout (Cloudflare cuts proxied HTTP requests
 // at ~100s -> 524). Only these may be run via run_tool_async. Fast tools have no reason to go
@@ -49,6 +49,27 @@ const recoverJobPartialResultSchema = z.object({
 
 function terminal(status: JobRecord["status"]): boolean {
   return status === "success" || status === "error" || status === "cancelled" || status === "timeout";
+}
+
+// A job is visible only to the tenant that created it. ctx.userId is the OAuth-bound tenant;
+// it is undefined only for the shared legacy/dev-token domain (which also shares the global
+// roots), so an exact `===` match is the correct boundary — two real tenants can never both
+// be undefined. Returns the resolved job when the caller owns it, otherwise undefined.
+function authorizeJob(jobId: string, ctx: ToolContext): JobRecord | undefined {
+  const job = getJob(jobId);
+  return job && job.ownerUserId === ctx.userId ? job : undefined;
+}
+
+// Not-found and not-owned are reported identically so the job-id space cannot be enumerated
+// across tenants (a different error for "exists but not yours" would leak existence).
+function jobNotFound(jobId: string): ToolResult {
+  return {
+    ok: false,
+    summary: `No background job found for ${jobId}.`,
+    artifacts: [],
+    logs: [],
+    errors: [`Unknown jobId: ${jobId}. It may have been pruned after the retention window, or the id is wrong.`]
+  };
 }
 
 function safeUpdateRunningJob(jobId: string, update: Partial<Omit<JobRecord, "id" | "createdAt">>): void {
@@ -141,6 +162,7 @@ export const asyncJobTools: ToolModule[] = [
       saveJob({
         id: jobId,
         status: "running",
+        ownerUserId: ctx.userId,
         title: parsed.name,
         summary: `Running ${parsed.name} in the background...`,
         logs: [],
@@ -182,11 +204,11 @@ export const asyncJobTools: ToolModule[] = [
     },
     enabledByDefault: true,
     schema: getJobStatusSchema,
-    handler: (input: unknown): ToolResult => {
+    handler: (input: unknown, ctx: ToolContext): ToolResult => {
       const parsed = input as z.infer<typeof getJobStatusSchema>;
-      const job = getJob(parsed.jobId);
+      const job = authorizeJob(parsed.jobId, ctx);
       if (!job) {
-        return { ok: false, summary: `No background job found for ${parsed.jobId}.`, artifacts: [], logs: [], errors: [`Unknown jobId: ${parsed.jobId}. It may have been pruned after the retention window, or the id is wrong. (Jobs persist across restarts; an interrupted job is marked "error", not lost.)`] };
+        return jobNotFound(parsed.jobId);
       }
       const done = terminal(job.status);
       return {
@@ -208,9 +230,9 @@ export const asyncJobTools: ToolModule[] = [
     },
     enabledByDefault: true,
     schema: listBackgroundJobsSchema,
-    handler: (input: unknown): ToolResult => {
+    handler: (input: unknown, ctx: ToolContext): ToolResult => {
       const parsed = listBackgroundJobsSchema.parse(input);
-      const jobs = listJobs(parsed);
+      const jobs = listJobsForOwner(ctx.userId, parsed);
       return { ok: true, summary: `Found ${jobs.length} background job(s).`, artifacts: [], structuredContent: { jobs, count: jobs.length }, logs: jobs.map((job) => `${job.id} ${job.status} ${job.title}: ${job.summary}`), errors: [] };
     }
   },
@@ -222,10 +244,12 @@ export const asyncJobTools: ToolModule[] = [
     },
     enabledByDefault: true,
     schema: cancelBackgroundJobSchema,
-    handler: (input: unknown): ToolResult => {
+    handler: (input: unknown, ctx: ToolContext): ToolResult => {
       const parsed = cancelBackgroundJobSchema.parse(input);
+      // Authorize ownership BEFORE mutating: a non-owner must not be able to cancel.
+      if (!authorizeJob(parsed.jobId, ctx)) return jobNotFound(parsed.jobId);
       const job = cancelJob(parsed.jobId, parsed.reason);
-      if (!job) return { ok: false, summary: `No background job found for ${parsed.jobId}.`, artifacts: [], logs: [], errors: [`Unknown jobId: ${parsed.jobId}.`] };
+      if (!job) return jobNotFound(parsed.jobId);
       const changed = job.status === "cancelled";
       return { ok: changed, summary: changed ? `Cancelled ${parsed.jobId}.` : `Job ${parsed.jobId} is already terminal (${job.status}).`, jobId: job.id, artifacts: job.artifacts, structuredContent: { job, done: terminal(job.status) }, logs: job.logs, errors: changed ? [] : [`Job is already ${job.status}.`] };
     }
@@ -240,8 +264,10 @@ export const asyncJobTools: ToolModule[] = [
     schema: retryBackgroundJobSchema,
     handler: async (input: unknown, ctx: ToolContext): Promise<ToolResult> => {
       const parsed = retryBackgroundJobSchema.parse(input);
-      const previous = getJob(parsed.jobId);
-      if (!previous) return { ok: false, summary: `No background job found for ${parsed.jobId}.`, artifacts: [], logs: [], errors: [`Unknown jobId: ${parsed.jobId}.`] };
+      // Ownership FIRST — this is the check that closes cross-tenant code execution: without it
+      // a tenant could re-run another tenant's stored sourceArgs in their own workspace ctx.
+      const previous = authorizeJob(parsed.jobId, ctx);
+      if (!previous) return jobNotFound(parsed.jobId);
       if (!previous.sourceToolName || !previous.sourceArgs) return { ok: false, summary: `Job ${parsed.jobId} has no retry source metadata.`, artifacts: [], logs: [], errors: ["Missing sourceToolName/sourceArgs."] };
       if (!asyncEligibleSet.has(previous.sourceToolName as (typeof asyncEligibleTools)[number])) return { ok: false, summary: `${previous.sourceToolName} is not eligible for async retry.`, artifacts: [], logs: [], errors: [`Ineligible tool: ${previous.sourceToolName}.`] };
       const nextAttempt = (previous.attempt ?? 1) + 1;
@@ -252,6 +278,7 @@ export const asyncJobTools: ToolModule[] = [
       saveJob({
         id: jobId,
         status: "running",
+        ownerUserId: ctx.userId,
         title: previous.sourceToolName,
         summary: `Retrying ${previous.sourceToolName} from ${parsed.jobId}...`,
         logs: [],
@@ -278,10 +305,10 @@ export const asyncJobTools: ToolModule[] = [
     },
     enabledByDefault: true,
     schema: recoverJobPartialResultSchema,
-    handler: (input: unknown): ToolResult => {
+    handler: (input: unknown, ctx: ToolContext): ToolResult => {
       const parsed = recoverJobPartialResultSchema.parse(input);
-      const job = getJob(parsed.jobId);
-      if (!job) return { ok: false, summary: `No background job found for ${parsed.jobId}.`, artifacts: [], logs: [], errors: [`Unknown jobId: ${parsed.jobId}.`] };
+      const job = authorizeJob(parsed.jobId, ctx);
+      if (!job) return jobNotFound(parsed.jobId);
       const partial = { logs: job.logs, artifacts: job.artifacts, errors: job.errors, summary: job.summary };
       const canRetry = Boolean(job.sourceToolName && job.sourceArgs && (!job.maxAttempts || (job.attempt ?? 1) < job.maxAttempts));
       const result = {
