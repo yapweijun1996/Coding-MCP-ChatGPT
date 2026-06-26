@@ -519,7 +519,21 @@ function normalizeProjectMetadata(metadata: ProjectMetadata): ProjectMetadata {
 }
 
 async function readProjectMetadata(projectRoot: string, projectId: string): Promise<ProjectMetadata> {
-  const raw = await readFile(getProjectMetadataPath(projectRoot, projectId), "utf8");
+  let raw: string;
+  try {
+    raw = await readFile(getProjectMetadataPath(projectRoot, projectId), "utf8");
+  } catch (error) {
+    // A missing project.json surfaced as a raw "ENOENT: open .../project.json", which gave the agent
+    // no recoverable next step (tools like compose_music require an existing project). Turn it into an
+    // actionable instruction at this single chokepoint — every projectId-consuming tool resolves
+    // metadata through here. Keep code="ENOENT" so callers that branch on it still work.
+    if (error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      const actionable = new Error(`Project ${projectId} does not exist. Create it first with create_project, then use the returned projectId.`) as NodeJS.ErrnoException;
+      actionable.code = "ENOENT";
+      throw actionable;
+    }
+    throw error;
+  }
   const parsed = JSON.parse(raw);
   if (
     !parsed || typeof parsed !== "object"

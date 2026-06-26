@@ -71,6 +71,21 @@ test("generate_project_docs creates README and CHANGELOG from project files, val
   }
 });
 
+test("tools on a missing project return an actionable create_project hint, not raw ENOENT", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "missing-project-"));
+  try {
+    const ctx = toolContext(root);
+    // compose_music against a projectId that was never created — the issue_0133 shape.
+    const result = await callTool("compose_music", { projectId: "music_cafe_jazz_v1", title: "Cafe Jazz", style: "cafe_jazz" }, ctx);
+    assert.equal(result.ok, false);
+    assert.doesNotMatch(result.summary, /ENOENT|project\.json/);
+    assert.match(result.summary, /does not exist/);
+    assert.match(result.summary, /create_project/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("validate_project failure summary names the concrete reason, not just 'validation failed'", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "validate-summary-"));
   try {
