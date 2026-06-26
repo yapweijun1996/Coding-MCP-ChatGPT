@@ -1,3 +1,5 @@
+import { publicApiRegistry, publicApiToolName } from "../mcp/tools/public-api.js";
+
 export type SkillStatus = "stable" | "beta" | "disabled";
 export type SkillRiskLevel = "low" | "medium" | "high";
 
@@ -12,6 +14,8 @@ export interface SkillDefinition {
   toolNames: readonly string[];
   protocolMarkdown: string;
 }
+
+const publicApiToolNames = publicApiRegistry.map((api) => publicApiToolName(api.id));
 
 export const skillRegistry: readonly SkillDefinition[] = [
   {
@@ -378,6 +382,7 @@ Use this skill to discover the available workspace/project context before taking
       "inspect_project_workspace",
       "record_project_workspace_video",
       "publish_project_workspace",
+      ...publicApiToolNames,
       "record_project_task",
       "import_project_asset_from_local_file",
       "patch_project_file",
@@ -988,6 +993,7 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "reply_project_review_comment",
       "resolve_project_review_comment",
       "export_project_review_summary",
+      ...publicApiToolNames,
       "check_url",
       "inspect_webpage",
       "inspect_webpage_plus",
@@ -2237,6 +2243,7 @@ Use this skill before broad edits, risky refactors, release promotion, file dele
       "api_healthcheck",
       "api_contract_test",
       "openapi_summary",
+      ...publicApiToolNames,
       "register_data_connector",
       "list_data_connectors",
       "check_connector_auth_scope",
