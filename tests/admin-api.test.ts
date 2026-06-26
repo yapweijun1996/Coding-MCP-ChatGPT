@@ -180,7 +180,7 @@ test("profile username controls public username share URLs", async () => {
       createdByClientId: "test-client"
     });
     await writeProjectFile(userProjectRoot, project.id, "index.html", "<!doctype html><html><head><title>Named</title></head><body>Named</body></html>");
-    const initiallyPublished = await publishProject(userProjectRoot, project.id, "https://content.example.test", "index.html", { privateBaseUrl: "https://example.test" });
+    const initiallyPublished = await publishProject(userProjectRoot, project.id, "https://content.example.test", "index.html", { privateBaseUrl: "https://example.test", shareAccess: "private" });
     assert.equal(initiallyPublished.publishedUrl, `https://example.test/share/${project.id}/index.html`);
     assert.equal(initiallyPublished.shareAccess, "private");
 
@@ -411,6 +411,9 @@ test("site homepage serves at root and set_homepage is admin-gated", async () =>
     await writeProjectFile(adminRoot, project.id, "styles.css", "h1{color:rebeccapurple}");
     await publishProject(adminRoot, project.id, "https://example.test", "index.html");
     const draftProject = await createProject(adminRoot, { title: "Draft home", createdByClientId: "test-client" });
+    const privateProject = await createProject(adminRoot, { title: "Private home", createdByClientId: "test-client" });
+    await writeProjectFile(adminRoot, privateProject.id, "index.html", "<!doctype html><title>PrivateHome</title>");
+    await publishProject(adminRoot, privateProject.id, "https://content.example.test", "index.html", { privateBaseUrl: "https://example.test", shareAccess: "private" });
 
     // set_homepage must reject a non-admin caller (no userId).
     const setHomepageTool = siteTools.find((tool) => tool.definition.name === "set_homepage");
@@ -422,6 +425,10 @@ test("site homepage serves at root and set_homepage is admin-gated", async () =>
     const rejectedDraft = await setHomepageTool.handler({ projectId: draftProject.id }, { ...ctxBase, userId: adminId });
     assert.equal(rejectedDraft.ok, false);
     assert.match(rejectedDraft.summary, /published/);
+    assert.equal(getHomepage().homeProjectId, null);
+    const rejectedPrivate = await setHomepageTool.handler({ projectId: privateProject.id }, { ...ctxBase, userId: adminId });
+    assert.equal(rejectedPrivate.ok, false);
+    assert.match(rejectedPrivate.summary, /public/);
     assert.equal(getHomepage().homeProjectId, null);
 
     await updateRegistrationSettings({ allowRegistration: true, allowedEmailDomains: [] });

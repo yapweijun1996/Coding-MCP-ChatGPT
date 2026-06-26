@@ -67,7 +67,7 @@ This MCP stores ChatGPT-created coding projects on disk under `.projects/`.
 Recommended ChatGPT workflow:
 
 1. Call `deliver_static_project` with `title`, `summary`, `entryFile`, and all text files.
-2. If it returns `ok:true`, return the `publishedUrl`, for example `https://gmb01.xyz/share/project_xxx/index.html`. By default the link requires a signed-in project user or admin.
+2. If it returns `ok:true`, return the `publishedUrl`, for example `https://gmb01.xyz/share/project_xxx/index.html`. By default the link is public `anyone_with_link`; pass `shareAccess: "private"` only when the user or agent needs an owner/admin-only preview.
 3. If it returns `ok:false`, use `get_project_activity` and the inspection report to explain what must be fixed.
 4. Use the lower-level `create_project` / `write_project_file` / `validate_project` / `publish_and_report` workflow only for incremental repairs.
 
@@ -77,7 +77,7 @@ Recommended ChatGPT workflow:
 - `/admin/projects/:projectId`: React project detail route for status, files, validation, and task history.
 - `/admin/api/projects/:projectId`: authenticated JSON project detail.
 - `/admin/api/projects/:projectId/download.zip`: authenticated dynamic ZIP download of project files.
-- `/share/:projectId/:filename`: published project file. Default access is private to signed-in project users and admins; set sharing to `anyone_with_link` for Google Drive-style anonymous link access.
+- `/share/:projectId/:filename`: published project file. Default project access is public `anyone_with_link`; set `shareAccess: "private"` for signed-in project users and admins only.
 
 ## Safety boundaries
 

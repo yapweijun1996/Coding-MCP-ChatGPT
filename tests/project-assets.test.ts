@@ -267,6 +267,21 @@ test("publishProject keeps stable preview URLs", async () => {
     const published = await publishProject(root, projectId, "https://example.test");
 
     assert.equal(published.publishedUrl, `https://example.test/share/${projectId}/index.html`);
+    assert.equal(published.shareAccess, "anyone_with_link");
+  });
+});
+
+test("publishProject can be explicitly private", async () => {
+  await withProject(async (root, projectId) => {
+    await writeProjectFile(root, projectId, "index.html", "<!doctype html><html><body>Private</body></html>");
+
+    const published = await publishProject(root, projectId, "https://content.example.test", "index.html", {
+      privateBaseUrl: "https://example.test",
+      shareAccess: "private"
+    });
+
+    assert.equal(published.publishedUrl, `https://example.test/share/${projectId}/index.html`);
+    assert.equal(published.shareAccess, "private");
   });
 });
 

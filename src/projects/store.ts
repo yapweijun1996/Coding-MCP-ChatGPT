@@ -266,6 +266,8 @@ export interface PublishProjectOptions {
   privateBaseUrl?: string;
 }
 
+export const defaultProjectShareAccess: ProjectShareAccess = "anyone_with_link";
+
 export const maxProjectFileBytes = 1024 * 1024;
 export const maxProjectImageAssetBytes = 10 * 1024 * 1024;
 export const maxProjectMediaAssetBytes = 100 * 1024 * 1024;
@@ -512,7 +514,7 @@ function normalizeProjectMetadata(metadata: ProjectMetadata): ProjectMetadata {
   const taskList = (metadata.taskList ?? []).map((task) => ({ ...task, dependsOn: task.dependsOn ?? [] }));
   return {
     ...metadata,
-    shareAccess: metadata.shareAccess ?? "private",
+    shareAccess: metadata.shareAccess ?? defaultProjectShareAccess,
     taskHistory: metadata.taskHistory ?? [],
     taskList
   };
@@ -815,7 +817,7 @@ export async function createProject(
     updatedAt: now,
     createdByClientId: input.createdByClientId,
     status: "draft",
-    shareAccess: "private",
+    shareAccess: defaultProjectShareAccess,
     entryFile,
     taskHistory: [
       {
@@ -1544,7 +1546,7 @@ export async function publishProject(projectRoot: string, projectId: string, pub
 
     const safeEntryFile = assertSafeProjectFilePath(entryFile ?? metadata.entryFile);
     await stat(resolveProjectFilePath(projectRoot, projectId, safeEntryFile));
-    const shareAccess = options.shareAccess ?? metadata.shareAccess ?? "private";
+    const shareAccess = options.shareAccess ?? metadata.shareAccess ?? defaultProjectShareAccess;
     const urlBase = shareAccess === "private" && options.privateBaseUrl ? options.privateBaseUrl : publicBaseUrl;
     const publishedUrl = makeProjectPublicUrl(urlBase, options.shareBasePath, projectId, safeEntryFile);
     const updated = addHistory({
@@ -1615,7 +1617,7 @@ export async function setProjectStatus(projectRoot: string, projectId: string, s
     const updated = addHistory({
       ...metadata,
       status,
-      shareAccess: status === "private" ? "private" : metadata.shareAccess ?? "private",
+      shareAccess: status === "private" ? "private" : metadata.shareAccess ?? defaultProjectShareAccess,
       publishedUrl: undefined
     }, {
       toolName: "set_project_status",

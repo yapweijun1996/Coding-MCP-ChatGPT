@@ -26,12 +26,17 @@ export async function resolveHomepageProjectForSet(
       if (project.status !== "published") {
         throw new Error("Project must be published before it can be the homepage.");
       }
+      if (project.shareAccess !== "anyone_with_link") {
+        throw new Error("Project must be public before it can be the homepage.");
+      }
       const owner = await getUserByProjectRoot(root);
       if (!owner) throw new Error("Could not resolve the project owner.");
       return { root, project, owner };
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
-      if (message === "Project must be published before it can be the homepage." || message === "Could not resolve the project owner.") {
+      if (message === "Project must be published before it can be the homepage."
+        || message === "Project must be public before it can be the homepage."
+        || message === "Could not resolve the project owner.") {
         throw error;
       }
       continue;
