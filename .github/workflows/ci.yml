@@ -14,9 +14,10 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    # Cold `tsc` runs twice (server + admin-ui) plus a browser-backed test subset; cap the job
-    # so a genuine hang fails fast instead of burning the 6-hour default.
-    timeout-minutes: 25
+    # Cold `tsc` runs twice (server + admin-ui) plus a browser-backed test subset. The test
+    # script caps each test at 120s (--test-timeout), so a single hang self-reports and fails
+    # fast; this job cap is the outer backstop.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
