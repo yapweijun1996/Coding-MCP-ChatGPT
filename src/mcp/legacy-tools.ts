@@ -1621,6 +1621,7 @@ function createJobResult(ctx: ToolContext, title: string, summary: string, logs:
   saveJob({
     id,
     status: "success",
+    ownerUserId: ctx.userId,
     title,
     summary,
     logs,

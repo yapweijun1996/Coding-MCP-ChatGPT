@@ -159,7 +159,12 @@ function validateChannels(store: NotificationStore, channelIds: string[]) {
 
 async function validateReferences(ctx: ToolContext, projectId: string, taskId?: string, jobId?: string) {
   if (taskId) await getProjectTask(ctx.projectRoot, projectId, taskId);
-  if (jobId && !getJob(jobId)) throw new Error(`No background job found for ${jobId}.`);
+  // Scope to the caller's own jobs: a non-owner gets the same "not found" as a missing id, so
+  // notification references cannot probe another tenant's job-id space.
+  if (jobId) {
+    const job = getJob(jobId);
+    if (!job || job.ownerUserId !== ctx.userId) throw new Error(`No background job found for ${jobId}.`);
+  }
 }
 
 function notificationFrom(input: z.infer<typeof sendNotificationSchema>, status: ProjectNotification["status"], now: string, scheduledFor?: string, reminderKey?: string): ProjectNotification {
