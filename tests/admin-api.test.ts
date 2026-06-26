@@ -506,3 +506,14 @@ test("admin login rate limit locks repeated bad passwords and success clears fai
     assert.equal(lockedLogin.status, 429);
   });
 });
+
+test("favicon is served on both app and content hosts (no 404 console noise)", async () => {
+  await withServer(async (baseUrl) => {
+    for (const host of ["example.test", "content.example.test"]) {
+      const res = await requestWithHost(baseUrl, "/favicon.ico", host);
+      assert.equal(res.status, 200, `favicon should 200 on ${host}`);
+      assert.match(String(res.headers["content-type"]), /image\/svg\+xml/);
+      assert.match(res.body, /<svg/);
+    }
+  });
+});
