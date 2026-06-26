@@ -100,6 +100,21 @@ app.get(/^\/admin(?:\/.*)?$/, (req, res, next) => {
   });
 });
 
+// Browsers auto-request /favicon.ico on every page (including sandboxed content pages served
+// from an opaque origin). Without this it falls through to the content catch-all and 404s,
+// spamming the console. Serve one inline SVG glyph for the whole deployment, cached hard.
+const faviconSvg =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">' +
+  '<rect width="32" height="32" rx="7" fill="#18231f"/>' +
+  '<path d="M8 11l5 5-5 5" fill="none" stroke="#5ad19a" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+  '<line x1="16" y1="22" x2="23" y2="22" stroke="#5ad19a" stroke-width="2.6" stroke-linecap="round"/>' +
+  "</svg>";
+app.get("/favicon.ico", (_req, res) => {
+  res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
+  res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+  res.send(faviconSvg);
+});
+
 registerContentRoutes(app, config);
 
 // Terminal error middleware. Registered last so it catches anything forwarded by
