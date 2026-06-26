@@ -1,4 +1,3 @@
-import path from "node:path";
 import { z } from "zod";
 import { listProjectFiles, readProjectFile, writeProjectFile } from "../../projects/store.js";
 import type { ToolModule } from "../types.js";

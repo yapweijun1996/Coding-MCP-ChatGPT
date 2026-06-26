@@ -106,7 +106,7 @@ export async function createShareArtifact(input: {
 
 export async function readShareArtifact(id: string, filename: string): Promise<{ record: ShareRecord; html: string } | undefined> {
   const safeFilename = sanitizeFilename(filename);
-  let record = shares.get(`${id}/${safeFilename}`);
+  const record = shares.get(`${id}/${safeFilename}`);
   if (!record && shareRootDir) {
     // Self-heal: the file may exist on disk but be absent from the map.
     // Reject path-escaping ids (the filename is already sanitized above).

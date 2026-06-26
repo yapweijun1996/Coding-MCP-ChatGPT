@@ -196,7 +196,6 @@ export type BrowserInspectionSummary = {
 
 export type BrowserInspectionOptions = z.infer<typeof inspectWebpageSchema>;
 type InspectWebpagePlusOptions = z.infer<typeof inspectWebpagePlusSchema>;
-type InspectWebpageMultiBrowserOptions = z.infer<typeof inspectWebpageMultiBrowserSchema>;
 type NetworkScenarioName = z.infer<typeof networkScenarioSchema>;
 
 function escapeHtml(value: string): string {
@@ -217,7 +216,7 @@ async function saveArtifactUrl(ctx: ToolContext, filename: string, contentType: 
 }
 
 function resultWithoutImages(result: ViewportResult): Omit<ViewportResult, "screenshotDataUrl"> {
-  const { screenshotDataUrl, ...rest } = result;
+  const { screenshotDataUrl: _screenshotDataUrl, ...rest } = result;
   return rest;
 }
 

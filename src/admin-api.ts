@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import { ZipArchive } from "archiver";
 import express from "express";
 import { constantTimeEqual } from "./shared/crypto.js";
@@ -413,7 +412,7 @@ function recordLoginFailure(key: string, current: number): { locked: boolean; lo
   return { locked: false };
 }
 
-function requireApiSession(config: AdminApiConfig) {
+function requireApiSession(_config: AdminApiConfig) {
   return (req: express.Request, res: express.Response, next: express.NextFunction): void => {
     requireSession(req, res).then((value) => {
       if (!value) return;

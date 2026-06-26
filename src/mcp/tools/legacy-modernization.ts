@@ -28,10 +28,6 @@ function outputPath(outputDir: string, filename: string): string {
   return `${clean}/${filename}`;
 }
 
-function compact(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
-
 function extractTagBlocks(html: string, tag: "style" | "script") {
   const blocks: Array<{ full: string; attrs: string; content: string }> = [];
   const pattern = tag === "style"
@@ -46,10 +42,6 @@ function extractTagBlocks(html: string, tag: "style" | "script") {
 
 function hasSrc(attrs: string): boolean {
   return /\bsrc\s*=/i.test(attrs);
-}
-
-function hasHref(attrs: string): boolean {
-  return /\bhref\s*=/i.test(attrs);
 }
 
 function analyzeLegacyHtml(html: string): ModernizationFinding[] {
