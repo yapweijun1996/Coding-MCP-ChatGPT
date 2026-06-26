@@ -13,6 +13,7 @@ import {
   patchProjectFile,
   publishProject,
   readProjectFile,
+  readProjectFilePartial,
   writeProjectAsset,
   writeProjectFile
 } from "../src/projects/store.js";
@@ -83,6 +84,46 @@ test("writeProjectFile accepts web app manifests", async () => {
     assert.equal(file.path, "site.webmanifest");
     assert.equal(await readProjectFile(root, projectId, "site.webmanifest"), "{\"name\":\"Demo\",\"start_url\":\"/\"}");
     assert.equal(getProjectFileContentType("site.webmanifest"), "application/manifest+json");
+  });
+});
+
+test("readProjectFilePartial truncates oversized files instead of throwing", async () => {
+  await withProject(async (root, projectId) => {
+    const body = "A".repeat(10000);
+    await writeProjectFile(root, projectId, "big.txt", body);
+
+    const full = await readProjectFilePartial(root, projectId, "big.txt");
+    assert.equal(full.truncated, false);
+    assert.equal(full.size, 10000);
+    assert.equal(full.content.length, 10000);
+
+    const partial = await readProjectFilePartial(root, projectId, "big.txt", 3000);
+    assert.equal(partial.truncated, true);
+    assert.equal(partial.size, 10000);
+    assert.equal(Buffer.byteLength(partial.content, "utf8"), 3000);
+  });
+});
+
+test("read_project_file tool returns truncated content instead of failing", async () => {
+  await withProject(async (root, projectId) => {
+    await writeProjectFile(root, projectId, "big.txt", "B".repeat(10000));
+    const tool = projectTools.find((item) => item.definition.name === "read_project_file");
+    assert.ok(tool);
+    const ctx: ToolContext = {
+      publicBaseUrl: "https://example.test",
+      workspaceRoot: root,
+      commandTimeoutMs: 1000,
+      shareRoot: path.join(root, "shares"),
+      artifactRoot: path.join(root, "artifacts"),
+      feedbackRoot: path.join(root, "feedback"),
+      projectRoot: root,
+      userId: "test-user"
+    } as ToolContext;
+    const result = await tool.handler({ projectId, relativePath: "big.txt", maxBytes: 3000 }, ctx);
+    assert.equal(result.ok, true);
+    assert.match(result.summary, /truncated/);
+    assert.equal((result.structuredContent as { truncated: boolean }).truncated, true);
+    assert.equal((result.logs?.[0] ?? "").length, 3000);
   });
 });
 

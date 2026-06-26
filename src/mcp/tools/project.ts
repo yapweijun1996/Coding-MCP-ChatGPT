@@ -22,6 +22,7 @@ import {
   publishProjectAndReport,
   publishProject,
   readProjectFile,
+  readProjectFilePartial,
   recordProjectBrowserInspection,
   recordProjectTaskEvidence,
   searchProjectTasks,
@@ -2961,18 +2962,24 @@ export const projectTools: ToolModule[] = [
       const resultForLogs = withoutScreenshots(results);
       const inspection = { ...summarizeBrowserInspection(resultForLogs), reportUrl, screenshotUrls, inspectedAt: new Date().toISOString() };
       await recordProjectBrowserInspection(ctx.projectRoot, parsed.projectId, inspection, "screenshot_project");
+      // This tool's job is to capture screenshots for visual QA. Capturing succeeded here, so the
+      // tool result is ok:true even when the page itself has problems. `inspection.ok` describes the
+      // *page* (console/page errors, overflow), not the tool — overloading the tool's ok with it
+      // mislabels a successful capture as a tool failure. Page health is surfaced in the summary and
+      // structuredContent.blockingErrors so the caller can act without the false failure signal.
+      const issueCount = inspection.blockingErrors.length;
       return {
-        ok: inspection.ok,
-        summary: inspection.ok
-          ? `Captured ${screenshotUrls.length} screenshot(s) for project ${parsed.projectId}.`
-          : `Captured screenshots for project ${parsed.projectId}; visual/runtime issues were found.`,
+        ok: true,
+        summary: issueCount === 0
+          ? `Captured ${screenshotUrls.length} screenshot(s) for project ${parsed.projectId}; no blocking issues detected.`
+          : `Captured ${screenshotUrls.length} screenshot(s) for project ${parsed.projectId}; ${issueCount} blocking page issue(s) detected — see structuredContent.blockingErrors.`,
         jobId: parsed.projectId,
         previewUrl: reportUrl,
         shareUrl: reportUrl,
         artifacts: [reportUrl, ...screenshotUrls],
         structuredContent: inspection as unknown as Record<string, unknown>,
         logs: [JSON.stringify(inspection, null, 2)],
-        errors: inspection.blockingErrors
+        errors: []
       };
     }
   },
@@ -3130,8 +3137,21 @@ export const projectTools: ToolModule[] = [
     schema: readProjectFileInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof readProjectFileInputSchema>;
-      const content = await readProjectFile(ctx.projectRoot, parsed.projectId, parsed.relativePath, parsed.maxBytes);
-      return { ok: true, summary: `Read ${parsed.relativePath} from project ${parsed.projectId}.`, jobId: parsed.projectId, artifacts: [parsed.relativePath], logs: [content], errors: [] };
+      // Truncate-and-flag instead of hard-failing when the file exceeds maxBytes: a partial read is
+      // still useful, and the caller can re-read with a larger maxBytes (up to 1 MiB) if it needs more.
+      const { content, truncated, size } = await readProjectFilePartial(ctx.projectRoot, parsed.projectId, parsed.relativePath, parsed.maxBytes);
+      const readBytes = Buffer.byteLength(content, "utf8");
+      return {
+        ok: true,
+        summary: truncated
+          ? `Read first ${readBytes} of ${size} bytes from ${parsed.relativePath} (truncated; re-read with a larger maxBytes up to 1048576 for more).`
+          : `Read ${parsed.relativePath} from project ${parsed.projectId}.`,
+        jobId: parsed.projectId,
+        artifacts: [parsed.relativePath],
+        structuredContent: { truncated, size, readBytes, maxBytes: parsed.maxBytes },
+        logs: [content],
+        errors: []
+      };
     }
   },
   {
@@ -3168,11 +3188,22 @@ export const projectTools: ToolModule[] = [
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof validateProjectInputSchema>;
       const validation = await validateProject(ctx.projectRoot, parsed.projectId, parsed.entryFile, parsed.profile);
+      // Surface the concrete failure reasons in the summary, not just "validation failed." The detail
+      // already lived in validation.errors (e.g. "Referenced local resource not found: *.wav"), but
+      // the generic summary is what monitoring/agents see first — so a fixable failure read as opaque.
+      // Cap the joined detail so a project with many errors can't produce a runaway summary line.
+      const failureDetail = (() => {
+        if (validation.errors.length === 0) return "see structuredContent for details";
+        const joined = validation.errors.join("; ");
+        const capped = joined.length > 400 ? `${joined.slice(0, 400)}… (+more)` : joined;
+        const warningSuffix = validation.warnings.length ? ` [${validation.warnings.length} warning(s)]` : "";
+        return `${capped}${warningSuffix}`;
+      })();
       return {
         ok: validation.ok,
         summary: validation.ok
           ? `Project ${parsed.projectId} validation passed.`
-          : `Project ${parsed.projectId} validation failed.`,
+          : `Project ${parsed.projectId} validation failed: ${failureDetail}`,
         jobId: parsed.projectId,
         artifacts: [validation.entryFile],
         structuredContent: validation as unknown as Record<string, unknown>,

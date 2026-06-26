@@ -73,9 +73,44 @@ function safeExportPath(relativePath: string): string {
   return normalized;
 }
 
+// Shape guard for the export package manifest. loadManifest used to blind-cast arbitrary JSON
+// `as ExportPackageManifest`, so pointing these tools at a foreign manifest (e.g. a music
+// export-manifest.json) sailed past the cast and then crashed deep inside the renderers with an
+// opaque TypeError — `manifest.title.replaceAll` (undefined) in create_html_export_bundle and
+// `manifest.packages.push` (undefined) in build_zip_export_package. Validating here turns that into
+// one actionable error at the single load chokepoint instead of two undebuggable crashes.
+const exportPackageManifestSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  formats: z.array(formatEnum),
+  includeProjectFiles: z.boolean(),
+  includeWorkspaceFiles: z.boolean(),
+  includeReports: z.boolean(),
+  includeScreenshots: z.boolean(),
+  notes: z.array(z.string()),
+  createdAt: z.string(),
+  projectId: z.string(),
+  entryFile: z.string(),
+  publishedUrl: z.string().optional(),
+  files: z.array(z.object({ path: z.string(), size: z.number(), role: z.enum(["project", "report", "screenshot"]) })),
+  readiness: z.array(z.object({ format: z.string(), ready: z.boolean(), note: z.string() })),
+  packages: z.array(z.object({ format: z.string(), path: z.string(), size: z.number().optional(), createdAt: z.string() }))
+});
+
 async function loadManifest(ctx: ToolContext, projectId: string, manifestPath: string): Promise<ExportPackageManifest> {
   const raw = await readProjectFile(ctx.projectRoot, projectId, manifestPath);
-  return JSON.parse(raw) as ExportPackageManifest;
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    throw new Error(`Export manifest ${manifestPath} is not valid JSON.`);
+  }
+  const result = exportPackageManifestSchema.safeParse(json);
+  if (!result.success) {
+    const presentKeys = json && typeof json === "object" ? Object.keys(json as Record<string, unknown>).join(", ") || "none" : "none";
+    throw new Error(`${manifestPath} is not a valid export package manifest (present fields: ${presentKeys}). Create one with create_export_package_manifest, or pass the correct manifestPath (default ${exportManifestPath}).`);
+  }
+  return result.data as ExportPackageManifest;
 }
 
 async function writeManifest(ctx: ToolContext, projectId: string, manifest: ExportPackageManifest, manifestPath = exportManifestPath) {

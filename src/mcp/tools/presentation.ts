@@ -1155,7 +1155,7 @@ export const presentationTools: ToolModule[] = [
           title: { type: "string" },
           summary: { type: "string" },
           theme: { type: "string", enum: ["executive", "product", "technical", "visual"] },
-          slides: { type: "array", items: { type: "object" } },
+          slides: { type: "array", items: { type: "object", properties: { title: { type: "string" }, body: { type: "string" }, notes: { type: "string" }, layout: { type: "string", enum: ["title", "section", "content", "two_column", "image", "quote", "code", "comparison"], description: "Slide layout. Defaults to content." }, imagePath: { type: "string" }, bullets: { type: "array", items: { type: "string" } }, code: { type: "object", properties: { language: { type: "string" }, content: { type: "string" } } } }, required: ["title"] } },
           publish: { type: "boolean" }
         },
         required: ["title", "slides"],
@@ -1175,7 +1175,7 @@ export const presentationTools: ToolModule[] = [
         properties: {
           projectId: { type: "string" },
           title: { type: "string" },
-          slides: { type: "array", items: { type: "object" } },
+          slides: { type: "array", items: { type: "object", properties: { title: { type: "string" }, body: { type: "string" }, notes: { type: "string" }, layout: { type: "string", enum: ["title", "section", "content", "two_column", "image", "quote", "chart", "table"], description: "Slide layout. Defaults to content." }, imagePath: { type: "string" }, bullets: { type: "array", items: { type: "string" } }, table: { type: "object", properties: { headers: { type: "array", items: { type: "string" } }, rows: { type: "array", items: { type: "array", items: { type: "string" } } } } }, chart: { type: "object", properties: { type: { type: "string", enum: ["bar", "line", "pie"] }, labels: { type: "array", items: { type: "string" } }, values: { type: "array", items: { type: "number" } } } } }, required: ["title"] } },
           outputPath: { type: "string" }
         },
         required: ["title", "slides"],

@@ -640,6 +640,12 @@ export const projectDevTools: ToolModule[] = [
       } catch (error) {
         const err = error as { code?: unknown; stdout?: unknown; stderr?: unknown };
         if (err.code === 1 || err.code === "1") return { ok: true, summary: "Search completed with no matches.", jobId: parsed.projectId, artifacts: [], logs: [], errors: [] };
+        // `spawn rg ENOENT` means ripgrep is not installed on the server. The agent cannot install
+        // it, so surface an actionable operator-facing message instead of the opaque raw spawn error.
+        if (err.code === "ENOENT") {
+          const message = "search_in_project requires ripgrep (rg) on the server PATH, but it is not installed. Ask the operator to install ripgrep, or use list_project_workspace / read_project_file to inspect files instead.";
+          return { ok: false, summary: message, jobId: parsed.projectId, artifacts: [], logs: [], errors: [message] };
+        }
         throw error;
       }
     }

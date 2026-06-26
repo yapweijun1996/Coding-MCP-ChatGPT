@@ -71,6 +71,28 @@ test("generate_project_docs creates README and CHANGELOG from project files, val
   }
 });
 
+test("validate_project failure summary names the concrete reason, not just 'validation failed'", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "validate-summary-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Broken refs", createdByClientId: "coder" });
+    // index.html references a local audio file that does not exist — the exact #5 failure shape.
+    await writeProjectFile(ctx.projectRoot, project.id, "index.html", `<!doctype html><html><head><title>Music</title></head><body><audio src="track.wav"></audio></body></html>`);
+
+    const result = await callTool("validate_project", { projectId: project.id, entryFile: "index.html" }, ctx);
+    assert.equal(result.ok, false);
+    // The generic phrase alone (with nothing after the colon) is the regression we are guarding against.
+    assert.doesNotMatch(result.summary, /validation failed\.$/);
+    assert.match(result.summary, /validation failed: /);
+    assert.match(result.summary, /track\.wav|not found/i);
+    // The detail must match the first concrete error the validator reported.
+    assert.ok((result.errors ?? []).length > 0);
+    assert.ok(result.summary.includes((result.errors ?? [])[0]!.slice(0, 20)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("generate_project_docs supports custom output paths without publish", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "project-docs-"));
   try {

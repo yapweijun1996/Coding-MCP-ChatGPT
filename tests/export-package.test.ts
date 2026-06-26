@@ -78,6 +78,31 @@ test("export package tools create manifest, HTML bundle, ZIP, listing, and repor
   }
 });
 
+test("export tools reject a foreign manifest with an actionable error, not a crash", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "export-package-foreign-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Foreign manifest project", createdByClientId: "coder" });
+    // A music export manifest: valid JSON, wrong shape (no title/packages/files/readiness).
+    // This is the exact input that crashed create_html_export_bundle (undefined.replaceAll) and
+    // build_zip_export_package (undefined.push) before manifest validation existed.
+    await writeProjectFile(ctx.projectRoot, project.id, "music/prod-ready-music-v1/export-manifest.json", JSON.stringify({ tracks: [{ title: "Rainy office" }], license: "generated_original" }));
+
+    const htmlResult = await callTool("create_html_export_bundle", { projectId: project.id, manifestPath: "music/prod-ready-music-v1/export-manifest.json", outputPath: "bundle.html" }, ctx);
+    assert.equal(htmlResult.ok, false);
+    assert.doesNotMatch(htmlResult.summary, /replaceAll|undefined/);
+    assert.match(htmlResult.summary, /not a valid export package manifest/);
+    assert.match(htmlResult.summary, /create_export_package_manifest/);
+
+    const zipResult = await callTool("build_zip_export_package", { projectId: project.id, manifestPath: "music/prod-ready-music-v1/export-manifest.json", outputPath: "bundle.zip" }, ctx);
+    assert.equal(zipResult.ok, false);
+    assert.doesNotMatch(zipResult.summary, /push|undefined/);
+    assert.match(zipResult.summary, /not a valid export package manifest/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("export package tools are exposed through core, coding, debug, and export-package skills", () => {
   const toolNames = ["create_export_package_manifest", "build_zip_export_package", "create_html_export_bundle", "list_export_packages", "export_package_report"];
   for (const skillId of ["core", "coding", "debug", "export-package"]) {
