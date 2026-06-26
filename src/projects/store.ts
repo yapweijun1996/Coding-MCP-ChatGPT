@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
+import { cp, mkdir, open, readFile, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { TextDecoder } from "node:util";
 import { withKeyedLock } from "../shared/keyed-lock.js";
@@ -1361,6 +1361,38 @@ export async function readProjectFile(projectRoot: string, projectId: string, re
     throw new Error(`Project file is too large to read. Size=${fileStat.size}, maxBytes=${maxBytes}.`);
   }
   return readFile(absolutePath, "utf8");
+}
+
+// Truncating reader for the agent-facing read_project_file tool. The strict readProjectFile above
+// hard-fails when a file exceeds maxBytes, which leaves the caller with nothing when it picked a
+// small maxBytes. Internal callers that JSON.parse the result must keep using the strict reader —
+// a truncated JSON would parse-fail silently. This variant instead returns the first maxBytes bytes
+// plus a truncated flag, so a read is always usable and the caller can decide to re-read with a
+// larger maxBytes.
+export async function readProjectFilePartial(
+  projectRoot: string,
+  projectId: string,
+  relativePath: string,
+  maxBytes = maxProjectFileBytes
+): Promise<{ content: string; truncated: boolean; size: number }> {
+  const metadata = await getProject(projectRoot, projectId);
+  if (metadata.status === "deleted") throw new Error("Cannot read a deleted project.");
+
+  const absolutePath = resolveProjectFilePath(projectRoot, projectId, relativePath);
+  const fileStat = await stat(absolutePath);
+  if (fileStat.size <= maxBytes) {
+    return { content: await readFile(absolutePath, "utf8"), truncated: false, size: fileStat.size };
+  }
+  const handle = await open(absolutePath, "r");
+  try {
+    const buffer = Buffer.alloc(maxBytes);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+    // A multibyte UTF-8 char may straddle the cut point; decoding the partial buffer yields a
+    // replacement char at the tail at worst, which is acceptable for a truncated preview.
+    return { content: buffer.subarray(0, bytesRead).toString("utf8"), truncated: true, size: fileStat.size };
+  } finally {
+    await handle.close();
+  }
 }
 
 function isExternalOrNonFileReference(value: string): boolean {
