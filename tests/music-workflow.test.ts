@@ -816,6 +816,72 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
   }
 });
 
+test("compose_music creates a shaped piano sketch instead of block-chord placeholders", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-compose-quality-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Piano compose quality", createdByClientId: "composer" });
+    const compose = getToolModule("compose_music");
+    const render = getToolModule("render_midi_to_audio");
+    const inspect = getToolModule("inspect_audio_quality");
+    assert.ok(compose);
+    assert.ok(render);
+    assert.ok(inspect);
+
+    const composeResult = await compose!.handler({
+      projectId: project.id,
+      title: "Glass Study Sketch",
+      style: "smooth_piano",
+      mood: "gentle lyrical solo piano",
+      tempo: 72,
+      key: "A minor",
+      durationSeconds: 48,
+      useCase: "solo piano sketch",
+      instruments: ["piano"],
+      complexity: "medium",
+      loopable: false,
+      outputManifestPath: "music/piano-quality.json",
+      outputMidiPath: "music/piano-quality.mid"
+    }, ctx);
+    assert.equal(composeResult.ok, true);
+    const composition = composeResult.structuredContent as { durationSeconds: number; tempo: number; tracks: Record<string, Array<{ startBeat: number; durationBeats: number; velocity: number }>> };
+    const pianoNotes = composition.tracks.piano;
+    assert.ok(pianoNotes.length >= 80, "piano sketch should have enough arpeggio and melody notes to be musically inspectable");
+    assert.ok(pianoNotes.some((note) => note.startBeat % 1 !== 0), "piano sketch should include off-beat arpeggios or pickup notes");
+    assert.ok(pianoNotes.some((note) => note.durationBeats <= 0.75), "piano sketch should include short moving notes, not only sustained block chords");
+    assert.ok(pianoNotes.some((note) => note.durationBeats >= 1.25), "piano sketch should include sustained melodic or harmonic notes");
+    const velocities = pianoNotes.map((note) => note.velocity);
+    assert.ok(Math.max(...velocities) - Math.min(...velocities) >= 18, "piano sketch should have an audible dynamic curve");
+    const finalNoteSeconds = Math.max(...pianoNotes.map((note) => (note.startBeat + note.durationBeats) * 60 / composition.tempo));
+    assert.ok(finalNoteSeconds <= composition.durationSeconds + 0.01, "generated notes should not run past the declared duration");
+
+    const renderResult = await render!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/piano-quality.json",
+      sampleRate: 16000,
+      instrumentMap: { piano: "warm_acoustic_piano" },
+      renderPreset: "warm_cafe",
+      outputAudioPath: "music/piano-quality.wav",
+      outputReportPath: "music/piano-quality-render.json"
+    }, ctx);
+    assert.equal(renderResult.ok, true);
+    const qaResult = await inspect!.handler({
+      projectId: project.id,
+      audioPath: "music/piano-quality.wav",
+      compositionManifestPath: "music/piano-quality.json",
+      useCase: "solo piano sketch",
+      checkLoop: false,
+      outputPath: "music/piano-quality-qa.json"
+    }, ctx);
+    assert.equal(qaResult.ok, true);
+    const qa = qaResult.structuredContent as { warnings: string[]; technicalReport: { silenceGaps: unknown[] } };
+    assert.deepEqual(qa.warnings, []);
+    assert.deepEqual(qa.technicalReport.silenceGaps, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("production music workflow publishes auditions, extends arrangements, assembles sessions, normalizes audio, and exports project", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "music-production-"));
   try {
