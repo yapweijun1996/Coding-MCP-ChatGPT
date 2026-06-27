@@ -31,7 +31,7 @@ async function withMockFetch<T>(handler: typeof fetch, fn: () => Promise<T>): Pr
 }
 
 test("public API tools register no-key APIs only with stable names", () => {
-  assert.equal(publicApiRegistry.length, 83);
+  assert.equal(publicApiRegistry.length, 92);
   const names = publicApiRegistry.map((api) => publicApiToolName(api.id));
   assert.equal(new Set(names).size, names.length);
   assert.equal(names.every((name) => /^public_api_[a-z0-9_]+$/.test(name)), true);

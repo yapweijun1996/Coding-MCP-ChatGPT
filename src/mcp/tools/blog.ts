@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { ToolModule, ToolContext, ToolResult } from "../types.js";
 import { getUserById } from "../../user-store.js";
-import { deleteBlogPost, getBlogPostBySlug, listBlogPosts, setBlogTheme, upsertBlogPost } from "../../blog/store.js";
+import { deleteBlogPost, getBlogPostBySlug, listBlogPosts, setBlogTheme, upsertBlogPost, type BlogPost } from "../../blog/store.js";
 
 const publishSchema = z.object({
   title: z.string().min(1).max(200),
@@ -35,6 +35,16 @@ async function requireAdmin(ctx: ToolContext): Promise<ToolResult | undefined> {
     return { ok: false, summary: "Only admins can manage the blog.", artifacts: [], logs: [], errors: ["Forbidden: admin role required."] };
   }
   return undefined;
+}
+
+// Published posts are public. A draft is visible only to its author or an admin — everyone else
+// is told it does not exist (same response as a missing slug) so a draft's existence never leaks.
+async function canViewPost(ctx: ToolContext, post: BlogPost): Promise<boolean> {
+  if (post.status === "published") return true;
+  if (!ctx.userId) return false;
+  if (post.authorUserId && post.authorUserId === ctx.userId) return true;
+  const user = await getUserById(ctx.userId);
+  return user?.role === "admin";
 }
 
 export const blogTools: ToolModule[] = [
@@ -93,10 +103,12 @@ export const blogTools: ToolModule[] = [
     },
     enabledByDefault: true,
     schema: slugSchema,
-    handler: async (input, _ctx) => {
+    handler: async (input, ctx) => {
       const { slug } = input as z.infer<typeof slugSchema>;
       const post = await getBlogPostBySlug(slug);
-      if (!post) return { ok: false, summary: `No blog post with slug "${slug}".`, artifacts: [], logs: [], errors: ["Not found."] };
+      if (!post || !await canViewPost(ctx, post)) {
+        return { ok: false, summary: `No blog post with slug "${slug}".`, artifacts: [], logs: [], errors: ["Not found."] };
+      }
       return { ok: true, summary: `Loaded blog post "${post.title}".`, artifacts: [], logs: [JSON.stringify(post, null, 2)], errors: [] };
     }
   },
