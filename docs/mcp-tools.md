@@ -89,9 +89,9 @@ ChatGPT and other coding agents should use the persistent Project workflow for d
 2. Use `get_project_activity` if the agent needs task history or latest validation context.
 3. Use the lower-level `create_project` / `write_project_file` / `validate_project` / `publish_and_report` flow only for repair or incremental edits.
 
-`deliver_static_project` is the preferred delivery tool because it writes all files, validates local references, temporarily publishes, runs browser validation through Playwright, blocks on serious runtime/layout failures, and returns a structured report with the public `publishedUrl`.
+`deliver_static_project` is the preferred delivery tool because it writes all files, validates local references, temporarily publishes, runs browser validation through Playwright, blocks on serious runtime/layout failures, and returns a structured report with the shareable `publishedUrl`.
 
-Agent-facing delivery tools publish final handoff links with `shareAccess: "anyone_with_link"` by default so users and sandboxed preview sessions can load HTML plus referenced assets such as images, audio, and video. Use `shareAccess: "private"` only for internal previews that should require the owner/admin session cookie.
+Projects are private by default. Agent-facing delivery tools explicitly publish final handoff links with `shareAccess: "anyone_with_link"` by default so users and sandboxed preview sessions can load HTML plus referenced assets such as images, audio, and video. Use `shareAccess: "private"` only for internal previews that should require the owner/admin session cookie.
 
 ### Project workflow recipes
 
@@ -174,13 +174,13 @@ Use `import_musicxml_score` when a user provides MusicXML or asks for score-driv
 Preferred professional path:
 
 1. `import_musicxml_score` with `musicXmlPath` or `musicXmlString`.
-2. Register a commercial-safe piano SoundFont with `manage_jazz_instrument_packs`, including source URL, license, attribution, SHA-256, and redistribution notes.
+2. Register a commercial-safe piano SoundFont or SFZ pack with `manage_jazz_instrument_packs`, including source URL, license, attribution, SHA-256, and redistribution notes.
 3. Use `edit_midi` only if arrangement cleanup is needed.
 4. Render with `render_midi_with_soundfont`.
 5. Run `inspect_audio_quality`.
 6. Export with `export_music_project`.
 
-`render_midi_with_soundfont` is preferred for production-candidate piano output when a ready SoundFont pack exists. `render_midi_to_audio` remains a procedural fallback and should be treated as `preview_only`; exported audition pages should make that status visible.
+`render_midi_with_soundfont` is preferred for production-candidate piano output when a ready instrument pack exists. `.sf2`/`.sf3` packs render through `fluidsynth`; `.sfz` packs render through `sfizz_render` when installed. `render_midi_to_audio` remains a procedural fallback and should be treated as `preview_only`; exported audition pages should make that status visible.
 
 Do not commit large `.sf2`, `.sf3`, SFZ sample sets, or other instrument binaries into git. Store local packs in project data or a configured workspace path such as `.music-packs/`, then register metadata and attribution before rendering or export.
 

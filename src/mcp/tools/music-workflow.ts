@@ -443,6 +443,20 @@ type Composition = {
   chordProgression: string[];
   tracks: Record<string, Array<z.infer<typeof noteSchema>>>;
   license: { output: string; dependencies: string[] };
+  compositionPlan?: {
+    form: Array<{ name: string; bars: number; role: string; targetIntensity: number }>;
+    motifs: Array<{ id: string; contour: string; rhythm: string; development: string[] }>;
+    energyCurve: number[];
+    arrangementIntent: string[];
+  };
+  performance?: {
+    humanized: boolean;
+    timingJitterBeats: number;
+    velocityJitter: number;
+    sustainPedal: Array<{ startBeat: number; endBeat: number; value: number }>;
+    rubatoMap: Array<{ beat: number; tempoScale: number }>;
+  };
+  musicalityReport?: ReturnType<typeof musicalityForComposition>;
 };
 
 type MusicXmlImportResult = {
@@ -726,6 +740,130 @@ function chordNotes(root: number, symbol: string) {
   return chordIntervals[type].map((interval) => root + interval);
 }
 
+function deterministicShape(seed: number) {
+  const value = Math.sin(seed * 12.9898 + 78.233) * 43758.5453;
+  return (value - Math.floor(value)) * 2 - 1;
+}
+
+function buildCompositionPlan(input: z.infer<typeof composeMusicInputSchema>, bars: number) {
+  const form = input.loopable
+    ? [{ name: "loop_A", bars, role: "repeatable main idea", targetIntensity: 0.58 }]
+    : [
+      { name: "intro", bars: Math.min(4, bars), role: "establish texture and motif", targetIntensity: 0.28 },
+      { name: "A", bars: Math.max(4, Math.floor((bars - 6) * 0.45)), role: "state the main motif clearly", targetIntensity: 0.55 },
+      { name: "B", bars: Math.max(4, Math.floor((bars - 6) * 0.35)), role: "develop the motif with higher register or harmonic tension", targetIntensity: 0.72 },
+      { name: "outro", bars: Math.max(2, bars - Math.min(4, bars) - Math.max(4, Math.floor((bars - 6) * 0.45)) - Math.max(4, Math.floor((bars - 6) * 0.35))), role: "release tension and land cleanly", targetIntensity: 0.32 }
+    ];
+  const energyCurve = Array.from({ length: bars }, (_, index) => {
+    const position = bars <= 1 ? 0 : index / (bars - 1);
+    return Number((0.25 + Math.sin(Math.PI * position) * 0.55 + (index % 4 === 3 ? 0.08 : 0)).toFixed(3));
+  });
+  const pianoIntent = input.instruments.includes("piano") || input.instruments.includes("electric_piano")
+    ? ["separate melody and accompaniment registers", "use arpeggios as texture, not as the whole composition", "shape phrase endings with lower velocity"]
+    : [];
+  return {
+    form,
+    motifs: [
+      {
+        id: "main_motif",
+        contour: input.style === "game_bgm" ? "upward leap then stepwise fall" : "small rise, expressive peak, gentle fall",
+        rhythm: input.style === "game_bgm" ? "short-short-long with octave reinforcement" : "pickup into a sustained tone, answered by a shorter tail",
+        development: ["state", "sequence", "answer", "register lift", "compressed reprise"]
+      }
+    ],
+    energyCurve,
+    arrangementIntent: [
+      "write a form before note events",
+      "repeat motifs with variation instead of repeating bars verbatim",
+      "keep a clear foreground line over supporting texture",
+      ...pianoIntent
+    ]
+  };
+}
+
+function performancePlanForComposition(composition: Composition) {
+  const totalBeats = composition.durationSeconds / (60 / composition.tempo);
+  const pedalWindow = 4;
+  const sustainPedal = Array.from({ length: Math.ceil(totalBeats / pedalWindow) }, (_, index) => ({
+    startBeat: index * pedalWindow,
+    endBeat: Math.min(totalBeats, (index + 1) * pedalWindow - 0.12),
+    value: 96
+  }));
+  const rubatoMap = [
+    { beat: 0, tempoScale: 0.985 },
+    { beat: Number((totalBeats * 0.28).toFixed(3)), tempoScale: 1.015 },
+    { beat: Number((totalBeats * 0.62).toFixed(3)), tempoScale: 1.025 },
+    { beat: Number((totalBeats * 0.9).toFixed(3)), tempoScale: 0.97 }
+  ];
+  return { humanized: true, timingJitterBeats: 0.018, velocityJitter: 7, sustainPedal, rubatoMap };
+}
+
+function applyPerformanceHumanization(composition: Composition, performance: NonNullable<Composition["performance"]>): Composition["tracks"] {
+  const totalBeats = composition.durationSeconds / (60 / composition.tempo);
+  const humanized: Composition["tracks"] = {};
+  for (const [track, notes] of Object.entries(composition.tracks)) {
+    humanized[track] = notes.map((note, index) => {
+      const seed = note.midi * 0.37 + note.startBeat * 1.91 + index * 0.53 + track.length;
+      const timing = deterministicShape(seed) * performance.timingJitterBeats;
+      const velocity = deterministicShape(seed + 17) * performance.velocityJitter;
+      const pedalOverlap = performance.sustainPedal.some((pedal) => note.startBeat >= pedal.startBeat && note.startBeat < pedal.endBeat);
+      const durationLift = track === "piano" && pedalOverlap && note.durationBeats >= 0.4 ? 0.08 : 0;
+      const startBeat = Math.max(0, Math.min(totalBeats - 0.05, note.startBeat + timing));
+      return {
+        ...note,
+        startBeat: Number(startBeat.toFixed(3)),
+        durationBeats: Number(Math.min(totalBeats - startBeat, note.durationBeats + durationLift).toFixed(3)),
+        velocity: Math.max(1, Math.min(127, Math.round(note.velocity + velocity)))
+      };
+    }).sort((a, b) => a.startBeat - b.startBeat || a.midi - b.midi);
+  }
+  return humanized;
+}
+
+function musicalityForComposition(composition: Composition) {
+  const allNotes = Object.values(composition.tracks).flat();
+  const pianoNotes = composition.tracks.piano ?? [];
+  const onGrid = allNotes.filter((note) => Math.abs(note.startBeat * 4 - Math.round(note.startBeat * 4)) < 0.001).length;
+  const gridLockRatio = allNotes.length ? onGrid / allNotes.length : 1;
+  const velocities = allNotes.map((note) => note.velocity);
+  const velocityRange = velocities.length ? Math.max(...velocities) - Math.min(...velocities) : 0;
+  const pitchClassesByBar = new Map<number, string>();
+  for (const note of allNotes) {
+    const bar = Math.floor(note.startBeat / 4);
+    const pitchClass = note.midi % 12;
+    pitchClassesByBar.set(bar, `${pitchClassesByBar.get(bar) ?? ""}${pitchClass},`);
+  }
+  const barPatterns = [...pitchClassesByBar.values()];
+  const repeatedAdjacentBars = barPatterns.slice(1).filter((pattern, index) => pattern === barPatterns[index]).length;
+  const adjacentBarRepeatRatio = barPatterns.length > 1 ? repeatedAdjacentBars / (barPatterns.length - 1) : 0;
+  const shortNotes = allNotes.filter((note) => note.durationBeats <= 0.75).length;
+  const sustainedNotes = allNotes.filter((note) => note.durationBeats >= 1.25).length;
+  const registerSpan = pianoNotes.length ? Math.max(...pianoNotes.map((note) => note.midi)) - Math.min(...pianoNotes.map((note) => note.midi)) : 0;
+  const hasPlan = Boolean(composition.compositionPlan?.motifs.length);
+  const hasHumanizedPerformance = Boolean(composition.performance?.humanized);
+  const mechanicalScore = Number(Math.min(1, (gridLockRatio * 0.42) + (adjacentBarRepeatRatio * 0.28) + (velocityRange < 12 ? 0.18 : 0) + (!hasHumanizedPerformance ? 0.12 : 0)).toFixed(3));
+  const warnings: string[] = [];
+  if (!hasPlan) warnings.push("No composition plan or motif metadata is attached.");
+  if (!hasHumanizedPerformance) warnings.push("No humanized performance layer is attached.");
+  if (gridLockRatio > 0.92) warnings.push("Most notes are locked to the grid.");
+  if (adjacentBarRepeatRatio > 0.45) warnings.push("Adjacent bars repeat too mechanically.");
+  if (velocityRange < 12) warnings.push("Velocity range is too flat for expressive playback.");
+  if (allNotes.length && (shortNotes === 0 || sustainedNotes === 0)) warnings.push("Rhythm lacks a mix of short and sustained notes.");
+  if (pianoNotes.length && registerSpan < 18) warnings.push("Piano register span is narrow; melody and accompaniment may blur together.");
+  return {
+    hasPlan,
+    hasHumanizedPerformance,
+    gridLockRatio: Number(gridLockRatio.toFixed(3)),
+    adjacentBarRepeatRatio: Number(adjacentBarRepeatRatio.toFixed(3)),
+    velocityRange,
+    shortNoteRatio: Number((shortNotes / Math.max(1, allNotes.length)).toFixed(3)),
+    sustainedNoteRatio: Number((sustainedNotes / Math.max(1, allNotes.length)).toFixed(3)),
+    pianoRegisterSpan: registerSpan,
+    mechanicalScore,
+    warnings
+  };
+}
+
 function normalizeKeyRoot(key: string) {
   const root = key.trim().split(/\s+/)[0].replace(/m$/, "");
   return Object.prototype.hasOwnProperty.call(noteBase, root) ? root : "C";
@@ -785,9 +923,8 @@ function sectionBarPlan(sections: string[] | undefined, bars: number) {
 function buildComposition(input: z.infer<typeof composeMusicInputSchema>): Composition {
   const beats = Math.round(input.durationSeconds / 60 * input.tempo);
   const bars = Math.max(4, Math.round(beats / 4));
-  const sections = input.loopable
-    ? [{ name: "loop_A", bars, intensity: 0.52 }]
-    : [{ name: "intro", bars: 4, intensity: 0.25 }, { name: "A", bars: Math.max(4, bars - 8), intensity: 0.55 }, { name: "outro", bars: 4, intensity: 0.25 }];
+  const compositionPlan = buildCompositionPlan(input, bars);
+  const sections = compositionPlan.form.map((section) => ({ name: section.name, bars: section.bars, intensity: section.targetIntensity }));
   const progression = progressionFor(input.style, input.key);
   const tracks: Composition["tracks"] = {};
   const maxBeats = input.durationSeconds / (60 / input.tempo);
@@ -813,8 +950,7 @@ function buildComposition(input: z.infer<typeof composeMusicInputSchema>): Compo
   for (let bar = 0; bar < bars; bar += 1) {
     const chordIndex = bar % progression.names.length;
     const start = bar * 4;
-    const sectionPosition = bars <= 1 ? 0 : bar / (bars - 1);
-    const phraseLift = Math.sin(Math.PI * sectionPosition);
+    const phraseLift = compositionPlan.energyCurve[bar] ?? Math.sin(Math.PI * (bars <= 1 ? 0 : bar / (bars - 1)));
     const dynamic = Math.round(44 + phraseLift * 22 + (bar % 4) * 2);
     const chord = chordNotes(progression.roots[chordIndex], progression.names[chordIndex])
       .map((midi) => midi < 48 ? midi + 12 : midi)
@@ -852,7 +988,7 @@ function buildComposition(input: z.infer<typeof composeMusicInputSchema>): Compo
     }
     if (hasPad) add("pad", progression.roots[chordIndex], start, 3.85, 28 + Math.round(phraseLift * 10));
   }
-  return {
+  const draft: Composition = {
     title: input.title,
     style: input.style,
     mood: input.mood,
@@ -864,8 +1000,12 @@ function buildComposition(input: z.infer<typeof composeMusicInputSchema>): Compo
     sections,
     chordProgression: progression.names,
     tracks,
-    license: { output: "generated_original", dependencies: ["No third-party samples. WAV preview uses built-in sine/noise synthesis."] }
+    license: { output: "generated_original", dependencies: ["No third-party samples. WAV preview uses built-in sine/noise synthesis."] },
+    compositionPlan
   };
+  const performance = performancePlanForComposition(draft);
+  const performed: Composition = { ...draft, performance, tracks: applyPerformanceHumanization(draft, performance) };
+  return { ...performed, musicalityReport: musicalityForComposition(performed) };
 }
 
 function varLen(value: number) {
@@ -887,6 +1027,13 @@ function midiBuffer(composition: Composition, options: { channelMap?: Record<str
   const defaultChannelFor = (track: string) => track === "drums" ? 9 : Math.abs([...track].reduce((sum, ch) => sum + ch.charCodeAt(0), 0)) % 8;
   const channelFor = (track: string) => options.channelMap?.[track] ?? defaultChannelFor(track);
   for (const [track, notes] of Object.entries(composition.tracks)) {
+    if (track === "piano" && composition.performance?.sustainPedal.length) {
+      const channel = channelFor(track);
+      for (const pedal of composition.performance.sustainPedal) {
+        events.push({ tick: Math.round(pedal.startBeat * ppq), bytes: [0xb0 + channel, 64, pedal.value] });
+        events.push({ tick: Math.round(pedal.endBeat * ppq), bytes: [0xb0 + channel, 64, 0] });
+      }
+    }
     for (const note of notes) {
       const channel = channelFor(track);
       const start = Math.round(note.startBeat * ppq);
@@ -1191,6 +1338,10 @@ function qualityForComposition(composition: Composition, options: { audio?: Buff
   if (composition.instruments.length > 8) addFinding(findings, "medium", "background_suitability", "Arrangement may be too busy for background use.", "Reduce simultaneous instruments and simplify the foreground melody.");
   const repeated = composition.chordProgression.every((chord) => chord === composition.chordProgression[0]);
   if (repeated) addFinding(findings, "low", "repetition", "Chord progression is highly repetitive.", "Add a B section or light reharmonization every 16-32 bars.");
+  const musicalityReport = musicalityForComposition(composition);
+  if (!musicalityReport.hasPlan) addFinding(findings, "low", "musicality", "Composition has no explicit form or motif plan.", "Generate or attach a compositionPlan before rendering final audition candidates.");
+  if (!musicalityReport.hasHumanizedPerformance) addFinding(findings, "low", "performance", "Composition has no humanized performance layer.", "Add timing, velocity, sustain pedal, and phrase-level performance shaping.");
+  if (musicalityReport.mechanicalScore > 0.72) addFinding(findings, "medium", "musicality", "Composition is likely to sound mechanical.", "Reduce grid lock, vary adjacent bars, widen dynamics, and add motif development.");
   const noteDensityPerMinute = allNotes.length / Math.max(1, composition.durationSeconds / 60);
   if (noteDensityPerMinute > 900) addFinding(findings, "medium", "background_suitability", "Note density is high for long background listening.", "Lower drum subdivisions, simplify comping, or thin the melody.");
   if (composition.durationSeconds < 10 && options.useCase.includes("background")) addFinding(findings, "low", "duration", "Preview is very short for judging background comfort.", "Render at least 30-60 seconds before final QA.");
@@ -1233,6 +1384,7 @@ function qualityForComposition(composition: Composition, options: { audio?: Buff
     technicalReport,
     loudnessReport: { peak: technicalReport.peak, rms: technicalReport.rms, estimatedLufs: technicalReport.estimatedLufs, dynamicRange: technicalReport.dynamicRange, target: "background-friendly, stable perceived loudness" },
     loopSeamReport: { checked: options.checkLoop, loopable: composition.loopable, seamClickProxy: technicalReport.loopSeamClickProxy, startNearZero: technicalReport.startNearZero, endNearZero: technicalReport.endNearZero },
+    musicalityReport,
     sessionQualityReport,
     backgroundSuitabilityScore,
     findings,
@@ -1940,18 +2092,37 @@ function isSoundfontAssetPath(assetPath: string) {
   return /\.(sf2|sf3)$/i.test(assetPath);
 }
 
+function isSfzAssetPath(assetPath: string) {
+  return /\.sfz$/i.test(assetPath);
+}
+
 type JazzPackRecord = ReturnType<typeof analyzeJazzPack>;
 
+function rendererForPack(pack: JazzPackRecord | undefined) {
+  if (!pack || pack.status !== "ready") return undefined;
+  if (pack.format === "soundfont" && pack.assetPaths.some(isSoundfontAssetPath)) return "fluidsynth";
+  if (pack.format === "sfz" && pack.assetPaths.some(isSfzAssetPath)) return "sfizz";
+  return undefined;
+}
+
+function instrumentAssetPathForPack(pack: JazzPackRecord, requestedPath?: string) {
+  if (requestedPath) return requestedPath;
+  if (pack.format === "sfz") return pack.assetPaths.find(isSfzAssetPath);
+  return pack.assetPaths.find(isSoundfontAssetPath);
+}
+
 function productionRenderBlockersForPack(pack: JazzPackRecord | undefined, requestedPath?: string) {
-  if (!pack) return ["No registered ready SoundFont pack matches soundfontPackId/soundfontPath."];
+  if (!pack) return ["No registered ready instrument pack matches soundfontPackId/soundfontPath."];
   const blockers: string[] = [];
   if (pack.status !== "ready") blockers.push(`Pack ${pack.packId} status is ${pack.status}, not ready.`);
-  if (pack.format !== "soundfont") blockers.push(`Pack ${pack.packId} format is ${pack.format}; FluidSynth production render requires soundfont.`);
-  if (!pack.assetPaths.some(isSoundfontAssetPath)) blockers.push(`Pack ${pack.packId} has no .sf2/.sf3 asset.`);
+  if (pack.format !== "soundfont" && pack.format !== "sfz") blockers.push(`Pack ${pack.packId} format is ${pack.format}; production render requires .sf2/.sf3 SoundFont or .sfz.`);
+  if (pack.format === "soundfont" && !pack.assetPaths.some(isSoundfontAssetPath)) blockers.push(`Pack ${pack.packId} has no .sf2/.sf3 asset.`);
+  if (pack.format === "sfz" && !pack.assetPaths.some(isSfzAssetPath)) blockers.push(`Pack ${pack.packId} has no .sfz asset.`);
   if (requestedPath && !pack.assetPaths.includes(requestedPath)) blockers.push(`Requested soundfontPath is not registered on ready pack ${pack.packId}.`);
   if (!pack.commercialUseAllowed) blockers.push(`Pack ${pack.packId} is not marked commercial-use allowed.`);
   if (pack.riskFlags.length) blockers.push(`Pack ${pack.packId} has unresolved risk flags: ${pack.riskFlags.join(", ")}.`);
   if (!pack.computedSha256) blockers.push(`Pack ${pack.packId} has no computed hash.`);
+  if (!rendererForPack(pack)) blockers.push(`Pack ${pack.packId} has no eligible renderer for format ${pack.format}.`);
   return blockers;
 }
 
@@ -1970,14 +2141,15 @@ async function resolveProductionSoundfont(ctx: ToolContext, parsed: z.infer<type
   });
   const blockers = productionRenderBlockersForPack(pack, parsed.soundfontPath);
   if (blockers.length || !pack) return { ok: false as const, blockers, pack };
-  const soundfontPath = parsed.soundfontPath ?? pack.assetPaths.find(isSoundfontAssetPath)!;
+  const renderer = rendererForPack(pack)!;
+  const soundfontPath = instrumentAssetPathForPack(pack, parsed.soundfontPath)!;
   const absolutePath = await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, soundfontPath);
-  return { ok: true as const, pack, soundfontPath, absolutePath, blockers: [] };
+  return { ok: true as const, pack, renderer, soundfontPath, absolutePath, blockers: [] };
 }
 
 async function writeSoundfontRenderFailure(ctx: ToolContext, parsed: z.infer<typeof renderMidiWithSoundfontInputSchema>, blockingReasons: string[], metadata: Record<string, unknown> = {}) {
   const report = {
-    renderer: "fluidsynth",
+    renderer: "instrument_renderer",
     qualityTier: "preview_only",
     productionReady: false,
     blockingReasons,
@@ -2003,6 +2175,31 @@ async function fluidSynthRender(soundfontPath: string, midiPath: string, outputP
   const output = await readFile(outputPath);
   assertPcmWav(output, "FluidSynth output");
   return output;
+}
+
+async function sfizzRender(sfzPath: string, midiPath: string, outputPath: string, sampleRate: number, timeout: number) {
+  const attempts = [
+    ["--sfz", sfzPath, "--midi", midiPath, "--wav", outputPath, "--sample-rate", String(sampleRate)],
+    ["-s", sfzPath, "-m", midiPath, "-o", outputPath, "-r", String(sampleRate)],
+    [sfzPath, midiPath, outputPath, String(sampleRate)]
+  ];
+  const errors: string[] = [];
+  for (const args of attempts) {
+    try {
+      await execFileAsync("sfizz_render", args, { timeout, maxBuffer: 1024 * 1024 });
+      const output = await readFile(outputPath);
+      assertPcmWav(output, "SFZ renderer output");
+      return output;
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  throw new Error(`sfizz_render failed with supported argument forms: ${errors.join(" | ")}`);
+}
+
+async function productionInstrumentRender(renderer: string, instrumentPath: string, midiPath: string, outputPath: string, sampleRate: number, timeout: number) {
+  if (renderer === "sfizz") return sfizzRender(instrumentPath, midiPath, outputPath, sampleRate, timeout);
+  return fluidSynthRender(instrumentPath, midiPath, outputPath, sampleRate, timeout);
 }
 
 function wavFallbackOutputPath(outputAudioPath: string) {
@@ -2190,7 +2387,7 @@ function analyzeJazzPack(pack: z.infer<typeof jazzInstrumentPackSchema>, inspect
     computedSha256: inspected.combinedSha256,
     riskFlags,
     status,
-    eligibleRenderer: pack.format === "soundfont" && pack.assetPaths.some(isSoundfontAssetPath) && status === "ready" ? "fluidsynth" : undefined,
+    eligibleRenderer: status === "ready" && pack.format === "soundfont" && pack.assetPaths.some(isSoundfontAssetPath) ? "fluidsynth" : status === "ready" && pack.format === "sfz" && pack.assetPaths.some(isSfzAssetPath) ? "sfizz" : undefined,
     renderUse: status === "ready" ? "eligible_for_verified_instrument_renderer" : "do_not_use_until_license_review_passes",
     proceduralFallback: pack.instrumentRole === "realistic_piano" ? "warm_acoustic_piano" : pack.instrumentRole === "upright_bass" ? "upright_bass" : pack.instrumentRole === "brush_drums" ? "jazz_brushes" : "short_synthetic_ambience_tail",
     notes: pack.notes
@@ -2246,7 +2443,8 @@ async function manageJazzInstrumentPacks(input: z.infer<typeof manageJazzInstrum
         room_ambience: "short_synthetic_ambience_tail"
       },
       eligibleRenderer: "fluidsynth",
-      rule: "Only SoundFont packs with status=ready, .sf2/.sf3 assets, verified hashes, and commercial-safe license metadata may be selected by render_midi_with_soundfont. Existing procedural WAV rendering is preview_only fallback for review_required or blocked packs."
+      eligibleRenderers: ["fluidsynth", "sfizz"],
+      rule: "Only packs with status=ready, verified hashes, commercial-safe license metadata, and a supported asset format may be selected by render_midi_with_soundfont. .sf2/.sf3 assets use FluidSynth; .sfz assets use an installed SFZ renderer such as sfizz_render. Existing procedural WAV rendering is preview_only fallback for review_required or blocked packs."
     },
     ok: blockedPacks.length === 0 && reviewPacks.length === 0,
     warnings: [...reviewPacks.map((pack) => `${pack.packId}: license or redistribution review required (${pack.riskFlags.join(", ") || pack.licenseType}).`), ...blockedPacks.map((pack) => `${pack.packId}: blocked (${pack.riskFlags.join(", ")}).`)]
@@ -3132,27 +3330,30 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "render_midi_with_soundfont", description: "Render a MIDI/composition manifest through FluidSynth using a registered ready .sf2/.sf3 SoundFont pack, producing production_candidate WAV, optional stems, and a renderer/license report.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, stems: { type: "boolean" }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "render_midi_with_soundfont", description: "Render a MIDI/composition manifest through a registered ready .sf2/.sf3 SoundFont or .sfz instrument pack, producing production_candidate WAV, optional stems, and a renderer/license report. .sf2/.sf3 uses FluidSynth; .sfz uses sfizz_render when installed.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, stems: { type: "boolean" }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: renderMidiWithSoundfontInputSchema,
     handler: async (input, ctx) => {
       const parsed = renderMidiWithSoundfontInputSchema.parse(input);
-      const fluidSynthCapability = await toolVersion("fluidsynth");
-      const ffmpegCapability = await toolVersion("ffmpeg", ["-version"]);
-      if (!fluidSynthCapability.ok) {
-        return writeSoundfontRenderFailure(ctx, parsed, ["FluidSynth is not available in this runtime; render remains preview_only until a production renderer is installed."], { rendererMetadata: { fluidSynthCapability, ffmpegCapability } });
-      }
       const hasChannelMap = Object.keys(parsed.channelMap).length > 0;
       if (!parsed.compositionManifestPath && hasChannelMap) {
-        return writeSoundfontRenderFailure(ctx, parsed, ["channelMap requires compositionManifestPath; this tool does not rewrite channels in externally supplied MIDI files."], { rendererMetadata: { fluidSynthCapability, ffmpegCapability }, channelMap: parsed.channelMap, channelMapApplied: false });
+        return writeSoundfontRenderFailure(ctx, parsed, ["channelMap requires compositionManifestPath; this tool does not rewrite channels in externally supplied MIDI files."], { channelMap: parsed.channelMap, channelMapApplied: false });
       }
       if (!parsed.compositionManifestPath && parsed.stems) {
-        return writeSoundfontRenderFailure(ctx, parsed, ["stems require compositionManifestPath so the renderer can isolate tracks; midiPath-only rendering cannot safely produce stems."], { rendererMetadata: { fluidSynthCapability, ffmpegCapability }, stemPaths: {}, stemCount: 0 });
+        return writeSoundfontRenderFailure(ctx, parsed, ["stems require compositionManifestPath so the renderer can isolate tracks; midiPath-only rendering cannot safely produce stems."], { stemPaths: {}, stemCount: 0 });
       }
 
       const soundfont = await resolveProductionSoundfont(ctx, parsed);
       if (!soundfont.ok) {
-        return writeSoundfontRenderFailure(ctx, parsed, soundfont.blockers.map((reason) => `${reason} Output is preview_only until a ready commercial-safe SoundFont pack is registered.`), { rendererMetadata: { fluidSynthCapability, ffmpegCapability }, requestedSoundfontPackId: parsed.soundfontPackId, requestedSoundfontPath: parsed.soundfontPath });
+        return writeSoundfontRenderFailure(ctx, parsed, soundfont.blockers.map((reason) => `${reason} Output is preview_only until a ready commercial-safe SoundFont/SFZ pack is registered.`), { requestedSoundfontPackId: parsed.soundfontPackId, requestedSoundfontPath: parsed.soundfontPath });
+      }
+      const fluidSynthCapability = soundfont.renderer === "fluidsynth" ? await toolVersion("fluidsynth") : { ok: false, version: undefined, error: "not required for selected renderer" };
+      const sfizzCapability = soundfont.renderer === "sfizz" ? await toolVersion("sfizz_render") : { ok: false, version: undefined, error: "not required for selected renderer" };
+      const ffmpegCapability = await toolVersion("ffmpeg", ["-version"]);
+      const rendererCapability = soundfont.renderer === "sfizz" ? sfizzCapability : fluidSynthCapability;
+      if (!rendererCapability.ok) {
+        const binary = soundfont.renderer === "sfizz" ? "sfizz_render" : "fluidsynth";
+        return writeSoundfontRenderFailure(ctx, parsed, [`${binary} is not available in this runtime; ${soundfont.pack.format} render remains preview_only until the renderer is installed.`], { rendererMetadata: { fluidSynthCapability, sfizzCapability, ffmpegCapability }, requestedRenderer: soundfont.renderer, requestedSoundfontPackId: parsed.soundfontPackId, requestedSoundfontPath: parsed.soundfontPath });
       }
 
       let composition: Composition | undefined;
@@ -3176,7 +3377,7 @@ export const musicWorkflowTools: ToolModule[] = [
         await mkdir(tempDir, { recursive: true });
         if (!temporaryFiles.includes(tempDir)) temporaryFiles.push(tempDir);
         const fullMixTemp = path.join(tempDir, "full.wav");
-        const fullMix = await fluidSynthRender(soundfont.absolutePath, midiAbsolutePath, fullMixTemp, parsed.sampleRate, ctx.commandTimeoutMs);
+        const fullMix = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, midiAbsolutePath, fullMixTemp, parsed.sampleRate, ctx.commandTimeoutMs);
         const fullMixFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputAudioPath, fullMix, "audio/wav");
         const stemPaths: Record<string, string> = {};
         if (parsed.stems && composition) {
@@ -3184,7 +3385,7 @@ export const musicWorkflowTools: ToolModule[] = [
             const stemMidiPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.mid`);
             const stemWavPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.wav`);
             await writeFile(stemMidiPath, midiBuffer(compositionWithSingleTrack(composition!, track), { channelMap: parsed.channelMap }));
-            const stemWav = await fluidSynthRender(soundfont.absolutePath, stemMidiPath, stemWavPath, parsed.sampleRate, ctx.commandTimeoutMs);
+            const stemWav = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, stemMidiPath, stemWavPath, parsed.sampleRate, ctx.commandTimeoutMs);
             const stemFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, `${parsed.outputStemDirectory}/${slugifyMusicExportPart(track)}.wav`, stemWav, "audio/wav");
             stemPaths[track] = stemFile.path;
           }
@@ -3192,8 +3393,15 @@ export const musicWorkflowTools: ToolModule[] = [
         const artifacts = [fullMixFile.path, ...Object.values(stemPaths)];
         const stats = audioStats(fullMix);
         const report = {
-          renderer: "fluidsynth",
-          rendererMetadata: { fluidSynthVersion: fluidSynthCapability.version, ffmpegAvailable: ffmpegCapability.ok, ffmpegVersion: ffmpegCapability.version },
+          renderer: soundfont.renderer,
+          rendererMetadata: {
+            fluidSynthAvailable: fluidSynthCapability.ok,
+            fluidSynthVersion: fluidSynthCapability.version,
+            sfizzAvailable: sfizzCapability.ok,
+            sfizzVersion: sfizzCapability.version,
+            ffmpegAvailable: ffmpegCapability.ok,
+            ffmpegVersion: ffmpegCapability.version
+          },
           qualityTier: "production_candidate",
           productionReady: true,
           blockingReasons: [],
@@ -3205,6 +3413,8 @@ export const musicWorkflowTools: ToolModule[] = [
             packId: soundfont.pack.packId,
             displayName: soundfont.pack.displayName,
             path: soundfont.soundfontPath,
+            format: soundfont.pack.format,
+            renderer: soundfont.renderer,
             licenseType: soundfont.pack.licenseType,
             attribution: soundfont.pack.attribution,
             commercialUseAllowed: soundfont.pack.commercialUseAllowed,
@@ -3233,9 +3443,9 @@ export const musicWorkflowTools: ToolModule[] = [
         };
         const reportFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputReportPath, `${JSON.stringify(report, null, 2)}\n`);
         artifacts.push(reportFile.path);
-        return { ok: true, summary: `Rendered production_candidate SoundFont audio with ${Object.keys(stemPaths).length} stem(s).`, jobId: parsed.projectId, artifacts, structuredContent: { ...report, renderReportPath: reportFile.path }, logs: [JSON.stringify(report, null, 2)], errors: [] };
+        return { ok: true, summary: `Rendered production_candidate ${soundfont.pack.format} audio with ${Object.keys(stemPaths).length} stem(s).`, jobId: parsed.projectId, artifacts, structuredContent: { ...report, renderReportPath: reportFile.path }, logs: [JSON.stringify(report, null, 2)], errors: [] };
       } catch (error) {
-        return writeSoundfontRenderFailure(ctx, parsed, [`FluidSynth render failed: ${error instanceof Error ? error.message : String(error)}`], { rendererMetadata: { fluidSynthCapability, ffmpegCapability }, soundfont: soundfont.ok ? { packId: soundfont.pack.packId, path: soundfont.soundfontPath } : undefined });
+        return writeSoundfontRenderFailure(ctx, parsed, [`${soundfont.renderer} render failed: ${error instanceof Error ? error.message : String(error)}`], { rendererMetadata: { fluidSynthCapability, sfizzCapability, ffmpegCapability }, soundfont: soundfont.ok ? { packId: soundfont.pack.packId, path: soundfont.soundfontPath, format: soundfont.pack.format } : undefined });
       } finally {
         await Promise.all(temporaryFiles.map((filePath) => rm(filePath, { recursive: true, force: true })));
       }

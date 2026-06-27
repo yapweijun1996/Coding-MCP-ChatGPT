@@ -48,6 +48,12 @@ Compose stores runtime data under `.docker-data/`:
 
 Back up `.docker-data/` if you need to preserve projects, shared pages, artifacts, OAuth state, and tool state.
 
+## Music Renderers
+
+The Docker image installs `fluidsynth` and `ffmpeg` automatically in both the build and runtime stages. After rebuilding the image, registered `.sf2` and `.sf3` SoundFont piano packs can render through `render_midi_with_soundfont` without manual host setup.
+
+SFZ packs require the `sfizz_render` executable. The current Playwright Ubuntu Noble base image does not expose an installable `sfizz`/`sfizz-tools` package through its default apt sources, so the stock Docker image does not claim automatic SFZ rendering. If a custom image adds `sfizz_render` to `PATH`, `.sfz` packs are eligible for the same production render path; otherwise the tool returns a preview-only renderer-missing report instead of silently falling back to procedural audio.
+
 ## Common Commands
 
 ```bash

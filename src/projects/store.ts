@@ -266,7 +266,7 @@ export interface PublishProjectOptions {
   privateBaseUrl?: string;
 }
 
-export const defaultProjectShareAccess: ProjectShareAccess = "anyone_with_link";
+export const defaultProjectShareAccess: ProjectShareAccess = "private";
 
 export const maxProjectFileBytes = 1024 * 1024;
 export const maxProjectImageAssetBytes = 10 * 1024 * 1024;

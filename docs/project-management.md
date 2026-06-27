@@ -77,7 +77,7 @@ Recommended ChatGPT workflow:
 - `/admin/projects/:projectId`: React project detail route for status, files, validation, and task history.
 - `/admin/api/projects/:projectId`: authenticated JSON project detail.
 - `/admin/api/projects/:projectId/download.zip`: authenticated dynamic ZIP download of project files.
-- `/share/:projectId/:filename`: published project file. Default project access is public `anyone_with_link`; set `shareAccess: "private"` for signed-in project users and admins only.
+- `/share/:projectId/:filename`: published project file. Projects default to `private`; agent delivery tools explicitly publish handoff URLs as `anyone_with_link` unless `shareAccess: "private"` is passed.
 
 ## Safety boundaries
 

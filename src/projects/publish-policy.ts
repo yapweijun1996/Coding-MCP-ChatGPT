@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type { PublishProjectOptions, ProjectShareAccess } from "./store.js";
-import { defaultProjectShareAccess } from "./store.js";
 
 export const projectShareAccessSchema = z.enum(["private", "anyone_with_link"]);
 
@@ -15,6 +14,8 @@ export interface ProjectPublishPolicy {
   options: PublishProjectOptions;
 }
 
+export const defaultProjectPublishShareAccess: ProjectShareAccess = "anyone_with_link";
+
 export function publishBaseUrlForShareAccess(context: PublishUrlContext, shareAccess: ProjectShareAccess | undefined): string {
   return shareAccess === "anyone_with_link"
     ? context.contentBaseUrl ?? context.publicBaseUrl
@@ -23,7 +24,7 @@ export function publishBaseUrlForShareAccess(context: PublishUrlContext, shareAc
 
 export function buildProjectPublishOptions(
   context: PublishUrlContext,
-  shareAccess: ProjectShareAccess = defaultProjectShareAccess
+  shareAccess: ProjectShareAccess = defaultProjectPublishShareAccess
 ): ProjectPublishPolicy {
   return {
     publicBaseUrl: publishBaseUrlForShareAccess(context, shareAccess),

@@ -409,7 +409,7 @@ test("site homepage serves at root and set_homepage is admin-gated", async () =>
     const project = await createProject(adminRoot, { title: "Landing", createdByClientId: "test-client" });
     await writeProjectFile(adminRoot, project.id, "index.html", "<!doctype html><title>Home</title><link rel=stylesheet href=./styles.css><h1>HOMEPAGE_MARKER</h1>");
     await writeProjectFile(adminRoot, project.id, "styles.css", "h1{color:rebeccapurple}");
-    await publishProject(adminRoot, project.id, "https://example.test", "index.html");
+    await publishProject(adminRoot, project.id, "https://example.test", "index.html", { shareAccess: "anyone_with_link" });
     const draftProject = await createProject(adminRoot, { title: "Draft home", createdByClientId: "test-client" });
     const privateProject = await createProject(adminRoot, { title: "Private home", createdByClientId: "test-client" });
     await writeProjectFile(adminRoot, privateProject.id, "index.html", "<!doctype html><title>PrivateHome</title>");
@@ -436,7 +436,7 @@ test("site homepage serves at root and set_homepage is admin-gated", async () =>
     const approvedOtherUser = await approveUser(otherUser.id, adminId);
     const otherProject = await createProject(approvedOtherUser.projectRoot, { title: "Other User Landing", createdByClientId: "test-client" });
     await writeProjectFile(approvedOtherUser.projectRoot, otherProject.id, "index.html", "<!doctype html><title>OtherHome</title><h1>OTHER_HOME_MARKER</h1>");
-    await publishProject(approvedOtherUser.projectRoot, otherProject.id, "https://example.test", "index.html");
+    await publishProject(approvedOtherUser.projectRoot, otherProject.id, "https://example.test", "index.html", { shareAccess: "anyone_with_link" });
     const deniedDeveloper = await setHomepageTool.handler(
       { projectId: otherProject.id },
       { ...ctxBase, projectRoot: approvedOtherUser.projectRoot, userId: approvedOtherUser.id }
@@ -486,7 +486,7 @@ test("admin API sets and clears the homepage", async () => {
 
     const project = await createProject(adminRoot, { title: "Admin Set Home", createdByClientId: "test-client" });
     await writeProjectFile(adminRoot, project.id, "index.html", "<!doctype html><title>AdminHome</title><h1>ADMIN_HOME_MARKER</h1>");
-    await publishProject(adminRoot, project.id, "https://example.test", "index.html");
+    await publishProject(adminRoot, project.id, "https://example.test", "index.html", { shareAccess: "anyone_with_link" });
 
     const headers = { Cookie: cookie, "Content-Type": "application/json", "X-CSRF-Token": csrfToken };
 
