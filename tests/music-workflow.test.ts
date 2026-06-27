@@ -119,6 +119,20 @@ const sequentialDuetMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
   </part>
 </score-partwise>`;
 
+// Electric Piano + Acoustic Bass: their canonical track keys contain underscores. Regression guard
+// for the resolver bug where "\b"/"\s*" patterns failed to match underscored keys (and where the
+// generic piano/upright_bass entries shadowed the specific electric_piano/acoustic_bass entries),
+// which silently dropped the Program Change and channel for these instruments.
+const electricPianoBassMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Electric Piano</part-name><midi-instrument id="P1-I1"><midi-program>5</midi-program></midi-instrument></score-part>
+    <score-part id="P2"><part-name>Acoustic Bass</part-name><midi-instrument id="P2-I1"><midi-program>33</midi-program></midi-instrument></score-part>
+  </part-list>
+  <part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><direction><sound tempo="90"/></direction><note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note></measure></part>
+  <part id="P2"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>2</octave></pitch><duration>4</duration><type>whole</type></note></measure></part>
+</score-partwise>`;
+
 // Two cello parts: the second must keep its cello identity as `cello_2`, not collide or fall back.
 const twoCellosMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="3.1">
@@ -410,6 +424,37 @@ test("validate_music_ensemble passes a true duet and fails closed on sequential 
     assert.equal(missing.ok, false);
     const missingReport = missing.structuredContent as { failures: string[] };
     assert.ok(missingReport.failures.some((reason) => /violin.*noteCount=0|has no notes/i.test(reason)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("import_musicxml_score resolves underscored instrument keys (electric piano, acoustic bass) to the right channel/program", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-underscore-id-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Underscore identity", createdByClientId: "composer" });
+    const importer = getToolModule("import_musicxml_score");
+    assert.ok(importer);
+
+    const result = await importer!.handler({ projectId: project.id, musicXmlString: electricPianoBassMusicXml, outputManifestPath: "music/ep-bass.json", outputMidiPath: "music/ep-bass.mid" }, ctx);
+    const payload = result.structuredContent as { tracks: Record<string, unknown[]>; scoreSource: { trackInstruments: Record<string, string> } };
+    // Specific instruments are not shadowed by the generic piano/upright_bass entries.
+    assert.ok(payload.tracks.electric_piano && payload.tracks.electric_piano.length > 0, "electric piano keeps its own track");
+    assert.ok(payload.tracks.acoustic_bass && payload.tracks.acoustic_bass.length > 0, "acoustic bass keeps its own track");
+    assert.equal(payload.scoreSource.trackInstruments.electric_piano, "electric_piano");
+    assert.equal(payload.scoreSource.trackInstruments.acoustic_bass, "acoustic_bass");
+
+    // The underscored keys must still resolve in midiBuffer: electric_piano = ch2/program5
+    // (PC 0xC2 0x04) and acoustic_bass = ch3/program33 (PC 0xC3 0x20). Before the fix these emitted
+    // no Program Change at all.
+    const midi = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/ep-bass.mid"));
+    const hasSequence = (a: number, b: number) => {
+      for (let i = 0; i + 1 < midi.length; i += 1) if (midi[i] === a && midi[i + 1] === b) return true;
+      return false;
+    };
+    assert.ok(hasSequence(0xc2, 0x04), "electric piano program change (channel 2, GM program 5) must be present");
+    assert.ok(hasSequence(0xc3, 0x20), "acoustic bass program change (channel 3, GM program 33) must be present");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -750,6 +795,25 @@ test("MusicXML score can render through a commercial-safe CC BY piano SoundFont 
     assert.equal(renderPayload.fullMixPath, "music/score-soundfont.wav");
     const wav = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/score-soundfont.wav"));
     assert.equal(wav.subarray(0, 4).toString("ascii"), "RIFF");
+
+    // render_midi_with_soundfont must also fail closed (not just render_production_music) when a
+    // requested stem renders silent — it would otherwise ship an empty stem as production_candidate.
+    process.env.FAKE_FLUIDSYNTH_SILENT = "1";
+    try {
+      const silentStemRender = await soundfontRender!.handler({
+        projectId: project.id,
+        compositionManifestPath: "music/score.json",
+        soundfontPackId: "salamander_cc_by",
+        stems: true,
+        outputAudioPath: "music/score-silent.wav",
+        outputStemDirectory: "music/stems-silent",
+        outputReportPath: "music/score-silent-report.json"
+      }, ctx);
+      assert.equal(silentStemRender.ok, false);
+      assert.match(silentStemRender.summary, /silent|Stem validation failed/i);
+    } finally {
+      delete process.env.FAKE_FLUIDSYNTH_SILENT;
+    }
   } finally {
     process.env.PATH = oldPath;
     await rm(root, { recursive: true, force: true });

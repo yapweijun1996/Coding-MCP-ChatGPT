@@ -25,11 +25,14 @@ type CanonicalInstrument = z.infer<typeof instrumentSchema>;
 // on channel 9 (GM percussion) and carry no melodic program. This catalog is consumed by
 // MusicXML import (identity preservation), midiBuffer (program-change emission), stem grouping,
 // and the ensemble validator so they never disagree about what a track represents.
+// Order matters: more specific instruments come BEFORE the generic ones that would otherwise
+// shadow them (electric_piano before piano; acoustic_bass before upright_bass's greedy /\bbass\b/),
+// because canonicalInstrumentFromName returns the first matching entry in iteration order.
 const instrumentCatalog: Record<CanonicalInstrument, { gmProgram: number; channel: number; namePatterns: RegExp[] }> = {
-  piano: { gmProgram: 1, channel: 0, namePatterns: [/\bpiano\b/i, /\bkeyboard\b/i, /\bkeys\b/i, /\bgrand\b/i] },
   electric_piano: { gmProgram: 5, channel: 2, namePatterns: [/electric\s*piano/i, /\brhodes\b/i, /\bwurli/i, /\bep\b/i] },
-  upright_bass: { gmProgram: 33, channel: 3, namePatterns: [/upright\s*bass/i, /double\s*bass/i, /contrabass/i, /\bbass\b/i] },
+  piano: { gmProgram: 1, channel: 0, namePatterns: [/\bpiano\b/i, /\bkeyboard\b/i, /\bkeys\b/i, /\bgrand\b/i] },
   acoustic_bass: { gmProgram: 33, channel: 3, namePatterns: [/acoustic\s*bass/i] },
+  upright_bass: { gmProgram: 33, channel: 3, namePatterns: [/upright\s*bass/i, /double\s*bass/i, /contrabass/i, /\bbass\b/i] },
   violin: { gmProgram: 41, channel: 4, namePatterns: [/\bviolin\b/i, /\bviola\b/i, /\bvln\b/i, /\bvla\b/i] },
   cello: { gmProgram: 43, channel: 5, namePatterns: [/\bcello\b/i, /violoncello/i, /\bvlc\b/i, /\bvc\b/i] },
   drums: { gmProgram: 1, channel: 9, namePatterns: [/\bdrum/i, /percussion/i, /\bkit\b/i] },
@@ -63,8 +66,12 @@ function canonicalInstrumentFromGmProgram(gmProgram: number | undefined): Canoni
 // program because score authors label parts deliberately (e.g. "Cello").
 function canonicalInstrumentFromName(name: string | undefined): CanonicalInstrument | undefined {
   if (!name) return undefined;
+  // Normalize underscores to spaces so track keys like "electric_piano" / "upright_bass" match the
+  // same word-boundary patterns as their human-readable names ("\b" does not treat "_" as a
+  // boundary, and "\s*" does not span "_").
+  const normalized = name.replace(/_/g, " ");
   for (const [instrument, spec] of Object.entries(instrumentCatalog) as Array<[CanonicalInstrument, (typeof instrumentCatalog)[CanonicalInstrument]]>) {
-    if (spec.namePatterns.some((pattern) => pattern.test(name))) return instrument;
+    if (spec.namePatterns.some((pattern) => pattern.test(normalized))) return instrument;
   }
   return undefined;
 }
@@ -4914,6 +4921,11 @@ export const musicWorkflowTools: ToolModule[] = [
             const stemStats = audioStats(stemWav);
             stemValidations[track] = { rms: stemStats.rms, peak: stemStats.peak, ok: stemStats.rms >= 0.0005 };
           }
+          // Fail closed (same contract as render_production_music): a production_candidate render
+          // must not ship a silent/missing-instrument stem as a success. The surrounding catch turns
+          // this into a graceful ok:false render failure.
+          const silentStems = Object.entries(stemValidations).filter(([, value]) => !value.ok).map(([track]) => track);
+          if (silentStems.length) throw new Error(`Stem validation failed: ${silentStems.join(", ")} rendered effectively silent (RMS below 0.0005). Refusing to ship a production_candidate render with a missing/empty instrument stem.`);
         }
         const artifacts = [fullMixFile.path, ...Object.values(stemPaths)];
         const stats = audioStats(fullMix);
