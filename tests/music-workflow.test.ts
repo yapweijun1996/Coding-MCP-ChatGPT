@@ -66,6 +66,84 @@ const simplePianoMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
   </part>
 </score-partwise>`;
 
+// Cello + piano duet. P2 carries part-name "Cello" and GM program 43; identity must survive
+// import as a `cello` track (not `piano_2`). Both parts play from bar 1 (true simultaneity).
+const celloPianoDuetMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <work><work-title>Cello and Piano Duet</work-title></work>
+  <part-list>
+    <score-part id="P1"><part-name>Piano</part-name><midi-instrument id="P1-I1"><midi-program>1</midi-program></midi-instrument></score-part>
+    <score-part id="P2"><part-name>Cello</part-name><midi-instrument id="P2-I1"><midi-program>43</midi-program></midi-instrument></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <direction><sound tempo="80"/></direction>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
+      <note><pitch><step>E</step><octave>4</octave></pitch><duration>2</duration><type>half</type></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <attributes><divisions>1</divisions></attributes>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+    <measure number="2">
+      <note><pitch><step>G</step><octave>2</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+// Sequential "fake duet": cello plays bars 1-2, piano rests then plays bars 3-4. They never
+// overlap — the exact misleading output the ensemble validator must reject.
+const sequentialDuetMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Piano</part-name><midi-instrument id="P1-I1"><midi-program>1</midi-program></midi-instrument></score-part>
+    <score-part id="P2"><part-name>Cello</part-name><midi-instrument id="P2-I1"><midi-program>43</midi-program></midi-instrument></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes><direction><sound tempo="80"/></direction><note><rest/><duration>4</duration><type>whole</type></note></measure>
+    <measure number="2"><note><rest/><duration>4</duration><type>whole</type></note></measure>
+    <measure number="3"><note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note></measure>
+    <measure number="4"><note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note></measure>
+  </part>
+  <part id="P2">
+    <measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note></measure>
+    <measure number="2"><note><pitch><step>G</step><octave>2</octave></pitch><duration>4</duration><type>whole</type></note></measure>
+    <measure number="3"><note><rest/><duration>4</duration><type>whole</type></note></measure>
+    <measure number="4"><note><rest/><duration>4</duration><type>whole</type></note></measure>
+  </part>
+</score-partwise>`;
+
+// Electric Piano + Acoustic Bass: their canonical track keys contain underscores. Regression guard
+// for the resolver bug where "\b"/"\s*" patterns failed to match underscored keys (and where the
+// generic piano/upright_bass entries shadowed the specific electric_piano/acoustic_bass entries),
+// which silently dropped the Program Change and channel for these instruments.
+const electricPianoBassMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Electric Piano</part-name><midi-instrument id="P1-I1"><midi-program>5</midi-program></midi-instrument></score-part>
+    <score-part id="P2"><part-name>Acoustic Bass</part-name><midi-instrument id="P2-I1"><midi-program>33</midi-program></midi-instrument></score-part>
+  </part-list>
+  <part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><direction><sound tempo="90"/></direction><note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note></measure></part>
+  <part id="P2"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>2</octave></pitch><duration>4</duration><type>whole</type></note></measure></part>
+</score-partwise>`;
+
+// Two cello parts: the second must keep its cello identity as `cello_2`, not collide or fall back.
+const twoCellosMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Cello I</part-name><midi-instrument id="P1-I1"><midi-program>43</midi-program></midi-instrument></score-part>
+    <score-part id="P2"><part-name>Cello II</part-name><midi-instrument id="P2-I1"><midi-program>43</midi-program></midi-instrument></score-part>
+  </part-list>
+  <part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><direction><sound tempo="80"/></direction><note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><type>whole</type></note></measure></part>
+  <part id="P2"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>G</step><octave>2</octave></pitch><duration>4</duration><type>whole</type></note></measure></part>
+</score-partwise>`;
+
 const noTempoMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="3.1">
   <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
@@ -104,9 +182,13 @@ if (process.env.EXPECT_MIDI_STATUS_HEX && midi) {
 const sampleRate = 8000;
 const frames = sampleRate / 4;
 const pcm = Buffer.alloc(frames * 2);
-for (let i = 0; i < frames; i++) {
-  const value = Math.round(Math.sin(i / 12) * 8000);
-  pcm.writeInt16LE(value, i * 2);
+// FAKE_FLUIDSYNTH_SILENT forces a silent (all-zero) render so tests can exercise the silent-stem
+// fail-closed path deterministically. Otherwise emit an audible sine.
+if (!process.env.FAKE_FLUIDSYNTH_SILENT) {
+  for (let i = 0; i < frames; i++) {
+    const value = Math.round(Math.sin(i / 12) * 8000);
+    pcm.writeInt16LE(value, i * 2);
+  }
 }
 const header = Buffer.alloc(44);
 header.write("RIFF", 0);
@@ -263,6 +345,216 @@ test("music workflow imports MusicXML score into manifest and MIDI", async () =>
       () => importer!.handler({ projectId: project.id, musicXmlString: "<score-partwise><part>" }, ctx),
       /Invalid MusicXML/
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("import_musicxml_score preserves cello identity instead of renaming it to piano_2", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-cello-identity-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Cello identity", createdByClientId: "composer" });
+    const importer = getToolModule("import_musicxml_score");
+    assert.ok(importer);
+
+    const result = await importer!.handler({
+      projectId: project.id,
+      musicXmlString: celloPianoDuetMusicXml,
+      outputManifestPath: "music/duet.json",
+      outputMidiPath: "music/duet.mid"
+    }, ctx);
+    assert.equal(result.ok, true);
+    const payload = result.structuredContent as {
+      tracks: Record<string, Array<{ midi: number }>>;
+      instruments: string[];
+      scoreSource: { partCount: number; trackInstruments: Record<string, string> };
+    };
+
+    // Identity preserved: a `cello` track exists with notes; nothing was renamed to piano_2.
+    assert.ok(payload.tracks.cello, "cello part must keep its identity as a cello track");
+    assert.ok(payload.tracks.cello.length > 0, "cello track must carry its notes (no empty track)");
+    assert.ok(payload.tracks.piano && payload.tracks.piano.length > 0, "piano track must carry its notes");
+    assert.ok(!Object.keys(payload.tracks).some((track) => /^piano_\d/.test(track)), "no piano_N fallback track should be created");
+    assert.equal(payload.scoreSource.trackInstruments.cello, "cello");
+    assert.equal(payload.scoreSource.trackInstruments.piano, "piano");
+
+    // Deterministic channel/program mapping: piano = channel 0 / GM program 1 (PC byte 0xC0 0x00),
+    // cello = channel 5 / GM program 43 (PC byte 0xC5 0x2A). Both must appear in the MIDI.
+    const midi = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/duet.mid"));
+    const hasSequence = (a: number, b: number) => {
+      for (let i = 0; i + 1 < midi.length; i += 1) if (midi[i] === a && midi[i + 1] === b) return true;
+      return false;
+    };
+    assert.ok(hasSequence(0xc0, 0x00), "piano program change (channel 0, GM program 1) must be present");
+    assert.ok(hasSequence(0xc5, 0x2a), "cello program change (channel 5, GM program 43) must be present");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("validate_music_ensemble passes a true duet and fails closed on sequential or missing instruments", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-ensemble-validate-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Ensemble validate", createdByClientId: "composer" });
+    const importer = getToolModule("import_musicxml_score");
+    const validator = getToolModule("validate_music_ensemble");
+    assert.ok(importer);
+    assert.ok(validator);
+
+    // True simultaneous duet -> passes, with measurable overlap and per-track stats.
+    await importer!.handler({ projectId: project.id, musicXmlString: celloPianoDuetMusicXml, outputManifestPath: "music/real-duet.json", outputMidiPath: "music/real-duet.mid" }, ctx);
+    const pass = await validator!.handler({ projectId: project.id, compositionManifestPath: "music/real-duet.json", requiredInstruments: ["piano", "cello"] }, ctx);
+    assert.equal(pass.ok, true);
+    const passReport = pass.structuredContent as { overlap: { durationSeconds: number } | null; tracks: Array<{ instrument: string; noteCount: number; firstNoteSeconds: number | null }>; failures: string[] };
+    assert.ok(passReport.overlap && passReport.overlap.durationSeconds > 0, "real duet must report time overlap");
+    assert.ok(passReport.tracks.every((track) => track.noteCount > 0));
+    assert.deepEqual(passReport.failures, []);
+
+    // Sequential handoff (cello then piano) -> fails closed with an overlap failure.
+    await importer!.handler({ projectId: project.id, compositionManifestPath: undefined, musicXmlString: sequentialDuetMusicXml, outputManifestPath: "music/fake-duet.json", outputMidiPath: "music/fake-duet.mid" }, ctx);
+    const seq = await validator!.handler({ projectId: project.id, compositionManifestPath: "music/fake-duet.json", requiredInstruments: ["piano", "cello"] }, ctx);
+    assert.equal(seq.ok, false);
+    const seqReport = seq.structuredContent as { failures: string[] };
+    assert.ok(seqReport.failures.some((reason) => /do not overlap|sequential handoff/i.test(reason)), `expected overlap failure, got ${JSON.stringify(seqReport.failures)}`);
+
+    // Missing instrument (violin requested but absent) -> fails closed with a noteCount=0 failure.
+    const missing = await validator!.handler({ projectId: project.id, compositionManifestPath: "music/real-duet.json", requiredInstruments: ["piano", "cello", "violin"] }, ctx);
+    assert.equal(missing.ok, false);
+    const missingReport = missing.structuredContent as { failures: string[] };
+    assert.ok(missingReport.failures.some((reason) => /violin.*noteCount=0|has no notes/i.test(reason)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("import_musicxml_score resolves underscored instrument keys (electric piano, acoustic bass) to the right channel/program", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-underscore-id-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Underscore identity", createdByClientId: "composer" });
+    const importer = getToolModule("import_musicxml_score");
+    assert.ok(importer);
+
+    const result = await importer!.handler({ projectId: project.id, musicXmlString: electricPianoBassMusicXml, outputManifestPath: "music/ep-bass.json", outputMidiPath: "music/ep-bass.mid" }, ctx);
+    const payload = result.structuredContent as { tracks: Record<string, unknown[]>; scoreSource: { trackInstruments: Record<string, string> } };
+    // Specific instruments are not shadowed by the generic piano/upright_bass entries.
+    assert.ok(payload.tracks.electric_piano && payload.tracks.electric_piano.length > 0, "electric piano keeps its own track");
+    assert.ok(payload.tracks.acoustic_bass && payload.tracks.acoustic_bass.length > 0, "acoustic bass keeps its own track");
+    assert.equal(payload.scoreSource.trackInstruments.electric_piano, "electric_piano");
+    assert.equal(payload.scoreSource.trackInstruments.acoustic_bass, "acoustic_bass");
+
+    // The underscored keys must still resolve in midiBuffer: electric_piano = ch2/program5
+    // (PC 0xC2 0x04) and acoustic_bass = ch3/program33 (PC 0xC3 0x20). Before the fix these emitted
+    // no Program Change at all.
+    const midi = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/ep-bass.mid"));
+    const hasSequence = (a: number, b: number) => {
+      for (let i = 0; i + 1 < midi.length; i += 1) if (midi[i] === a && midi[i + 1] === b) return true;
+      return false;
+    };
+    assert.ok(hasSequence(0xc2, 0x04), "electric piano program change (channel 2, GM program 5) must be present");
+    assert.ok(hasSequence(0xc3, 0x20), "acoustic bass program change (channel 3, GM program 33) must be present");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("import_musicxml_score keeps a second same-instrument part as cello_2 with resolvable identity", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-two-cellos-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Two cellos", createdByClientId: "composer" });
+    const importer = getToolModule("import_musicxml_score");
+    const validator = getToolModule("validate_music_ensemble");
+    assert.ok(importer && validator);
+
+    await importer!.handler({ projectId: project.id, musicXmlString: twoCellosMusicXml, outputManifestPath: "music/two-cellos.json", outputMidiPath: "music/two-cellos.mid" }, ctx);
+    const payload = (await importer!.handler({ projectId: project.id, musicXmlString: twoCellosMusicXml, outputManifestPath: "music/two-cellos.json", outputMidiPath: "music/two-cellos.mid" }, ctx)).structuredContent as {
+      tracks: Record<string, Array<{ midi: number }>>;
+      scoreSource: { trackInstruments: Record<string, string> };
+    };
+    assert.ok(payload.tracks.cello && payload.tracks.cello.length > 0);
+    assert.ok(payload.tracks.cello_2 && payload.tracks.cello_2.length > 0, "second cello must be preserved as cello_2");
+    assert.equal(payload.scoreSource.trackInstruments.cello_2, "cello");
+
+    // cello_2 must resolve to the cello catalog entry: validator counts both parts toward `cello`.
+    const report = (await validator!.handler({ projectId: project.id, compositionManifestPath: "music/two-cellos.json", requiredInstruments: ["cello"] }, ctx)).structuredContent as { tracks: Array<{ instrument: string; matchedTracks: string[]; noteCount: number }> };
+    const celloStat = report.tracks.find((track) => track.instrument === "cello");
+    assert.ok(celloStat);
+    assert.deepEqual(celloStat!.matchedTracks.sort(), ["cello", "cello_2"]);
+    assert.equal(celloStat!.noteCount, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("validate_music_ensemble rejects an alternating fake duet whose spans overlap but never sound together", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-alternating-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Alternating", createdByClientId: "composer" });
+    const validator = getToolModule("validate_music_ensemble");
+    assert.ok(validator);
+
+    // piano on beats [0,2)+[4,6), cello on [2,4)+[6,8): the [first,last] spans overlap (piano 0-6,
+    // cello 2-8) so old span-based overlap would pass — but no half-beat cell has both active, and
+    // each solo run is short, so only the true-simultaneity grid check catches it.
+    const manifest = {
+      title: "Alternating duet", style: "score_import", mood: "test", tempo: 80, key: "C major",
+      durationSeconds: 6, loopable: false, instruments: ["piano", "cello"], sections: [], chordProgression: [],
+      tracks: {
+        piano: [
+          { track: "piano", midi: 60, startBeat: 0, durationBeats: 2, velocity: 80 },
+          { track: "piano", midi: 62, startBeat: 4, durationBeats: 2, velocity: 80 }
+        ],
+        cello: [
+          { track: "cello", midi: 48, startBeat: 2, durationBeats: 2, velocity: 80 },
+          { track: "cello", midi: 50, startBeat: 6, durationBeats: 2, velocity: 80 }
+        ]
+      },
+      license: { output: "test", dependencies: [] }
+    };
+    await writeProjectFile(ctx.projectRoot, project.id, "music/alternating.json", `${JSON.stringify(manifest)}\n`);
+
+    const result = await validator!.handler({ projectId: project.id, compositionManifestPath: "music/alternating.json", requiredInstruments: ["piano", "cello"] }, ctx);
+    assert.equal(result.ok, false);
+    const report = result.structuredContent as { overlap: unknown; failures: string[] };
+    assert.equal(report.overlap, null, "no cell has both instruments active");
+    assert.ok(report.failures.some((reason) => /never play simultaneously/i.test(reason)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("compose_edit_midi fails closed when an ensembleRequirement instrument has no notes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-compose-gate-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Compose gate", createdByClientId: "composer" });
+    const composeEdit = getToolModule("compose_edit_midi");
+    assert.ok(composeEdit);
+
+    // Default (no ensembleRequirement): unchanged behaviour, still reports success.
+    const control = await composeEdit!.handler({
+      projectId: project.id,
+      tracks: ["piano", "upright_bass", "brush_drums"],
+      outputManifestPath: "music/control.json",
+      outputMidiPath: "music/control.mid"
+    }, ctx);
+    assert.equal(control.ok, true);
+
+    // Opt-in gate: a cello is required but was never generated -> fail closed instead of ok:true.
+    const gated = await composeEdit!.handler({
+      projectId: project.id,
+      tracks: ["piano", "upright_bass", "brush_drums"],
+      ensembleRequirement: { requiredInstruments: ["piano", "cello"] },
+      outputManifestPath: "music/gated.json",
+      outputMidiPath: "music/gated.mid"
+    }, ctx);
+    assert.equal(gated.ok, false);
+    const gatedReport = (gated.structuredContent as { ensembleReport: { failures: string[] } }).ensembleReport;
+    assert.ok(gatedReport.failures.some((reason) => /cello.*noteCount=0|cello.*has no notes/i.test(reason)), `expected cello noteCount failure, got ${JSON.stringify(gatedReport.failures)}`);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -503,6 +795,25 @@ test("MusicXML score can render through a commercial-safe CC BY piano SoundFont 
     assert.equal(renderPayload.fullMixPath, "music/score-soundfont.wav");
     const wav = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/score-soundfont.wav"));
     assert.equal(wav.subarray(0, 4).toString("ascii"), "RIFF");
+
+    // render_midi_with_soundfont must also fail closed (not just render_production_music) when a
+    // requested stem renders silent — it would otherwise ship an empty stem as production_candidate.
+    process.env.FAKE_FLUIDSYNTH_SILENT = "1";
+    try {
+      const silentStemRender = await soundfontRender!.handler({
+        projectId: project.id,
+        compositionManifestPath: "music/score.json",
+        soundfontPackId: "salamander_cc_by",
+        stems: true,
+        outputAudioPath: "music/score-silent.wav",
+        outputStemDirectory: "music/stems-silent",
+        outputReportPath: "music/score-silent-report.json"
+      }, ctx);
+      assert.equal(silentStemRender.ok, false);
+      assert.match(silentStemRender.summary, /silent|Stem validation failed/i);
+    } finally {
+      delete process.env.FAKE_FLUIDSYNTH_SILENT;
+    }
   } finally {
     process.env.PATH = oldPath;
     await rm(root, { recursive: true, force: true });
@@ -2081,6 +2392,81 @@ test("music WAV processing tools reject invalid WAV inputs", async () => {
       /must be a readable PCM WAV file/
     );
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("render_production_music renders a dedicated cello stem for a cello + piano duet", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-cello-stem-"));
+  const oldPath = process.env.PATH;
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Cello stem", createdByClientId: "producer" });
+    const importer = getToolModule("import_musicxml_score");
+    const packManager = getToolModule("manage_jazz_instrument_packs");
+    const productionRender = getToolModule("render_production_music");
+    assert.ok(importer && packManager && productionRender);
+
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${await installFakeFfmpeg(root)}:${oldPath}`;
+    await importer!.handler({ projectId: project.id, musicXmlString: celloPianoDuetMusicXml, outputManifestPath: "music/duet-prod.json", outputMidiPath: "music/duet-prod.mid" }, ctx);
+
+    await writeProjectAsset(ctx.projectRoot, project.id, "instruments/piano.sf2", fakeSoundfontBytes(), "audio/soundfont");
+    await writeProjectAsset(ctx.projectRoot, project.id, "instruments/cello.sf2", fakeSoundfontBytes(), "audio/soundfont");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/LICENSE.txt", "Public domain fixture license\n");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/README.md", "# Fixture\n");
+    const mkPack = (packId: string, instrumentRole: string, asset: string) => ({
+      packId, displayName: packId, instrumentRole, format: "soundfont" as const, assetPaths: [asset],
+      licenseType: "public_domain" as const, source: "fixture", sourceUrl: `https://example.test/${packId}`,
+      licenseTextPath: "instruments/LICENSE.txt", readmePath: "instruments/README.md",
+      commercialUseAllowed: true, redistributionAllowed: true, productionUseApproved: true, qualityTier: "production_candidate" as const
+    });
+    const packResult = await packManager!.handler({
+      projectId: project.id,
+      intendedUse: "client_delivery",
+      packs: [mkPack("piano_pd", "realistic_piano", "instruments/piano.sf2"), mkPack("cello_pd", "cello", "instruments/cello.sf2")]
+    }, ctx);
+    assert.equal(packResult.ok, true);
+
+    const renderResult = await productionRender!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/duet-prod.json",
+      instrumentPackMap: { realistic_piano: "piano_pd", cello: "cello_pd" },
+      sampleRate: 16000,
+      publish: false
+    }, ctx);
+    assert.equal(renderResult.ok, true);
+    const payload = renderResult.structuredContent as {
+      stemPaths: Record<string, string>;
+      stemRenderers: Record<string, { role: string }>;
+      stemValidations: Record<string, { ok: boolean; rms: number }>;
+    };
+    // #5: cello is its own role/stem, no longer folded into pad/ambience.
+    assert.ok(payload.stemPaths.cello, "cello must render as its own stem (cello.wav)");
+    assert.ok(payload.stemPaths.piano, "piano must render as its own stem");
+    assert.equal(payload.stemRenderers.cello.role, "cello");
+    // #4: each stem is validated; both are audible.
+    assert.equal(payload.stemValidations.cello.ok, true);
+    assert.equal(payload.stemValidations.piano.ok, true);
+
+    // #4 fail-closed branch: if the renderer produces a silent stem, the publish path must refuse.
+    process.env.FAKE_FLUIDSYNTH_SILENT = "1";
+    try {
+      await assert.rejects(
+        () => productionRender!.handler({
+          projectId: project.id,
+          compositionManifestPath: "music/duet-prod.json",
+          instrumentPackMap: { realistic_piano: "piano_pd", cello: "cello_pd" },
+          sampleRate: 16000,
+          publish: false,
+          outputReportPath: "music/silent-stem-report.json"
+        }, ctx),
+        /silent|Stem validation failed/i
+      );
+    } finally {
+      delete process.env.FAKE_FLUIDSYNTH_SILENT;
+    }
+  } finally {
+    process.env.PATH = oldPath;
     await rm(root, { recursive: true, force: true });
   }
 });
