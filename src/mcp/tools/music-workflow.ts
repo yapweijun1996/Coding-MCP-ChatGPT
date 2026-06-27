@@ -17,6 +17,77 @@ const complexitySchema = z.enum(["simple", "medium", "rich"]);
 const sectionSchema = z.object({ name: z.string().min(1).max(40), bars: z.number().int().min(1).max(64), intensity: z.number().min(0).max(1).optional().default(0.5) });
 const noteSchema = z.object({ track: z.string().min(1).max(80), midi: z.number().int().min(0).max(127), startBeat: z.number().min(0), durationBeats: z.number().min(0.05).max(64), velocity: z.number().int().min(1).max(127) });
 
+type CanonicalInstrument = z.infer<typeof instrumentSchema>;
+
+// Single source of truth for instrument identity. GM programs are 1-indexed (General MIDI
+// spec numbering); the MIDI Program Change byte is `gmProgram - 1`. `channel` is the default
+// 0-indexed MIDI channel used when no explicit channel mapping is supplied. Drums always live
+// on channel 9 (GM percussion) and carry no melodic program. This catalog is consumed by
+// MusicXML import (identity preservation), midiBuffer (program-change emission), stem grouping,
+// and the ensemble validator so they never disagree about what a track represents.
+const instrumentCatalog: Record<CanonicalInstrument, { gmProgram: number; channel: number; namePatterns: RegExp[] }> = {
+  piano: { gmProgram: 1, channel: 0, namePatterns: [/\bpiano\b/i, /\bkeyboard\b/i, /\bkeys\b/i, /\bgrand\b/i] },
+  electric_piano: { gmProgram: 5, channel: 2, namePatterns: [/electric\s*piano/i, /\brhodes\b/i, /\bwurli/i, /\bep\b/i] },
+  upright_bass: { gmProgram: 33, channel: 3, namePatterns: [/upright\s*bass/i, /double\s*bass/i, /contrabass/i, /\bbass\b/i] },
+  acoustic_bass: { gmProgram: 33, channel: 3, namePatterns: [/acoustic\s*bass/i] },
+  violin: { gmProgram: 41, channel: 4, namePatterns: [/\bviolin\b/i, /\bviola\b/i, /\bvln\b/i, /\bvla\b/i] },
+  cello: { gmProgram: 43, channel: 5, namePatterns: [/\bcello\b/i, /violoncello/i, /\bvlc\b/i, /\bvc\b/i] },
+  drums: { gmProgram: 1, channel: 9, namePatterns: [/\bdrum/i, /percussion/i, /\bkit\b/i] },
+  brushes: { gmProgram: 1, channel: 9, namePatterns: [/brush/i] },
+  guitar: { gmProgram: 25, channel: 6, namePatterns: [/\bguitar\b/i, /\bgtr\b/i, /\bnylon\b/i] },
+  strings: { gmProgram: 49, channel: 8, namePatterns: [/string\s*ensemble/i, /\bstrings\b/i, /orchestra/i] },
+  pads: { gmProgram: 89, channel: 10, namePatterns: [/\bpad\b/i, /ambien/i] },
+  synth: { gmProgram: 81, channel: 11, namePatterns: [/\bsynth/i, /\blead\b/i] },
+  sax_like_lead: { gmProgram: 67, channel: 12, namePatterns: [/\bsax/i, /saxophone/i] }
+};
+
+// Resolve a GM program number (1-indexed) to a canonical instrument by family range. Used to
+// preserve identity when a MusicXML/MIDI part carries a <midi-program> but an ambiguous name.
+function canonicalInstrumentFromGmProgram(gmProgram: number | undefined): CanonicalInstrument | undefined {
+  if (gmProgram === undefined || !Number.isFinite(gmProgram)) return undefined;
+  const program = Math.round(gmProgram);
+  if (program >= 1 && program <= 4) return "piano";
+  if (program >= 5 && program <= 8) return "electric_piano";
+  if (program >= 25 && program <= 32) return "guitar";
+  if (program >= 33 && program <= 40) return "upright_bass";
+  if (program === 41 || program === 42) return "violin";
+  if (program === 43 || program === 44) return "cello";
+  if (program >= 49 && program <= 55) return "strings";
+  if (program >= 65 && program <= 72) return "sax_like_lead";
+  if (program >= 81 && program <= 88) return "synth";
+  if (program >= 89 && program <= 96) return "pads";
+  return undefined;
+}
+
+// Resolve an instrument/part name to a canonical instrument by pattern. Name match wins over GM
+// program because score authors label parts deliberately (e.g. "Cello").
+function canonicalInstrumentFromName(name: string | undefined): CanonicalInstrument | undefined {
+  if (!name) return undefined;
+  for (const [instrument, spec] of Object.entries(instrumentCatalog) as Array<[CanonicalInstrument, (typeof instrumentCatalog)[CanonicalInstrument]]>) {
+    if (spec.namePatterns.some((pattern) => pattern.test(name))) return instrument;
+  }
+  return undefined;
+}
+
+// Resolve a composition track key (which may carry a `_2`, `_3`… disambiguation suffix for a
+// second same-instrument part) to its canonical instrument. The suffix must be stripped before
+// pattern matching because `\b` does not treat `_` as a word boundary, so `/\bcello\b/` would not
+// match `cello_2`.
+function canonicalInstrumentFromTrackKey(trackKey: string): CanonicalInstrument | undefined {
+  return canonicalInstrumentFromName(trackKey.replace(/_\d+$/, ""));
+}
+
+// Combined resolver: prefer explicit part name, fall back to GM program, default to piano so a
+// part is never silently dropped or mis-renamed to piano_N. Returns the resolution source so
+// callers can surface a warning when they had to default.
+function resolveCanonicalInstrument(hints: { name?: string; gmProgram?: number }): { instrument: CanonicalInstrument; source: "name" | "program" | "default" } {
+  const byName = canonicalInstrumentFromName(hints.name);
+  if (byName) return { instrument: byName, source: "name" };
+  const byProgram = canonicalInstrumentFromGmProgram(hints.gmProgram);
+  if (byProgram) return { instrument: byProgram, source: "program" };
+  return { instrument: "piano", source: "default" };
+}
+
 const importMusicXmlScoreInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   musicXmlPath: z.string().min(1).max(240).optional(),
@@ -27,6 +98,16 @@ const importMusicXmlScoreInputSchema = z.object({
   outputMidiPath: z.string().min(1).max(240).optional().default("music/imported-score.mid")
 }).refine((value) => Boolean(value.musicXmlPath || value.musicXmlString), {
   message: "musicXmlPath or musicXmlString is required."
+});
+
+const validateMusicEnsembleInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  compositionManifestPath: z.string().min(1).max(240),
+  requiredInstruments: z.array(z.string().min(1).max(80)).min(1).max(16),
+  soloInstruments: z.array(z.string().min(1).max(80)).max(16).optional().default([]),
+  maxSingleInstrumentSeconds: z.number().min(0.5).max(120).optional().default(8),
+  requireStartWithinBars: z.number().min(0).max(64).optional(),
+  barBeats: z.number().int().min(1).max(16).optional().default(4)
 });
 
 const composeMusicInputSchema = z.object({
@@ -83,6 +164,7 @@ const renderMidiWithSoundfontInputSchema = z.object({
   soundfontPackId: z.string().min(1).max(80).optional(),
   soundfontPath: z.string().min(1).max(240).optional(),
   channelMap: z.record(z.number().int().min(0).max(15)).optional().default({}),
+  programMap: z.record(z.number().int().min(1).max(128)).optional().default({}),
   stems: z.boolean().optional().default(false),
   sampleRate: z.number().int().min(8000).max(96000).optional().default(44100),
   outputAudioPath: z.string().min(1).max(240).optional().default("music/rendered-soundfont.wav"),
@@ -109,9 +191,15 @@ const renderProductionMusicInputSchema = z.object({
     realistic_piano: z.string().min(1).max(80).optional(),
     upright_bass: z.string().min(1).max(80).optional(),
     brush_drums: z.string().min(1).max(80).optional(),
-    room_ambience: z.string().min(1).max(80).optional()
+    room_ambience: z.string().min(1).max(80).optional(),
+    cello: z.string().min(1).max(80).optional(),
+    violin: z.string().min(1).max(80).optional(),
+    strings: z.string().min(1).max(80).optional(),
+    chamber_ensemble: z.string().min(1).max(80).optional(),
+    orchestral_sketch: z.string().min(1).max(80).optional()
   }).optional().default({}),
   channelMap: z.record(z.number().int().min(0).max(15)).optional().default({}),
+  programMap: z.record(z.number().int().min(1).max(128)).optional().default({}),
   sampleRate: z.number().int().min(8000).max(96000).optional().default(44100),
   targetRms: z.number().min(0.02).max(0.5).optional().default(0.16),
   truePeakCeiling: z.number().min(0.5).max(0.99).optional().default(0.89),
@@ -223,7 +311,7 @@ const buildMusicLicenseManifestInputSchema = z.object({
 const jazzInstrumentPackSchema = z.object({
   packId: z.string().min(2).max(80).regex(/^[a-zA-Z0-9_.-]+$/),
   displayName: z.string().min(1).max(160),
-  instrumentRole: z.enum(["realistic_piano", "upright_bass", "brush_drums", "room_ambience"]),
+  instrumentRole: z.enum(["realistic_piano", "upright_bass", "brush_drums", "room_ambience", "cello", "violin", "strings", "chamber_ensemble", "orchestral_sketch"]),
   format: z.enum(["sfz", "soundfont", "wav_multisample", "impulse_response", "virtual_instrument"]),
   assetPaths: z.array(z.string().min(1).max(240)).min(1).max(80),
   version: z.string().min(1).max(80).optional(),
@@ -479,6 +567,16 @@ const composeEditMidiInputSchema = z.object({
     stableDynamics: z.boolean().optional().default(true)
   }).optional().default({}),
   operations: z.array(midiOperationSchema).max(80).optional().default([]),
+  // Opt-in fail-closed ensemble gate. When set, the requested instruments must form a real
+  // simultaneous ensemble or the tool returns ok:false instead of reporting a misleading success.
+  // Omit it to keep legacy/solo behaviour (e.g. a soloed track legitimately having zero notes).
+  ensembleRequirement: z.object({
+    requiredInstruments: z.array(z.string().min(1).max(80)).min(1).max(16),
+    soloInstruments: z.array(z.string().min(1).max(80)).max(16).optional().default([]),
+    maxSingleInstrumentSeconds: z.number().min(0.5).max(120).optional().default(8),
+    requireStartWithinBars: z.number().min(0).max(64).optional(),
+    barBeats: z.number().int().min(1).max(16).optional().default(4)
+  }).optional(),
   outputManifestPath: z.string().min(1).max(240).optional().default("music/compose-edit-midi-manifest.json"),
   outputMidiPath: z.string().min(1).max(240).optional().default("music/compose-edit-midi.mid")
 });
@@ -666,7 +764,32 @@ async function importMusicXmlScore(ctx: ToolContext, input: z.infer<typeof impor
   const warnings: string[] = [];
   const parts = asArray(score.part as Record<string, unknown> | Record<string, unknown>[] | undefined);
   if (!parts.length) throw new Error("Invalid MusicXML: no score parts found.");
-  if (parts.length > 1) warnings.push("Multiple MusicXML parts were imported and mapped conservatively to piano-style tracks.");
+
+  // Build a part-id -> {name, gmProgram} map from <part-list><score-part>. The score author's
+  // part name and any <midi-instrument><midi-program> are the authoritative identity hints; the
+  // <part> nodes we iterate below only carry note data, not identity. Preserving this is the fix
+  // for "Cello got renamed to piano_2".
+  const partList = score["part-list"] as Record<string, unknown> | undefined;
+  const partIdentity = new Map<string, { name?: string; gmProgram?: number }>();
+  for (const scorePart of asArray(partList?.["score-part"] as Record<string, unknown> | Record<string, unknown>[] | undefined)) {
+    const id = attrText(scorePart, "id");
+    if (!id) continue;
+    const name = textValue(scorePart["part-name"]) ?? textValue(scorePart["part-name-display"]);
+    const midiInstrument = asArray(scorePart["midi-instrument"] as Record<string, unknown> | Record<string, unknown>[] | undefined)[0];
+    const gmProgram = numericValue(midiInstrument?.["midi-program"]);
+    partIdentity.set(id, { name: name ?? undefined, gmProgram: gmProgram ?? undefined });
+  }
+
+  // Track-key allocator: canonical instrument id becomes the track key. When two parts resolve to
+  // the same instrument (e.g. two cellos) we suffix the second onward as `cello_2` so neither part
+  // is clobbered — but we never rename a real cello to `piano_2`.
+  const usedTrackKeys = new Map<CanonicalInstrument, number>();
+  const allocateTrackKey = (instrument: CanonicalInstrument): string => {
+    const seen = usedTrackKeys.get(instrument) ?? 0;
+    usedTrackKeys.set(instrument, seen + 1);
+    return seen === 0 ? instrument : `${instrument}_${seen + 1}`;
+  };
+  const trackInstruments: Record<string, CanonicalInstrument> = {};
 
   let tempo = input.defaultTempo;
   let key = "C major";
@@ -678,7 +801,13 @@ async function importMusicXmlScore(ctx: ToolContext, input: z.infer<typeof impor
 
   for (const [partIndex, part] of parts.entries()) {
     const partId = attrText(part, "id") ?? `P${partIndex + 1}`;
-    const track = partIndex === 0 ? "piano" : `piano_${partIndex + 1}`;
+    const identity = partIdentity.get(partId) ?? {};
+    const resolved = resolveCanonicalInstrument({ name: identity.name, gmProgram: identity.gmProgram });
+    if (resolved.source === "default" && (identity.name || identity.gmProgram !== undefined)) {
+      warnings.push(`Part ${partId}${identity.name ? ` ("${identity.name}")` : ""} did not match a known instrument; defaulted to piano.`);
+    }
+    const track = allocateTrackKey(resolved.instrument);
+    trackInstruments[track] = resolved.instrument;
     tracks[track] ??= [];
     let beat = 0;
     let lastNoteStartBeat = 0;
@@ -759,7 +888,8 @@ async function importMusicXmlScore(ctx: ToolContext, input: z.infer<typeof impor
       importedAt: new Date().toISOString(),
       partCount: parts.length,
       noteCount: notes.length,
-      scoreDriven: true
+      scoreDriven: true,
+      trackInstruments
     },
     warnings,
     recommendedNextTools: ["manage_jazz_instrument_packs", "render_midi_with_soundfont", "inspect_audio_quality", "export_music_project"],
@@ -1076,14 +1206,43 @@ function varLen(value: number) {
   return bytes;
 }
 
-function midiBuffer(composition: Composition, options: { channelMap?: Record<string, number> } = {}) {
+function midiBuffer(composition: Composition, options: { channelMap?: Record<string, number>; programMap?: Record<string, number> } = {}) {
   const ppq = 480;
   const events: Array<{ tick: number; bytes: number[] }> = [];
   const pushText = (type: number, text: string) => events.push({ tick: 0, bytes: [0xff, type, ...varLen(Buffer.byteLength(text)), ...Buffer.from(text, "utf8")] });
   pushText(0x03, composition.title);
   events.push({ tick: 0, bytes: [0xff, 0x51, 0x03, ...Buffer.from([(60000000 / composition.tempo) >> 16 & 255, (60000000 / composition.tempo) >> 8 & 255, (60000000 / composition.tempo) & 255])] });
-  const defaultChannelFor = (track: string) => track === "drums" ? 9 : Math.abs([...track].reduce((sum, ch) => sum + ch.charCodeAt(0), 0)) % 8;
+  // Resolve each track to a canonical instrument so channel and GM program come from the shared
+  // catalog (deterministic, identity-aware). Percussion tracks lock to channel 9 with no program.
+  // Explicit channelMap/programMap overrides win, enabling external MIDI channel mapping without
+  // fragile manifest assumptions.
+  const resolvedInstrumentFor = (track: string) => canonicalInstrumentFromTrackKey(track);
+  const defaultChannelFor = (track: string) => {
+    const instrument = resolvedInstrumentFor(track);
+    if (instrument) return instrumentCatalog[instrument].channel;
+    return Math.abs([...track].reduce((sum, ch) => sum + ch.charCodeAt(0), 0)) % 8;
+  };
   const channelFor = (track: string) => options.channelMap?.[track] ?? defaultChannelFor(track);
+  const isPercussionChannel = (track: string) => channelFor(track) === 9;
+  // 1-indexed GM program for a track, or undefined for percussion / unresolved tracks.
+  const gmProgramFor = (track: string): number | undefined => {
+    if (isPercussionChannel(track)) return undefined;
+    const override = options.programMap?.[track];
+    if (override !== undefined) return override;
+    const instrument = resolvedInstrumentFor(track);
+    return instrument ? instrumentCatalog[instrument].gmProgram : undefined;
+  };
+  // Emit one Program Change per channel at tick 0 so renderers (FluidSynth/SFZ) honour the
+  // intended instrument instead of defaulting every channel to piano.
+  const programmedChannels = new Set<number>();
+  for (const track of Object.keys(composition.tracks)) {
+    const channel = channelFor(track);
+    if (programmedChannels.has(channel)) continue;
+    const gmProgram = gmProgramFor(track);
+    if (gmProgram === undefined) continue;
+    programmedChannels.add(channel);
+    events.push({ tick: 0, bytes: [0xc0 + channel, Math.max(0, Math.min(127, gmProgram - 1))] });
+  }
   for (const [track, notes] of Object.entries(composition.tracks)) {
     if (track === "piano" && composition.performance?.sustainPedal.length) {
       const channel = channelFor(track);
@@ -1180,6 +1339,184 @@ function wavBuffer(composition: Composition, sampleRate: number, options: { inst
 
 async function readComposition(ctx: ToolContext, projectId: string, manifestPath: string): Promise<Composition> {
   return JSON.parse(await readProjectFile(ctx.projectRoot, projectId, manifestPath, 2 * 1024 * 1024)) as Composition;
+}
+
+type EnsembleTrackStat = {
+  instrument: string;
+  matchedTracks: string[];
+  noteCount: number;
+  firstNoteBeat: number | null;
+  lastNoteEndBeat: number | null;
+  firstNoteSeconds: number | null;
+  lastNoteSeconds: number | null;
+  activeRatio: number;
+  silenceRatio: number;
+};
+
+type EnsembleReport = {
+  ok: boolean;
+  tempo: number;
+  barBeats: number;
+  durationSeconds: number;
+  requiredInstruments: string[];
+  tracks: EnsembleTrackStat[];
+  overlap: { startSeconds: number; endSeconds: number; durationSeconds: number } | null;
+  soloInstruments: string[];
+  longestSingleInstrumentSpan: { instrument: string; startSeconds: number; endSeconds: number; durationSeconds: number } | null;
+  failures: string[];
+  warnings: string[];
+};
+
+// True duet / ensemble validator. Operates on MIDI note data so it works before audio rendering.
+// Fails closed: any requested instrument with no notes, a lack of simultaneous overlap (sequential
+// handoff), or a long single-instrument stretch that is not an intentional solo blocks the output.
+function analyzeEnsemble(
+  composition: Composition,
+  options: {
+    requiredInstruments: string[];
+    soloInstruments?: string[];
+    maxSingleInstrumentSeconds?: number;
+    requireStartWithinBars?: number;
+    barBeats?: number;
+  }
+): EnsembleReport {
+  const tempo = composition.tempo > 0 ? composition.tempo : 90;
+  const barBeats = options.barBeats && options.barBeats > 0 ? options.barBeats : 4;
+  const beatToSeconds = (beat: number) => (beat * 60) / tempo;
+  const maxSingleInstrumentSeconds = options.maxSingleInstrumentSeconds ?? 8;
+  const soloInstruments = (options.soloInstruments ?? []).map((value) => canonicalInstrumentFromName(value) ?? value);
+
+  // Map each requested instrument to the composition track keys that represent it.
+  const trackKeys = Object.keys(composition.tracks);
+  const matchTracks = (requested: string): string[] => {
+    const canon = canonicalInstrumentFromName(requested) ?? requested;
+    return trackKeys.filter((key) => key === requested || (canonicalInstrumentFromTrackKey(key) ?? key) === canon);
+  };
+
+  const totalBeats = Math.max(
+    1,
+    ...trackKeys.flatMap((key) => composition.tracks[key].map((note) => note.startBeat + note.durationBeats))
+  );
+  const gridStep = 0.5; // half-beat resolution
+  const gridCount = Math.max(1, Math.ceil(totalBeats / gridStep));
+  const activeAt = (notes: Composition["tracks"][string], beat: number) =>
+    notes.some((note) => beat >= note.startBeat - 1e-6 && beat < note.startBeat + note.durationBeats - 1e-6);
+
+  const failures: string[] = [];
+  const warnings: string[] = [];
+
+  const tracks: EnsembleTrackStat[] = options.requiredInstruments.map((instrument) => {
+    const matchedTracks = matchTracks(instrument);
+    const notes = matchedTracks.flatMap((key) => composition.tracks[key]);
+    const noteCount = notes.length;
+    const firstNoteBeat = noteCount ? Math.min(...notes.map((note) => note.startBeat)) : null;
+    const lastNoteEndBeat = noteCount ? Math.max(...notes.map((note) => note.startBeat + note.durationBeats)) : null;
+    let activeGrid = 0;
+    for (let i = 0; i < gridCount; i += 1) if (activeAt(notes, i * gridStep)) activeGrid += 1;
+    const activeRatio = gridCount ? activeGrid / gridCount : 0;
+    return {
+      instrument,
+      matchedTracks,
+      noteCount,
+      firstNoteBeat,
+      lastNoteEndBeat,
+      firstNoteSeconds: firstNoteBeat === null ? null : Number(beatToSeconds(firstNoteBeat).toFixed(3)),
+      lastNoteSeconds: lastNoteEndBeat === null ? null : Number(beatToSeconds(lastNoteEndBeat).toFixed(3)),
+      activeRatio: Number(activeRatio.toFixed(3)),
+      silenceRatio: Number((1 - activeRatio).toFixed(3))
+    };
+  });
+
+  // Gate 1: every requested instrument must actually carry notes.
+  for (const track of tracks) {
+    if (track.noteCount === 0) failures.push(`Instrument "${track.instrument}" has no notes (noteCount=0); it would render silent.`);
+  }
+
+  const presentTracks = tracks.filter((track) => track.noteCount > 0 && track.firstNoteBeat !== null && track.lastNoteEndBeat !== null);
+
+  // Precompute, for every half-beat cell, which present instruments are sounding. This single grid
+  // drives both the simultaneity check and the single-instrument-span check so they cannot disagree.
+  const cellActiveInstruments: string[][] = [];
+  for (let i = 0; i < gridCount; i += 1) {
+    const beat = i * gridStep;
+    cellActiveInstruments.push(presentTracks.filter((track) => track.matchedTracks.some((key) => activeAt(composition.tracks[key], beat))).map((track) => track.instrument));
+  }
+
+  // Gate 2 (#6): the requested instruments must actually SOUND TOGETHER, not merely have
+  // overlapping spans. A sequential handoff (cello then piano) or an alternating "fake duet" both
+  // lack any cell where >=2 requested instruments are active. This is the exact failure being fixed.
+  let overlap: EnsembleReport["overlap"] = null;
+  if (presentTracks.length >= 2) {
+    const simultaneousCells = cellActiveInstruments
+      .map((active, index) => ({ active, index }))
+      .filter((cell) => new Set(cell.active).size >= 2);
+    if (simultaneousCells.length) {
+      const firstBeat = simultaneousCells[0].index * gridStep;
+      const lastBeat = (simultaneousCells[simultaneousCells.length - 1].index + 1) * gridStep;
+      overlap = {
+        startSeconds: Number(beatToSeconds(firstBeat).toFixed(3)),
+        endSeconds: Number(beatToSeconds(lastBeat).toFixed(3)),
+        durationSeconds: Number(beatToSeconds(simultaneousCells.length * gridStep).toFixed(3))
+      };
+    } else if (tracks.every((track) => track.noteCount > 0)) {
+      failures.push("Requested instruments never play simultaneously: this is a sequential handoff, not a real ensemble.");
+    }
+  }
+
+  // Gate 3 (#6): no long stretch should contain only one instrument unless that instrument is an
+  // intentional solo. Scan the same grid for the longest run with exactly one active instrument.
+  let longest: EnsembleReport["longestSingleInstrumentSpan"] = null;
+  if (presentTracks.length >= 2) {
+    let runInstrument: string | null = null;
+    let runStartBeat = 0;
+    const flush = (instrument: string | null, startBeat: number, endBeat: number) => {
+      if (!instrument) return;
+      const durationSeconds = beatToSeconds(endBeat - startBeat);
+      if (!longest || durationSeconds > longest.durationSeconds) {
+        longest = { instrument, startSeconds: Number(beatToSeconds(startBeat).toFixed(3)), endSeconds: Number(beatToSeconds(endBeat).toFixed(3)), durationSeconds: Number(durationSeconds.toFixed(3)) };
+      }
+    };
+    for (let i = 0; i <= gridCount; i += 1) {
+      const activeInstruments = i < gridCount ? cellActiveInstruments[i] : [];
+      const soleInstrument = activeInstruments.length === 1 ? activeInstruments[0] : null;
+      if (soleInstrument !== runInstrument || i === gridCount) {
+        flush(runInstrument, runStartBeat, i * gridStep);
+        runInstrument = soleInstrument;
+        runStartBeat = i * gridStep;
+      }
+    }
+    if (longest && (longest as NonNullable<EnsembleReport["longestSingleInstrumentSpan"]>).durationSeconds >= maxSingleInstrumentSeconds) {
+      const span = longest as NonNullable<EnsembleReport["longestSingleInstrumentSpan"]>;
+      const canon = canonicalInstrumentFromName(span.instrument) ?? span.instrument;
+      if (!soloInstruments.includes(canon)) {
+        failures.push(`A ${span.durationSeconds.toFixed(1)}s section (${span.startSeconds}s–${span.endSeconds}s) contains only "${span.instrument}"; mark it as an intentional solo or fix the arrangement.`);
+      }
+    }
+  }
+
+  // Gate 4 (#6): for a true duet both instruments should enter near bar 1.
+  if (options.requireStartWithinBars !== undefined) {
+    const limitBeats = options.requireStartWithinBars * barBeats;
+    for (const track of presentTracks) {
+      if ((track.firstNoteBeat as number) > limitBeats + 1e-6) {
+        failures.push(`Instrument "${track.instrument}" does not enter until ${track.firstNoteSeconds}s (beat ${track.firstNoteBeat}); a real ensemble should start within ${options.requireStartWithinBars} bar(s).`);
+      }
+    }
+  }
+
+  return {
+    ok: failures.length === 0,
+    tempo,
+    barBeats,
+    durationSeconds: composition.durationSeconds,
+    requiredInstruments: options.requiredInstruments,
+    tracks,
+    overlap,
+    soloInstruments,
+    longestSingleInstrumentSpan: longest,
+    failures,
+    warnings
+  };
 }
 
 function applyMidiEdits(composition: Composition, input: z.infer<typeof editMidiInputSchema>) {
@@ -2569,12 +2906,24 @@ function rendererForPack(pack: JazzPackRecord | undefined) {
   return undefined;
 }
 
+// SSOT for production stem/pack roles. Ordered most-specific first so e.g. a `cello` track binds to
+// the cello role (and its own stem) before the generic strings/ambience buckets. Both
+// productionRoleForTrack and productionStemGroups derive from this so a track's pack role and its
+// stem assignment can never disagree — the bug where cello collapsed into the pad/ambience stem.
+const productionRoleSpecs: Array<{ role: JazzInstrumentRole; id: string; label: string; patterns: RegExp[] }> = [
+  { role: "realistic_piano", id: "piano", label: "Piano", patterns: [/piano/i, /keys/i, /guitar/i] },
+  { role: "upright_bass", id: "bass", label: "Bass", patterns: [/bass/i] },
+  { role: "brush_drums", id: "drums", label: "Drums", patterns: [/drum/i, /brush/i, /percussion/i] },
+  { role: "cello", id: "cello", label: "Cello", patterns: [/cello/i] },
+  { role: "violin", id: "violin", label: "Violin", patterns: [/violin/i, /viola/i] },
+  { role: "chamber_ensemble", id: "chamber", label: "Chamber ensemble", patterns: [/chamber/i] },
+  { role: "orchestral_sketch", id: "orchestral", label: "Orchestral sketch", patterns: [/orchestra/i] },
+  { role: "strings", id: "strings", label: "Strings", patterns: [/string/i] },
+  { role: "room_ambience", id: "pad-ambience", label: "Pad / ambience", patterns: [/pad/i, /ambience/i, /synth/i] }
+];
+
 function productionRoleForTrack(track: string): JazzInstrumentRole | undefined {
-  if (/piano|keys|guitar/i.test(track)) return "realistic_piano";
-  if (/bass/i.test(track)) return "upright_bass";
-  if (/drum|brush|percussion/i.test(track)) return "brush_drums";
-  if (/pad|ambience|strings|synth|violin|cello/i.test(track)) return "room_ambience";
-  return undefined;
+  return productionRoleSpecs.find((spec) => spec.patterns.some((pattern) => pattern.test(track)))?.role;
 }
 
 function activeProductionTracks(composition: Composition) {
@@ -2911,13 +3260,14 @@ function mixPcmWavStems(stems: Buffer[]) {
 
 function productionStemGroups(composition: Composition) {
   const entries = Object.keys(composition.tracks);
-  const pick = (patterns: RegExp[]) => entries.filter((track) => patterns.some((pattern) => pattern.test(track)));
-  return [
-    { id: "piano", label: "Piano", role: "realistic_piano" as const, tracks: pick([/piano/i, /keys/i, /guitar/i]) },
-    { id: "bass", label: "Bass", role: "upright_bass" as const, tracks: pick([/bass/i]) },
-    { id: "drums", label: "Drums", role: "brush_drums" as const, tracks: pick([/drum/i, /brush/i, /percussion/i]) },
-    { id: "pad-ambience", label: "Pad / ambience", role: "room_ambience" as const, tracks: pick([/pad/i, /ambience/i, /strings/i, /synth/i, /violin/i, /cello/i]) }
-  ].map((group) => ({ ...group, tracks: group.tracks.length ? group.tracks : [] }));
+  // Assign each track to exactly one stem group via productionRoleForTrack so no track is mixed
+  // into two stems (which would double its audio) and so cello/violin/strings get their own stems.
+  return productionRoleSpecs.map((spec) => ({
+    id: spec.id,
+    label: spec.label,
+    role: spec.role,
+    tracks: entries.filter((track) => productionRoleForTrack(track) === spec.role)
+  }));
 }
 
 function compositionWithSelectedTracks(composition: Composition, tracks: string[]): Composition {
@@ -3136,7 +3486,12 @@ const jazzPackAllowedFormats: Record<z.infer<typeof jazzInstrumentPackSchema>["i
   realistic_piano: ["sfz", "soundfont", "wav_multisample", "virtual_instrument"],
   upright_bass: ["sfz", "soundfont", "wav_multisample", "virtual_instrument"],
   brush_drums: ["sfz", "soundfont", "wav_multisample", "virtual_instrument"],
-  room_ambience: ["sfz", "soundfont", "impulse_response", "wav_multisample", "virtual_instrument"]
+  room_ambience: ["sfz", "soundfont", "impulse_response", "wav_multisample", "virtual_instrument"],
+  cello: ["sfz", "soundfont", "wav_multisample", "virtual_instrument"],
+  violin: ["sfz", "soundfont", "wav_multisample", "virtual_instrument"],
+  strings: ["sfz", "soundfont", "wav_multisample", "virtual_instrument"],
+  chamber_ensemble: ["sfz", "soundfont", "wav_multisample", "virtual_instrument"],
+  orchestral_sketch: ["sfz", "soundfont", "wav_multisample", "virtual_instrument"]
 };
 
 const jazzPackSafeLicenses = new Set(["generated_original", "public_domain", "cc0", "cc_by", "mit", "apache_2", "commercial_license", "generaluser_gs_2_0"]);
@@ -3807,7 +4162,7 @@ async function handleAssembleMusicSession(input: unknown, ctx: ToolContext) {
 
 export const musicWorkflowTools: ToolModule[] = [
   {
-    definition: { name: "compose_edit_midi", description: "Create or edit a structured multi-track MIDI composition with sections, chord chart, arrangement map, editable operations, background constraints, and a real MIDI asset.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, existingManifestPath: { type: "string" }, style: { type: "string" }, mood: { type: "string" }, tempoBpm: { type: "number" }, key: { type: "string" }, durationSec: { type: "number" }, tracks: { type: "array", items: { type: "string" } }, sections: { type: "array", items: { type: "string" } }, constraints: { type: "object" }, operations: { type: "array", items: { type: "object" } }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "compose_edit_midi", description: "Create or edit a structured multi-track MIDI composition with sections, chord chart, arrangement map, editable operations, background constraints, and a real MIDI asset.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, existingManifestPath: { type: "string" }, style: { type: "string" }, mood: { type: "string" }, tempoBpm: { type: "number" }, key: { type: "string" }, durationSec: { type: "number" }, tracks: { type: "array", items: { type: "string" } }, sections: { type: "array", items: { type: "string" } }, constraints: { type: "object" }, operations: { type: "array", items: { type: "object" } }, ensembleRequirement: { type: "object", properties: { requiredInstruments: { type: "array", items: { type: "string" } }, soloInstruments: { type: "array", items: { type: "string" } }, maxSingleInstrumentSeconds: { type: "number" }, requireStartWithinBars: { type: "number" }, barBeats: { type: "number" } } }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: composeEditMidiInputSchema,
     handler: async (input, ctx) => {
@@ -3816,18 +4171,27 @@ export const musicWorkflowTools: ToolModule[] = [
         ? Object.assign(buildMidiComposition(parsed), await readComposition(ctx, parsed.projectId, parsed.existingManifestPath))
         : buildMidiComposition(parsed);
       const composition = applyComposeEditOperations(base, parsed.operations);
+      // Fail-closed ensemble gate: when the caller declares which instruments must play together,
+      // validate the actual notes BEFORE reporting success. This catches "requested cello track has
+      // noteCount=0" and sequential/fake-duet output instead of publishing a misleading ok:true.
+      const ensembleReport = parsed.ensembleRequirement
+        ? analyzeEnsemble(composition, parsed.ensembleRequirement)
+        : undefined;
       const [manifestFile, midiFile] = await Promise.all([
         writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(composition, null, 2)}\n`),
         writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(composition), "audio/midi")
       ]);
+      const ensembleOk = ensembleReport ? ensembleReport.ok : true;
       return {
-        ok: true,
-        summary: `Created editable MIDI with ${composition.trackList.length} track(s), ${composition.sectionMap.length} section marker(s), and ${composition.warnings.length} warning(s).`,
+        ok: ensembleOk,
+        summary: ensembleOk
+          ? `Created editable MIDI with ${composition.trackList.length} track(s), ${composition.sectionMap.length} section marker(s), and ${composition.warnings.length} warning(s).`
+          : `Ensemble requirement not met: ${ensembleReport!.failures.length} blocking issue(s). MIDI written for inspection but not safe to publish.`,
         jobId: parsed.projectId,
         artifacts: [manifestFile.path, midiFile.path],
-        structuredContent: { midiPath: midiFile.path, manifestPath: manifestFile.path, trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart, warnings: composition.warnings, editableOperations: composition.editableOperations },
-        logs: [JSON.stringify({ trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart }, null, 2)],
-        errors: []
+        structuredContent: { midiPath: midiFile.path, manifestPath: manifestFile.path, trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart, warnings: composition.warnings, editableOperations: composition.editableOperations, ensembleReport },
+        logs: [JSON.stringify({ trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart, ensembleReport }, null, 2)],
+        errors: ensembleOk ? [] : ensembleReport!.failures
       };
     }
   },
@@ -4181,6 +4545,33 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
+    definition: { name: "validate_music_ensemble", description: "Strict true-duet / ensemble validator. Given a composition manifest and the instruments that must play together, it fails closed when any requested instrument has zero notes, when instruments do not overlap in time (sequential handoff instead of a simultaneous ensemble), or when a long section contains only one instrument that is not marked as an intentional solo. Reports per-track note count, first/last note time, active ratio, and silence ratio.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, requiredInstruments: { type: "array", items: { type: "string" } }, soloInstruments: { type: "array", items: { type: "string" } }, maxSingleInstrumentSeconds: { type: "number" }, requireStartWithinBars: { type: "number" }, barBeats: { type: "number" } }, required: ["projectId", "compositionManifestPath", "requiredInstruments"], additionalProperties: false } },
+    enabledByDefault: true,
+    schema: validateMusicEnsembleInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = validateMusicEnsembleInputSchema.parse(input);
+      const composition = await readComposition(ctx, parsed.projectId, parsed.compositionManifestPath);
+      const report = analyzeEnsemble(composition, {
+        requiredInstruments: parsed.requiredInstruments,
+        soloInstruments: parsed.soloInstruments,
+        maxSingleInstrumentSeconds: parsed.maxSingleInstrumentSeconds,
+        requireStartWithinBars: parsed.requireStartWithinBars,
+        barBeats: parsed.barBeats
+      });
+      return {
+        ok: report.ok,
+        summary: report.ok
+          ? `Ensemble valid: ${parsed.requiredInstruments.join(" + ")} play together${report.overlap ? ` with ${report.overlap.durationSeconds}s of overlap` : ""}.`
+          : `Ensemble validation failed: ${report.failures.length} blocking issue(s). Not safe to publish.`,
+        jobId: parsed.projectId,
+        artifacts: [],
+        structuredContent: report,
+        logs: [JSON.stringify(report, null, 2)],
+        errors: report.failures
+      };
+    }
+  },
+  {
     definition: { name: "compose_music", description: "Compose a structured original music cue and write a project MIDI file plus composition manifest.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, title: { type: "string" }, style: { type: "string", enum: ["cafe_jazz", "lo_fi", "bossa_nova", "smooth_piano", "acoustic_pop", "cinematic_background", "corporate_intro", "game_bgm", "orchestral_sketch", "ambient", "chill_lounge"] }, mood: { type: "string" }, tempo: { type: "number" }, key: { type: "string" }, durationSeconds: { type: "number" }, useCase: { type: "string" }, instruments: { type: "array", items: { type: "string", enum: ["piano", "electric_piano", "upright_bass", "acoustic_bass", "violin", "cello", "drums", "brushes", "guitar", "strings", "pads", "synth", "sax_like_lead"] } }, complexity: { type: "string", enum: ["simple", "medium", "rich"] }, loopable: { type: "boolean" }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: composeMusicInputSchema,
@@ -4262,6 +4653,12 @@ export const musicWorkflowTools: ToolModule[] = [
 	        const stemPaths: Record<string, string> = {};
 	        const midiStemPaths: Record<string, string> = {};
 	        const stemRenderers: Record<string, Record<string, unknown>> = {};
+	        const stemValidations: Record<string, { rms: number; peak: number; ok: boolean }> = {};
+	        // A stem whose RMS is below this floor is effectively silent — usually a requested
+	        // instrument that produced no audible notes. Publishing it would be the misleading
+	        // "silent cello" output this work exists to prevent, so each stem is validated and we
+	        // fail closed if any requested stem is silent.
+	        const productionStemSilenceFloor = 0.0005;
 	        const stemBuffers: Buffer[] = [];
 	        const missingStemGroups: string[] = [];
 	        for (const group of productionStemGroups(composition)) {
@@ -4272,7 +4669,7 @@ export const musicWorkflowTools: ToolModule[] = [
 	          const resolved = packResolution.packsByRole[group.role];
 	          if (!resolved) throw new Error(`No resolved ${group.role} pack for ${group.label} stem.`);
 	          const stemComposition = compositionWithSelectedTracks(composition, group.tracks);
-	          const stemMidiBuffer = midiBuffer(stemComposition, { channelMap: parsed.channelMap });
+	          const stemMidiBuffer = midiBuffer(stemComposition, { channelMap: parsed.channelMap, programMap: parsed.programMap });
 	          const stemMidiProjectPath = `${parsed.outputMidiStemDirectory}/${group.id}.mid`;
           const stemMidiProjectFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, stemMidiProjectPath, stemMidiBuffer, "audio/midi");
           midiStemPaths[group.id] = stemMidiProjectFile.path;
@@ -4284,8 +4681,12 @@ export const musicWorkflowTools: ToolModule[] = [
 	          stemPaths[group.id] = stemProjectFile.path;
 	          stemRenderers[group.id] = { role: group.role, packId: resolved.pack.packId, renderer: resolved.renderer, soundfontPath: resolved.soundfontPath };
 	          stemBuffers.push(stemWav);
+	          const stemStats = audioStats(stemWav);
+	          stemValidations[group.id] = { rms: stemStats.rms, peak: stemStats.peak, ok: stemStats.rms >= productionStemSilenceFloor };
 	        }
 	        if (!stemBuffers.length) throw new Error("No renderable stems were produced from composition tracks.");
+	        const silentStems = Object.entries(stemValidations).filter(([, value]) => !value.ok).map(([id]) => id);
+	        if (silentStems.length) throw new Error(`Stem validation failed: ${silentStems.join(", ")} rendered effectively silent (RMS below ${productionStemSilenceFloor}). Refusing to publish a misleading mix where a requested instrument is missing.`);
 	        const mixedStems = mixPcmWavStems(stemBuffers);
 	        const rawFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputRawRenderPath, mixedStems, "audio/wav");
 	        const mastered = applyMasterChain(mixedStems, {
@@ -4330,6 +4731,7 @@ export const musicWorkflowTools: ToolModule[] = [
 	          stemPaths,
 	          midiStemPaths,
 	          stemRenderers,
+	          stemValidations,
 	          licensesPath: licensesFile.path,
 	          missingStemGroups,
 	          requiredRoles: packResolution.requiredRoles,
@@ -4438,8 +4840,12 @@ export const musicWorkflowTools: ToolModule[] = [
     handler: async (input, ctx) => {
       const parsed = renderMidiWithSoundfontInputSchema.parse(input);
       const hasChannelMap = Object.keys(parsed.channelMap).length > 0;
+      const hasProgramMap = Object.keys(parsed.programMap).length > 0;
       if (!parsed.compositionManifestPath && hasChannelMap) {
         return writeSoundfontRenderFailure(ctx, parsed, ["channelMap requires compositionManifestPath; this tool does not rewrite channels in externally supplied MIDI files."], { channelMap: parsed.channelMap, channelMapApplied: false });
+      }
+      if (!parsed.compositionManifestPath && hasProgramMap) {
+        return writeSoundfontRenderFailure(ctx, parsed, ["programMap requires compositionManifestPath; this tool does not rewrite programs in externally supplied MIDI files."], { programMap: parsed.programMap, programMapApplied: false });
       }
       if (!parsed.compositionManifestPath && parsed.stems) {
         return writeSoundfontRenderFailure(ctx, parsed, ["stems require compositionManifestPath so the renderer can isolate tracks; midiPath-only rendering cannot safely produce stems."], { stemPaths: {}, stemCount: 0 });
@@ -4479,7 +4885,7 @@ export const musicWorkflowTools: ToolModule[] = [
 	        const tempDir = path.join(ctx.artifactRoot, `music-render-${parsed.projectId}-${Date.now()}`);
 	        await mkdir(tempDir, { recursive: true });
 	        midiAbsolutePath = path.join(tempDir, "full.mid");
-	        await writeFile(midiAbsolutePath, midiBuffer(composition!, { channelMap: parsed.channelMap }));
+	        await writeFile(midiAbsolutePath, midiBuffer(composition!, { channelMap: parsed.channelMap, programMap: parsed.programMap }));
 	        temporaryFiles.push(tempDir);
       } else {
         midiAbsolutePath = await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, parsed.midiPath!);
@@ -4495,14 +4901,18 @@ export const musicWorkflowTools: ToolModule[] = [
         const fullMix = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, midiAbsolutePath, fullMixTemp, parsed.sampleRate, ctx.commandTimeoutMs);
         const fullMixFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputAudioPath, fullMix, "audio/wav");
         const stemPaths: Record<string, string> = {};
+        const stemValidations: Record<string, { rms: number; peak: number; ok: boolean }> = {};
         if (parsed.stems && composition) {
           for (const track of Object.keys(composition.tracks)) {
             const stemMidiPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.mid`);
             const stemWavPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.wav`);
-            await writeFile(stemMidiPath, midiBuffer(compositionWithSingleTrack(composition!, track), { channelMap: parsed.channelMap }));
+            await writeFile(stemMidiPath, midiBuffer(compositionWithSingleTrack(composition!, track), { channelMap: parsed.channelMap, programMap: parsed.programMap }));
             const stemWav = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, stemMidiPath, stemWavPath, parsed.sampleRate, ctx.commandTimeoutMs);
             const stemFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, `${parsed.outputStemDirectory}/${slugifyMusicExportPart(track)}.wav`, stemWav, "audio/wav");
             stemPaths[track] = stemFile.path;
+            // Per-stem validation so a silent/empty instrument stem is visible before publishing.
+            const stemStats = audioStats(stemWav);
+            stemValidations[track] = { rms: stemStats.rms, peak: stemStats.peak, ok: stemStats.rms >= 0.0005 };
           }
         }
         const artifacts = [fullMixFile.path, ...Object.values(stemPaths)];
@@ -4528,6 +4938,7 @@ export const musicWorkflowTools: ToolModule[] = [
           sourceCompositionManifestPath: parsed.compositionManifestPath,
           fullMixPath: fullMixFile.path,
           stemPaths,
+          stemValidations,
 	          soundfont: {
             packId: soundfont.pack.packId,
             displayName: soundfont.pack.displayName,
