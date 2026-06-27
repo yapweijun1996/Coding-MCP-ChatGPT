@@ -107,6 +107,39 @@ test("create_project_from_template rejects unknown templates", async () => {
   }
 });
 
+test("product-landing-page creates a real landing page, not a template catalog", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "project-templates-"));
+  try {
+    const ctx = toolContext(root);
+    const result = await callTool("create_project_from_template", {
+      templateId: "product-landing-page",
+      title: "GJH Singapore Corporate Hero Page",
+      brandName: "GJH Singapore",
+      primaryAction: "Explore Our Businesses"
+    }, ctx);
+
+    assert.equal(result.ok, true);
+    const payload = result.structuredContent as { projectId: string; validation: { ok: boolean; landingPageIntent?: { ok: boolean } } };
+    assert.equal(payload.validation.ok, true);
+    assert.equal(payload.validation.landingPageIntent?.ok, true);
+
+    const html = await readFile(path.join(ctx.projectRoot, payload.projectId, "files/index.html"), "utf8");
+    assert.match(html, /<header class="site-header">/);
+    assert.match(html, /<nav aria-label="Primary navigation">/);
+    assert.match(html, /class="hero"/);
+    assert.match(html, /GJH Singapore/);
+    assert.match(html, /Explore Our Businesses/);
+    assert.match(html, /class="proof"/);
+    assert.match(html, /class="feature-grid"/);
+    assert.match(html, /class="pricing"/);
+    assert.match(html, /class="faq"/);
+    assert.match(html, /class="final-cta"/);
+    assert.doesNotMatch(html, /LANDING PAGE TEMPLATE|landing page template|Operational Snapshot|class="sidebar"/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("project template tools are exposed through core, coding, debug, and project-templates skills", () => {
   const toolNames = ["register_project_template", "list_project_templates", "recommend_project_templates", "create_project_from_template", "export_project_template_catalog"];
   for (const skillId of ["core", "coding", "debug", "project-templates"]) {

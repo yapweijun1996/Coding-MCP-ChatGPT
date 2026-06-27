@@ -25,6 +25,20 @@ export interface ProjectBrowserInspectionSummary {
   inspectedAt: string;
 }
 
+export interface LandingPageIntentValidation {
+  ok: boolean;
+  checks: {
+    hasHeaderOrNav: boolean;
+    hasHeroSection: boolean;
+    hasPrimaryHeading: boolean;
+    hasCallToAction: boolean;
+    hasMultipleContentSections: boolean;
+    avoidsTemplateCatalogSignals: boolean;
+  };
+  errors: string[];
+  warnings: string[];
+}
+
 export interface ProjectValidationResult {
   ok: boolean;
   status: ProjectValidationStatus;
@@ -36,6 +50,7 @@ export interface ProjectValidationResult {
   errors: string[];
   checkedAt: string;
   browserInspection?: ProjectBrowserInspectionSummary;
+  landingPageIntent?: LandingPageIntentValidation;
 }
 
 export interface ProjectTaskHistoryItem {
@@ -1460,6 +1475,53 @@ function extractLocalHtmlReferences(entryFile: string, html: string): string[] {
   return [...references].sort();
 }
 
+function stripHtmlTags(value: string): string {
+  return value
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function countHtmlMatches(html: string, pattern: RegExp): number {
+  return [...html.matchAll(pattern)].length;
+}
+
+export function validateLandingPageIntent(html: string): LandingPageIntentValidation {
+  const lowerHtml = html.toLowerCase();
+  const text = stripHtmlTags(html).toLowerCase();
+  const sectionCount = countHtmlMatches(html, /<section\b/gi);
+  const checks = {
+    hasHeaderOrNav: /<header\b/i.test(html) || /<nav\b/i.test(html),
+    hasHeroSection: /<section\b[^>]*(?:class|id|data-section)\s*=\s*["'][^"']*\bhero\b/i.test(html) || /class\s*=\s*["'][^"']*\bhero\b/i.test(html),
+    hasPrimaryHeading: /<h1\b[^>]*>[\s\S]*?<\/h1>/i.test(html),
+    hasCallToAction: /<(?:a|button)\b[^>]*(?:class\s*=\s*["'][^"']*(?:cta|button|primary)|href\s*=|type\s*=)[\s\S]*?>/i.test(html),
+    hasMultipleContentSections: sectionCount >= 3,
+    avoidsTemplateCatalogSignals: !/\b(?:landing page template|template marketplace|template checklist|operational snapshot|open workspace)\b/i.test(text)
+      && !/\bclass\s*=\s*["'][^"']*\bsidebar\b/i.test(lowerHtml)
+  };
+  const errors = [
+    checks.hasHeaderOrNav ? undefined : "Landing page intent gate failed: missing header/nav.",
+    checks.hasHeroSection ? undefined : "Landing page intent gate failed: missing first-viewport hero section.",
+    checks.hasPrimaryHeading ? undefined : "Landing page intent gate failed: missing primary H1 heading.",
+    checks.hasCallToAction ? undefined : "Landing page intent gate failed: missing visible CTA link or button.",
+    checks.hasMultipleContentSections ? undefined : "Landing page intent gate failed: expected at least three content sections.",
+    checks.avoidsTemplateCatalogSignals ? undefined : "Landing page intent gate failed: template catalog/checklist/sidebar signals detected."
+  ].filter((error): error is string => Boolean(error));
+  return {
+    ok: errors.length === 0,
+    checks,
+    errors,
+    warnings: []
+  };
+}
+
+function shouldCheckLandingPageIntent(html: string): boolean {
+  return /\bdata-page-intent\s*=\s*["'](?:landing-page|hero)["']/i.test(html)
+    || /\bdata-template\s*=\s*["']product-landing-page["']/i.test(html);
+}
+
 interface ProjectTextFileContent {
   path: string;
   content: string;
@@ -1493,6 +1555,7 @@ export async function validateProject(projectRoot: string, projectId: string, en
   const checkedAt = new Date().toISOString();
   const files = await listProjectFiles(projectRoot, projectId);
   const filePaths = new Set(files.map((file) => file.path));
+  let landingPageIntent: LandingPageIntentValidation | undefined;
   const safeEntryFile = (() => {
     try {
       return assertSafeProjectFilePath(entryFile ?? metadata.entryFile);
@@ -1554,6 +1617,10 @@ export async function validateProject(projectRoot: string, projectId: string, en
           errors.push(`Invalid local resource reference ${reference}: ${error instanceof Error ? error.message : "invalid reference"}`);
         }
       }
+      landingPageIntent = shouldCheckLandingPageIntent(html) ? validateLandingPageIntent(html) : undefined;
+      if (landingPageIntent && !landingPageIntent.ok) {
+        warnings.push(...landingPageIntent.errors);
+      }
     } catch (error) {
       errors.push(error instanceof Error ? error.message : `Unable to read entry file: ${safeEntryFile}`);
     }
@@ -1570,7 +1637,8 @@ export async function validateProject(projectRoot: string, projectId: string, en
     filesChecked: files.length,
     warnings,
     errors,
-    checkedAt
+    checkedAt,
+    landingPageIntent
   };
 
   const updated = addHistory({ ...metadata, lastValidation: result }, {

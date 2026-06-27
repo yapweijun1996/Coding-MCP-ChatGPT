@@ -9,6 +9,7 @@ import {
   getProjectStoredFilePath,
   publishProject,
   readProjectFile,
+  validateLandingPageIntent,
   validateProject,
   writeProjectAsset,
   writeProjectFile
@@ -106,6 +107,9 @@ const createImmersivePageInputSchema = z.object({
     imagePath: z.string().min(1).max(240).optional(),
     data: z.unknown().optional()
   })).min(1).max(40),
+  brandName: z.string().min(1).max(120).optional(),
+  primaryAction: z.string().min(1).max(120).optional(),
+  secondaryAction: z.string().min(1).max(120).optional(),
   enableThreeJs: z.boolean().optional().default(false),
   publish: z.boolean().optional().default(false)
 });
@@ -467,7 +471,71 @@ function renderData(value: unknown): string {
   }
 }
 
-function immersiveCss(style: ImmersivePageInput["style"], enableThreeJs: boolean): string {
+function isProductDemoHeroPage(input: ImmersivePageInput): boolean {
+  return input.style === "product_demo" && input.sections.some((section) => section.kind === "hero");
+}
+
+function productDemoBrand(input: ImmersivePageInput): string {
+  return input.brandName ?? input.title;
+}
+
+function productDemoPrimaryAction(input: ImmersivePageInput): string {
+  return input.primaryAction ?? "Start the conversation";
+}
+
+function productDemoSecondaryAction(input: ImmersivePageInput): string {
+  return input.secondaryAction ?? "Explore the proof";
+}
+
+function productDemoHeroCss(): string {
+  return `
+:root { --bg:#f4f1e8; --ink:#12231f; --muted:#627068; --line:#d8d0c2; --accent:#0f766e; --accent-2:#f2b66d; --panel:#fffaf0; }
+* { box-sizing: border-box; }
+html { scroll-behavior:smooth; }
+body { margin:0; background:radial-gradient(circle at 78% 0%, #dff8f2 0, var(--bg) 34%, #fbfaf6 100%); color:var(--ink); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+a { color:inherit; }
+.site-header { position:sticky; top:0; z-index:20; display:flex; align-items:center; justify-content:space-between; gap:24px; padding:18px clamp(20px,5vw,72px); background:rgba(244,241,232,.88); border-bottom:1px solid rgba(18,35,31,.08); backdrop-filter:blur(16px); }
+.brand { font-weight:900; text-decoration:none; letter-spacing:-.03em; }
+.site-header nav { display:flex; gap:18px; flex-wrap:wrap; }
+.site-header nav a { color:var(--muted); font-weight:700; text-decoration:none; }
+.nav-cta, .cta { display:inline-flex; align-items:center; justify-content:center; border-radius:999px; font-weight:900; text-decoration:none; }
+.nav-cta { background:var(--ink); color:white; padding:10px 16px; }
+main { overflow:hidden; }
+.hero { min-height:88vh; display:grid; grid-template-columns:minmax(0,1.05fr) minmax(320px,.95fr); gap:clamp(28px,6vw,86px); align-items:center; padding:clamp(54px,8vw,104px) clamp(20px,5vw,72px); }
+.eyebrow { margin:0 0 14px; color:var(--accent); font-size:12px; font-weight:950; letter-spacing:.16em; text-transform:uppercase; }
+h1, h2, p { margin-top:0; }
+h1 { max-width:920px; margin-bottom:24px; font-size:clamp(44px,7vw,88px); line-height:.95; letter-spacing:-.065em; }
+h2 { font-size:clamp(30px,4vw,54px); line-height:1; letter-spacing:-.045em; }
+.hero-lede, .section-card p, .hero-visual p, .closing p { color:var(--muted); font-size:clamp(18px,2vw,22px); line-height:1.6; }
+.hero-actions { display:flex; gap:14px; flex-wrap:wrap; margin-top:30px; }
+.cta { padding:14px 20px; }
+.cta.primary { background:var(--accent); color:white; box-shadow:0 18px 38px rgba(15,118,110,.24); }
+.cta.secondary { background:rgba(255,255,255,.68); border:1px solid var(--line); color:var(--ink); }
+.hero-visual { min-height:360px; display:grid; align-content:center; gap:20px; padding:30px; border:1px solid rgba(18,35,31,.1); border-radius:34px; background:linear-gradient(145deg,#fffaf0,#ddf7f1); box-shadow:0 32px 90px rgba(18,35,31,.18); }
+.visual-kicker { display:flex; gap:8px; }
+.visual-kicker span { width:12px; height:12px; border-radius:50%; background:var(--accent); }
+.hero-visual strong { font-size:clamp(28px,4vw,44px); line-height:1; letter-spacing:-.04em; }
+.signal-bars { display:grid; gap:10px; }
+.signal-bars span { display:block; height:12px; border-radius:999px; background:linear-gradient(90deg,var(--accent),var(--accent-2)); }
+.signal-bars span:nth-child(2) { width:72%; opacity:.78; }
+.signal-bars span:nth-child(3) { width:52%; opacity:.58; }
+.proof-strip { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; padding:0 clamp(20px,5vw,72px) clamp(42px,7vw,88px); }
+.proof-card, .section-card { background:rgba(255,250,240,.84); border:1px solid var(--line); border-radius:24px; padding:24px; }
+.proof-card strong { display:block; font-size:38px; }
+.proof-card span { color:var(--muted); }
+.content-sections { display:grid; gap:18px; padding:clamp(42px,7vw,88px) clamp(20px,5vw,72px); background:var(--ink); color:white; }
+.content-sections .eyebrow, .content-sections h2 { color:white; }
+.section-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:16px; }
+.section-card { background:rgba(255,255,255,.08); border-color:rgba(255,255,255,.16); }
+.section-card p { color:#ccdad5; }
+.closing { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:clamp(42px,7vw,88px) clamp(20px,5vw,72px); }
+@media (max-width: 820px) { .site-header { position:static; align-items:flex-start; flex-direction:column; } .hero { grid-template-columns:1fr; min-height:auto; } .proof-strip { grid-template-columns:1fr; } .closing { align-items:flex-start; flex-direction:column; } }
+`;
+}
+
+function immersiveCss(input: ImmersivePageInput): string {
+  if (isProductDemoHeroPage(input)) return productDemoHeroCss();
+  const { style, enableThreeJs } = input;
   const accent = style === "product_demo" ? "#197278" : style === "data_story" ? "#315f72" : style === "portfolio" ? "#8f4d2f" : style === "interactive_explainer" ? "#4b6f44" : "#12645d";
   return `
 :root { --bg:#f7f8f4; --ink:#17211b; --muted:#627067; --line:#d5dbd2; --accent:${accent}; --panel:#fff; }
@@ -520,7 +588,22 @@ if (scene) {
 `;
 }
 
+function productDemoHeroScript(): string {
+  return `document.documentElement.classList.add("ready");
+document.querySelectorAll(".cta").forEach((link) => {
+  link.addEventListener("click", () => {
+    document.documentElement.dataset.lastCta = link.textContent?.trim() || "cta";
+  });
+});
+`;
+}
+
+function immersiveScriptForInput(input: ImmersivePageInput): string {
+  return isProductDemoHeroPage(input) ? productDemoHeroScript() : immersiveScript(input.enableThreeJs);
+}
+
 function renderImmersivePage(input: ImmersivePageInput): string {
+  if (isProductDemoHeroPage(input)) return renderProductDemoHeroPage(input);
   const sections = input.sections.map((section, index) => {
     const image = section.imagePath ? `<img src="${escapeHtml(section.imagePath)}" alt="${escapeHtml(section.title ?? input.title)}">` : "";
     const data = section.data !== undefined ? `<div class="data-block">${renderData(section.data)}</div>` : "";
@@ -552,6 +635,82 @@ function renderImmersivePage(input: ImmersivePageInput): string {
 </html>`;
 }
 
+function renderProductDemoHeroPage(input: ImmersivePageInput): string {
+  const hero = input.sections.find((section) => section.kind === "hero") ?? input.sections[0];
+  const supportingSections = input.sections.filter((section) => section !== hero).slice(0, 6);
+  const sectionCards = (supportingSections.length ? supportingSections : [
+    { kind: "comparison" as const, title: "Clear product signal", body: "Visitors understand who this is for, what it does, and why the next action matters." },
+    { kind: "interactive_panel" as const, title: "Proof before detail", body: "Key metrics and trust points appear before deeper feature explanations." },
+    { kind: "callout" as const, title: "Ready for review", body: "The page structure supports desktop, tablet, and mobile screenshot QA." }
+  ]).map((section) => `<article class="section-card">
+        <p class="eyebrow">${escapeHtml(section.kind.replaceAll("_", " "))}</p>
+        <h3>${escapeHtml(section.title ?? "Page section")}</h3>
+        ${section.body ? `<p>${escapeHtml(section.body)}</p>` : ""}
+        ${section.data !== undefined ? `<div class="data-block">${renderData(section.data)}</div>` : ""}
+      </article>`).join("\n");
+  const brand = productDemoBrand(input);
+  const primaryAction = productDemoPrimaryAction(input);
+  const secondaryAction = productDemoSecondaryAction(input);
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(input.title)}</title>
+  <link rel="stylesheet" href="./page.css">
+</head>
+<body data-page-intent="hero">
+  <header class="site-header">
+    <a class="brand" href="#hero">${escapeHtml(brand)}</a>
+    <nav aria-label="Primary navigation">
+      <a href="#proof">Proof</a>
+      <a href="#sections">Sections</a>
+      <a href="#contact">Contact</a>
+    </nav>
+    <a class="nav-cta" href="#contact">${escapeHtml(primaryAction)}</a>
+  </header>
+  <main>
+    <section class="hero" id="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow">Product story</p>
+        <h1 id="hero-title">${escapeHtml(hero?.title ?? input.title)}</h1>
+        <p class="hero-lede">${escapeHtml(hero?.body ?? "A focused first-viewport hero page with clear positioning, proof, and conversion paths.")}</p>
+        <div class="hero-actions">
+          <a class="cta primary" href="#contact">${escapeHtml(primaryAction)}</a>
+          <a class="cta secondary" href="#sections">${escapeHtml(secondaryAction)}</a>
+        </div>
+      </div>
+      <aside class="hero-visual" aria-label="Hero product preview">
+        <div class="visual-kicker"><span></span><span></span><span></span></div>
+        <strong>${escapeHtml(brand)} introduction page</strong>
+        <p>Built around a visible header, strong headline, explicit CTA, proof points, and reviewable content sections.</p>
+        <div class="signal-bars" aria-hidden="true"><span></span><span></span><span></span></div>
+      </aside>
+    </section>
+    <section class="proof-strip" id="proof" aria-label="Proof points">
+      <div class="proof-card"><strong>01</strong><span>Clear brand and page purpose above the fold</span></div>
+      <div class="proof-card"><strong>02</strong><span>CTA path visible without scrolling</span></div>
+      <div class="proof-card"><strong>03</strong><span>Supporting sections ready for screenshot QA</span></div>
+    </section>
+    <section class="content-sections" id="sections" aria-labelledby="sections-title">
+      <p class="eyebrow">Page structure</p>
+      <h2 id="sections-title">Designed as a deliverable landing page, not a catalog shell</h2>
+      <div class="section-grid">${sectionCards}</div>
+    </section>
+    <section class="closing" id="contact" aria-label="Final call to action">
+      <div>
+        <p class="eyebrow">Next step</p>
+        <h2>Make the first impression specific and actionable.</h2>
+        <p>Replace the copy and proof points with production content, then run browser and visual QA before handoff.</p>
+      </div>
+      <a class="cta primary" href="mailto:hello@example.com">${escapeHtml(primaryAction)}</a>
+    </section>
+  </main>
+  <script src="./page.js"></script>
+</body>
+</html>`;
+}
+
 async function writeOptionalThreeVendor(ctx: ToolContext, projectId: string, enabled: boolean): Promise<string[]> {
   if (!enabled) return [];
   const threeBuild = path.dirname(require.resolve("three"));
@@ -571,12 +730,26 @@ async function copyMp4MuxerVendor(ctx: ToolContext, projectId: string): Promise<
 
 async function handleCreateImmersivePage(input: ImmersivePageInput, ctx: ToolContext): Promise<ToolResult> {
   const project = await createBaseProject(ctx, input.title, `Generated immersive ${input.style} page.`, "index.html");
+  const html = renderImmersivePage(input);
   const files = [
-    await writeProjectFile(ctx.projectRoot, project.id, "index.html", renderImmersivePage(input)),
-    await writeProjectFile(ctx.projectRoot, project.id, "page.css", immersiveCss(input.style, input.enableThreeJs)),
-    await writeProjectFile(ctx.projectRoot, project.id, "page.js", immersiveScript(input.enableThreeJs))
+    await writeProjectFile(ctx.projectRoot, project.id, "index.html", html),
+    await writeProjectFile(ctx.projectRoot, project.id, "page.css", immersiveCss(input)),
+    await writeProjectFile(ctx.projectRoot, project.id, "page.js", immersiveScriptForInput(input))
   ];
   const vendor = await writeOptionalThreeVendor(ctx, project.id, input.enableThreeJs);
+  const landingPageIntent = isProductDemoHeroPage(input) ? validateLandingPageIntent(html) : undefined;
+  if (input.publish && landingPageIntent && !landingPageIntent.ok) {
+    const manifest = await getProjectManifest(ctx.projectRoot, project.id);
+    return {
+      ok: false,
+      summary: `Created immersive page ${project.id}, but publish was blocked by landing intent gate.`,
+      jobId: project.id,
+      artifacts: [...files.map((file) => file.path), ...vendor],
+      structuredContent: { projectId: project.id, files: manifest.files, landingPageIntent },
+      logs: [JSON.stringify({ projectId: project.id, files: manifest.files, landingPageIntent }, null, 2)],
+      errors: landingPageIntent.errors
+    };
+  }
   const published = await maybePublish(ctx, project.id, input.publish);
   const manifest = await getProjectManifest(ctx.projectRoot, project.id);
   return {
@@ -586,6 +759,7 @@ async function handleCreateImmersivePage(input: ImmersivePageInput, ctx: ToolCon
     previewUrl: published.previewUrl,
     shareUrl: published.shareUrl,
     artifacts: [...files.map((file) => file.path), ...vendor],
+    structuredContent: { projectId: project.id, landingPageIntent },
     logs: [JSON.stringify({ projectId: project.id, files: manifest.files, publishedUrl: published.metadata?.publishedUrl }, null, 2)],
     errors: []
   };
@@ -1198,6 +1372,9 @@ export const presentationTools: ToolModule[] = [
           title: { type: "string" },
           style: { type: "string", enum: ["editorial", "product_demo", "data_story", "portfolio", "interactive_explainer"] },
           sections: { type: "array", items: { type: "object" } },
+          brandName: { type: "string" },
+          primaryAction: { type: "string" },
+          secondaryAction: { type: "string" },
           enableThreeJs: { type: "boolean" },
           publish: { type: "boolean" }
         },

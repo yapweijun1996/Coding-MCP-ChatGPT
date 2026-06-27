@@ -630,9 +630,10 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
 
 - Prefer \`deliver_static_project\` for complete static HTML/CSS/JS deliverables.
 - For first-pass static pages, call \`deliver_static_project\` with \`title\`, \`entryFile\`, and a \`files\` array of \`{ path, content }\`; return the resulting \`shareUrl\` or \`publishedUrl\`.
+- For landing/hero pages, prefer \`deliver_static_project\` or the fixed \`product-landing-page\` starter, then customize the copy and visual hierarchy for the user's brand before handoff.
 - Final handoff publish tools default to \`shareAccess: "anyone_with_link"\` so users and sandboxed previews can load referenced assets. Use \`shareAccess: "private"\` only for internal previews.
 - Treat \`projectId\` as the persistent Project identifier for follow-up calls. Tool results may also set \`jobId\` to the same value for generic job UIs, but follow-up Project tools should receive \`projectId\`.
-- For incremental repairs, use \`create_project\` or inspect an existing project, then \`write_project_file\`, \`validate_project\`, and \`publish_and_report\`. Use \`publish_project\` only when validation already passed and a browser/report handoff is not needed.
+- For incremental repairs, use \`create_project\` or inspect an existing project, then \`write_project_file\`, \`validate_project\`, and \`publish_and_report\`. Use \`publish_project\` only when validation/report evidence already passed and a browser/report handoff is not needed.
 - When blocked by validation or a failed write, call \`get_project_activity\`, \`get_project_manifest\`, and \`read_project_file\` before overwriting files; use \`create_project_backup\` before broad rewrites and \`restore_latest_project_backup\` if the repair regresses.
 - Use the app project workflow for React/Vue/Vite idea-to-demo requests: create, edit source, install, build, then publish dist.
 - For API-driven frontend demos without real keys or backend deployment, use \`create_project_mock_api\` and \`start_project_mock_api\` to provide project-scoped CORS JSON endpoints with pagination, search, empty, error, auth-expired, and slow states; call \`stop_project_mock_api\` after verification.
@@ -1782,6 +1783,7 @@ Use this skill before starting a common project type where a reusable starter ca
 - Use \`list_project_templates\` to browse built-in and project-local templates for admin panels, PWA apps, dashboards, games, landing pages, data tools, and docs sites.
 - Use \`recommend_project_templates\` with the user goal and desired features before choosing a starter.
 - Use \`create_project_from_template\` to create and validate a static starter project from a selected template.
+- For \`product-landing-page\`, treat the generated files as a real landing-page starter, not a template catalog; still customize brand-specific copy, proof, screenshots, CTA targets, and run browser/visual QA before sharing.
 - Use \`register_project_template\` when a project has a reusable custom template worth saving in the project-local marketplace.
 - Use \`export_project_template_catalog\` to hand off available template choices.
 - Treat generated starter files as a baseline; customize copy, data, visuals, accessibility, and validation for the actual user request.`

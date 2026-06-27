@@ -129,6 +129,37 @@ test("create_immersive_page creates a publishable HTML project with local Three.
     assert.ok(manifest.files.some((file) => file.path === "vendor/three/three.min.js"));
     assert.ok(manifest.files.some((file) => file.path === "page.js"));
     assert.equal(result.shareUrl, `https://example.test/share/${result.jobId}/index.html`);
+    const html = await readFile(path.join(ctx.projectRoot, result.jobId, "files/index.html"), "utf8");
+    assert.match(html, /<header class="site-header">/);
+    assert.match(html, /<nav aria-label="Primary navigation">/);
+    assert.match(html, /class="hero"/);
+    assert.match(html, /class="cta primary"/);
+    assert.doesNotMatch(html, /landing page template|class="sidebar"|Operational Snapshot/i);
+  });
+});
+
+test("create_immersive_page blocks publishing when landing intent gate fails", async () => {
+  await withContext(async (ctx) => {
+    const result = await callTool("create_immersive_page", {
+      title: "Landing Page Template",
+      style: "product_demo",
+      brandName: "Template Catalog",
+      primaryAction: "Open workspace",
+      publish: true,
+      sections: [
+        { kind: "hero", title: "Landing Page Template", body: "A template checklist shell." },
+        { kind: "callout", title: "Operational Snapshot", body: "This should be blocked before publish." }
+      ]
+    }, ctx);
+
+    assert.equal(result.ok, false);
+    assert.ok(result.jobId);
+    assert.equal(result.shareUrl, undefined);
+    assert.match(result.summary, /publish was blocked by landing intent gate/i);
+    assert.match(result.errors.join("\n"), /template catalog|checklist|sidebar/i);
+    const manifest = await getProjectManifest(ctx.projectRoot, result.jobId);
+    assert.equal(manifest.metadata.status, "draft");
+    assert.equal(manifest.publishedUrl, undefined);
   });
 });
 
