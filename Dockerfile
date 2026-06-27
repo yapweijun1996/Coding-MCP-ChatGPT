@@ -25,29 +25,35 @@ RUN apt-get update \
 RUN mkdir -p /app/soundfonts/generaluser-gs \
   && node <<'NODE'
 const fs = require("node:fs/promises");
+const crypto = require("node:crypto");
 const path = require("node:path");
 
 const targetDir = "/app/soundfonts/generaluser-gs";
-const baseUrl = "https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/master";
+const upstreamCommit = "684543d5e5efaef08d02be50dcda8d552478fa60";
+const baseUrl = `https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/${upstreamCommit}`;
 const files = [
-  ["GeneralUser-GS.sf2", "GeneralUser-GS.sf2"],
-  ["documentation/LICENSE.txt", "LICENSE.txt"],
-  ["README.md", "README.md"]
+  ["GeneralUser-GS.sf2", "GeneralUser-GS.sf2", "9575028c7a1f589f5770fccc8cff2734566af40cd26ed836944e9a5152688cfe"],
+  ["documentation/LICENSE.txt", "LICENSE.txt", "7b32efefdf95ce38a043799f0659853ddc00fbaa14d8c50f0aca16b9b8b405be"],
+  ["README.md", "README.md", "f1a5d1ef99591763617689d064e57113b1db900a920e145233aa2789331e085a"]
 ];
 
-async function download(sourcePath, targetName) {
+async function download(sourcePath, targetName, expectedSha256) {
   const url = `${baseUrl}/${sourcePath}`;
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Failed to download ${url}: ${response.status}`);
   const buffer = Buffer.from(await response.arrayBuffer());
+  const actualSha256 = crypto.createHash("sha256").update(buffer).digest("hex");
+  if (actualSha256 !== expectedSha256) {
+    throw new Error(`SHA-256 mismatch for ${targetName}: expected ${expectedSha256}, got ${actualSha256}`);
+  }
   await fs.writeFile(path.join(targetDir, targetName), buffer);
   return buffer;
 }
 
 (async () => {
-  const soundfont = await download(files[0][0], files[0][1]);
-  await download(files[1][0], files[1][1]);
-  await download(files[2][0], files[2][1]);
+  const soundfont = await download(files[0][0], files[0][1], files[0][2]);
+  await download(files[1][0], files[1][1], files[1][2]);
+  await download(files[2][0], files[2][1], files[2][2]);
   if (soundfont.length < 12 || soundfont.subarray(0, 4).toString("ascii") !== "RIFF" || soundfont.subarray(8, 12).toString("ascii") !== "sfbk") {
     throw new Error("Downloaded GeneralUser-GS.sf2 is not a valid RIFF/sfbk SoundFont.");
   }

@@ -157,6 +157,7 @@ export const skillRegistry: readonly SkillDefinition[] = [
       "run_tool_async",
       "get_job_status",
       "list_background_jobs",
+      "diagnose_code_mcp_status",
       "cancel_background_job",
       "retry_background_job",
       "recover_job_partial_result",
@@ -537,6 +538,7 @@ Use this skill to discover the available workspace/project context before taking
       "run_tool_async",
       "get_job_status",
       "list_background_jobs",
+      "diagnose_code_mcp_status",
       "cancel_background_job",
       "retry_background_job",
       "recover_job_partial_result",
@@ -901,6 +903,7 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "run_tool_async",
       "get_job_status",
       "list_background_jobs",
+      "diagnose_code_mcp_status",
       "cancel_background_job",
       "retry_background_job",
       "recover_job_partial_result",
@@ -1955,6 +1958,7 @@ Use this skill when work should notify humans or follow-up agents about complete
       "run_tool_async",
       "get_job_status",
       "list_background_jobs",
+      "diagnose_code_mcp_status",
       "cancel_background_job",
       "retry_background_job",
       "recover_job_partial_result"
@@ -1966,6 +1970,7 @@ Use this skill for long-running operations that should not block a client reques
 - Use \`run_tool_async\` for eligible long-running tools and set \`timeoutMs\` when the operation needs a bounded wait.
 - Use \`get_job_status\` to poll until a job is terminal: success, error, cancelled, or timeout.
 - Use \`list_background_jobs\` to inspect the queue and recent history.
+- Use \`diagnose_code_mcp_status\` when the user asks what is happening, why work stopped, whether work can continue, or what tool should be called next.
 - Use \`cancel_background_job\` when a non-terminal job should stop contributing results.
 - Use \`retry_background_job\` when a failed or timed-out job has stored source metadata and retry budget remains.
 - Use \`recover_job_partial_result\` before retrying so logs, artifacts, and errors are not lost.`

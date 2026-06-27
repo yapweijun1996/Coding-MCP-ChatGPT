@@ -1749,6 +1749,49 @@ test("export_music_project creates a music package with README, playlist, checks
   }
 });
 
+test("export_music_project blocks on custom audio quality report paths", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-export-custom-qa-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Custom QA gate", createdByClientId: "producer" });
+    const exportProject = getToolModule("export_music_project");
+    assert.ok(exportProject);
+
+    await writeProjectFile(ctx.projectRoot, project.id, "music/custom-audio-qa.json", `${JSON.stringify({
+      productionSafe: false,
+      blockingReasons: ["Loop seam click remains audible."],
+      findings: [{ severity: "high", message: "True peak exceeds delivery ceiling." }]
+    }, null, 2)}\n`);
+
+    const result = await exportProject!.handler({
+      projectId: project.id,
+      packageName: "custom-qa-package",
+      qualityReportPaths: ["music/custom-audio-qa.json"],
+      publish: false
+    }, ctx);
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some((error) => error.includes("productionSafe=false")));
+    assert.ok(result.errors.some((error) => error.includes("Loop seam click remains audible")));
+    assert.ok(result.errors.some((error) => error.includes("True peak exceeds delivery ceiling")));
+    const payload = result.structuredContent as {
+      qualityReportPaths: string[];
+      resolvedQualityReports: Array<{ reportPath: string; productionSafe: boolean | "unknown"; blockingReasonCount: number; highFindingCount: number }>;
+      packageReportPath: string;
+    };
+    assert.deepEqual(payload.qualityReportPaths, ["music/custom-audio-qa.json"]);
+    assert.deepEqual(payload.resolvedQualityReports, [{
+      reportPath: "music/custom-audio-qa.json",
+      productionSafe: false,
+      blockingReasonCount: 1,
+      highFindingCount: 1
+    }]);
+    const packageReport = await readProjectFile(ctx.projectRoot, project.id, payload.packageReportPath);
+    assert.match(packageReport, /custom-audio-qa\.json/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("export_music_project fails when requested encoded formats are missing", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "music-export-format-gate-"));
   try {

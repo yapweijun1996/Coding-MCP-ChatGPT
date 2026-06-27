@@ -191,6 +191,56 @@ async function listDistFiles(root: string): Promise<string[]> {
   return output.sort();
 }
 
+function isExternalOrNonFileReference(value: string): boolean {
+  const trimmed = value.trim();
+  return !trimmed
+    || trimmed.startsWith("#")
+    || /^(?:https?:|\/\/|data:|mailto:|tel:|javascript:|blob:)/i.test(trimmed);
+}
+
+function normalizeDistReference(entryFile: string, reference: string): string | undefined {
+  if (isExternalOrNonFileReference(reference)) return undefined;
+  const withoutQuery = reference.split("#")[0]?.split("?")[0] ?? "";
+  if (!withoutQuery || withoutQuery.startsWith("/")) return undefined;
+  const entryDirectory = path.posix.dirname(entryFile.replaceAll("\\", "/"));
+  return path.posix.normalize(entryDirectory === "." ? withoutQuery : path.posix.join(entryDirectory, withoutQuery));
+}
+
+async function validateDistBeforePublish(distRoot: string, files: string[], entryFile: string, allowedExistingFiles: string[] = []): Promise<void> {
+  const fileSet = new Set(files);
+  const allowedReferenceSet = new Set([...files, ...allowedExistingFiles]);
+  const errors: string[] = [];
+  for (const file of files) {
+    const extension = path.extname(file).toLowerCase();
+    if (!textDistExtensions.has(extension) && !assetDistExtensions.has(extension)) {
+      errors.push(`Unsupported dist file extension: ${file}`);
+    }
+  }
+  if (!fileSet.has(entryFile)) errors.push(`Entry file not found in dist: ${entryFile}`);
+  if (entryFile.toLowerCase().endsWith(".html") && fileSet.has(entryFile)) {
+    const html = await readFile(path.join(distRoot, entryFile), "utf8");
+    const patterns = [
+      /\b(?:src|href)\s*=\s*["']([^"']+)["']/gi,
+      /\bsrcset\s*=\s*["']([^"']+)["']/gi
+    ];
+    for (const pattern of patterns) {
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(html)) !== null) {
+        const raw = match[1];
+        if (!raw) continue;
+        const candidates = pattern.source.includes("srcset")
+          ? raw.split(",").map((item) => item.trim().split(/\s+/)[0]).filter(Boolean)
+          : [raw];
+        for (const candidate of candidates) {
+          const normalized = normalizeDistReference(entryFile, candidate);
+          if (normalized && !allowedReferenceSet.has(normalized)) errors.push(`Referenced local resource not found in dist or preserved project assets: ${normalized}`);
+        }
+      }
+    }
+  }
+  if (errors.length > 0) throw new Error(`Dist preflight failed: ${errors.join("; ")}`);
+}
+
 function lastPublishedDistPaths(manifest: Awaited<ReturnType<typeof getProjectManifest>>): string[] {
   for (const item of manifest.taskHistory.slice().reverse()) {
     if (item.toolName !== "publish_project_dist" || !item.ok || !item.details || typeof item.details !== "object") continue;
@@ -391,9 +441,10 @@ export const appProjectTools: ToolModule[] = [
       const distStat = await stat(distRoot);
       if (!distStat.isDirectory()) throw new Error(`Build output is not a directory: ${safeOutputDir}`);
       const files = await listDistFiles(distRoot);
-      if (!files.includes(parsed.entryFile)) throw new Error(`Entry file not found in ${safeOutputDir}: ${parsed.entryFile}`);
       const manifestBeforePublish = await getProjectManifest(ctx.projectRoot, parsed.projectId);
-      const removedFiles = await removePreviousPublishedDistFiles(ctx.projectRoot, parsed.projectId, lastPublishedDistPaths(manifestBeforePublish));
+      const previousDistPaths = new Set(lastPublishedDistPaths(manifestBeforePublish));
+      const allowedExistingFiles = manifestBeforePublish.files.map((file) => file.path).filter((filePath) => !previousDistPaths.has(filePath));
+      await validateDistBeforePublish(distRoot, files, parsed.entryFile, allowedExistingFiles);
       const publishedFiles = [];
       for (const file of files) {
         const extension = path.extname(file).toLowerCase();
@@ -408,6 +459,7 @@ export const appProjectTools: ToolModule[] = [
       }
       const validation = await validateProject(ctx.projectRoot, parsed.projectId, parsed.entryFile);
       if (!validation.ok) throw new Error(`Published dist validation failed: ${validation.errors.join("; ")}`);
+      const removedFiles = await removePreviousPublishedDistFiles(ctx.projectRoot, parsed.projectId, [...previousDistPaths].filter((filePath) => !files.includes(filePath)));
       const publishPolicy = buildProjectPublishOptions(ctx);
       const project = await publishProject(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, parsed.entryFile, publishPolicy.options);
       await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "publish_project_dist", ok: true, summary: `Published ${safeOutputDir} to ${project.publishedUrl}.`, details: { outputDir: safeOutputDir, entryFile: parsed.entryFile, files: publishedFiles, removedFiles } });

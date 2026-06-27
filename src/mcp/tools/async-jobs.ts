@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { ToolContext, ToolModule, ToolResult } from "../types.js";
 import { cancelJob, getJob, listJobsForOwner, saveJob, updateJob, type JobRecord } from "../../jobs/store.js";
+import { createProject, getProjectActivity, getProjectTaskGraph, listProjects, upsertProjectTask, type ProjectTaskGraphNode } from "../../projects/store.js";
 
 // Tools that can blow past a proxy's request timeout (Cloudflare cuts proxied HTTP requests
 // at ~100s -> 524). Only these may be run via run_tool_async. Fast tools have no reason to go
@@ -45,6 +46,12 @@ const retryBackgroundJobSchema = z.object({
 
 const recoverJobPartialResultSchema = z.object({
   jobId: z.string().min(1).max(200)
+});
+
+const diagnoseCodeMcpStatusSchema = z.object({
+  projectId: z.string().min(8).max(80).optional(),
+  latestUserIntent: z.string().min(1).max(500).optional(),
+  autoStartWhenIdle: z.boolean().optional().default(false)
 });
 
 function terminal(status: JobRecord["status"]): boolean {
@@ -124,6 +131,50 @@ async function runJob(jobId: string, name: string, args: Record<string, unknown>
     const message = error instanceof Error ? error.message : "Async tool execution failed.";
     safeUpdateRunningJob(jobId, { status: "error", summary: `${name} failed.`, errors: [message] });
   }
+}
+
+function summarizeJobs(jobs: JobRecord[]) {
+  const running = jobs.filter((job) => job.status === "created" || job.status === "running");
+  const failed = jobs.filter((job) => job.status === "error" || job.status === "cancelled" || job.status === "timeout");
+  const succeeded = jobs.filter((job) => job.status === "success");
+  return {
+    count: jobs.length,
+    running: running.map(jobSummary),
+    failed: failed.map(jobSummary),
+    succeeded: succeeded.map(jobSummary),
+    latest: jobs[0] ? jobSummary(jobs[0]) : undefined
+  };
+}
+
+function jobSummary(job: JobRecord) {
+  return {
+    id: job.id,
+    status: job.status,
+    title: job.title,
+    summary: job.summary,
+    sourceToolName: job.sourceToolName,
+    updatedAt: job.updatedAt,
+    canRetry: Boolean(job.sourceToolName && job.sourceArgs && terminal(job.status) && (!job.maxAttempts || (job.attempt ?? 1) < job.maxAttempts))
+  };
+}
+
+function taskSummary(task: ProjectTaskGraphNode | undefined) {
+  return task ? {
+    id: task.id,
+    title: task.title,
+    status: task.status,
+    priority: task.priority,
+    progress: task.progress,
+    blocked: task.blocked,
+    blockedReasons: task.blockedReasons,
+    updatedAt: task.updatedAt
+  } : undefined;
+}
+
+function initialTaskTitle(intent: string | undefined): string {
+  if (!intent?.trim()) return "Define project goal and first implementation step";
+  const normalized = intent.trim().replace(/\s+/g, " ");
+  return normalized.length > 80 ? `${normalized.slice(0, 77)}...` : normalized;
 }
 
 export const asyncJobTools: ToolModule[] = [
@@ -234,6 +285,138 @@ export const asyncJobTools: ToolModule[] = [
       const parsed = listBackgroundJobsSchema.parse(input);
       const jobs = listJobsForOwner(ctx.userId, parsed);
       return { ok: true, summary: `Found ${jobs.length} background job(s).`, artifacts: [], structuredContent: { jobs, count: jobs.length }, logs: jobs.map((job) => `${job.id} ${job.status} ${job.title}: ${job.summary}`), errors: [] };
+    }
+  },
+  {
+    definition: {
+      name: "diagnose_code_mcp_status",
+      description:
+        "Diagnose current Code-MCP work status across background jobs and app project tasks. Use this when the user asks what is happening, why work stopped, whether it can continue, or what tool to call next. Optionally starts a new project/task only when autoStartWhenIdle=true and there is nothing resumable.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string", description: "Optional project id to inspect." },
+          latestUserIntent: { type: "string", description: "Optional latest user goal, used for recommendations or auto-start task seeding." },
+          autoStartWhenIdle: { type: "boolean", description: "When true, create a new project and initial task if there is no running job or resumable project task. Defaults to false." }
+        },
+        required: [],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: diagnoseCodeMcpStatusSchema,
+    handler: async (input: unknown, ctx: ToolContext): Promise<ToolResult> => {
+      const parsed = diagnoseCodeMcpStatusSchema.parse(input);
+      const jobs = listJobsForOwner(ctx.userId, { limit: 20 });
+      const jobState = summarizeJobs(jobs);
+      const projects = await listProjects(ctx.projectRoot, false);
+      const selectedProjectId = parsed.projectId ?? projects[0]?.id;
+      let project: {
+        id: string;
+        title: string;
+        status: string;
+        publishedUrl?: string;
+        lastValidation?: unknown;
+        taskCounts: Record<string, number>;
+        resumeTask?: ReturnType<typeof taskSummary>;
+      } | undefined;
+      let resumeTask: ProjectTaskGraphNode | undefined;
+
+      if (selectedProjectId) {
+        const activity = await getProjectActivity(ctx.projectRoot, selectedProjectId);
+        const graph = await getProjectTaskGraph(ctx.projectRoot, selectedProjectId);
+        resumeTask = graph.nodes.find((task) => task.status === "doing" && !task.blocked)
+          ?? graph.readyTasks.find((task) => task.status === "todo")
+          ?? graph.blockedTasks[0];
+        const counts = graph.nodes.reduce<Record<string, number>>((accumulator, task) => {
+          accumulator[task.status] = (accumulator[task.status] ?? 0) + 1;
+          return accumulator;
+        }, {});
+        const projectSummary = projects.find((item) => item.id === selectedProjectId);
+        project = {
+          id: selectedProjectId,
+          title: projectSummary?.title ?? selectedProjectId,
+          status: activity.status,
+          publishedUrl: activity.publishedUrl,
+          lastValidation: activity.lastValidation,
+          taskCounts: counts,
+          resumeTask: taskSummary(resumeTask)
+        };
+      }
+
+      let state = "idle_no_project";
+      let canContinue = false;
+      let whyStopped = "No running background job or resumable project task was found.";
+      let nextActions: string[] = ["Call create_app_project or provide projectId/latestUserIntent to start work."];
+      let createdProject: { projectId: string; title: string } | undefined;
+      let createdTask: ReturnType<typeof taskSummary> | undefined;
+
+      if (jobState.running.length > 0) {
+        state = "job_running";
+        canContinue = true;
+        whyStopped = "A background job is still running.";
+        nextActions = [`Call get_job_status with jobId=${jobState.running[0].id}.`];
+      } else if (resumeTask) {
+        state = "project_resume_available";
+        canContinue = true;
+        whyStopped = resumeTask.blocked ? "The selected project has a blocked unfinished task." : "The selected project has an unfinished task that can be resumed.";
+        nextActions = resumeTask.blocked
+          ? [`Resolve blocker for task ${resumeTask.id}, then call upsert_project_task or the relevant project tool.`]
+          : [`Continue task ${resumeTask.id} with the relevant project tool, then update it via upsert_project_task.`];
+      } else if (jobState.failed.length > 0) {
+        state = "job_failed";
+        canContinue = true;
+        whyStopped = `The latest terminal job needing attention is ${jobState.failed[0].status}.`;
+        nextActions = [
+          `Call recover_job_partial_result with jobId=${jobState.failed[0].id}.`,
+          ...(jobState.failed[0].canRetry ? [`Call retry_background_job with jobId=${jobState.failed[0].id} if the partial result is insufficient.`] : [])
+        ];
+      } else if (project) {
+        state = "idle_project_complete_or_empty";
+        whyStopped = "A project exists, but it has no unfinished resumable task.";
+        nextActions = ["Call upsert_project_task to seed the next task, or run the next project workflow tool directly."];
+      }
+
+      if (!canContinue && parsed.autoStartWhenIdle && !resumeTask && jobState.running.length === 0) {
+        const title = parsed.latestUserIntent ? initialTaskTitle(parsed.latestUserIntent) : "Code MCP Work Session";
+        const newProject = await createProject(ctx.projectRoot, {
+          title,
+          summary: parsed.latestUserIntent ?? "Auto-started from diagnose_code_mcp_status.",
+          createdByClientId: ctx.clientId,
+          entryFile: "index.html"
+        });
+        const task = await upsertProjectTask(ctx.projectRoot, newProject.id, {
+          title: initialTaskTitle(parsed.latestUserIntent),
+          status: "todo",
+          priority: "medium",
+          notes: parsed.latestUserIntent ?? "Initial task seeded by diagnose_code_mcp_status.",
+          progress: 0
+        });
+        state = "new_project_started";
+        canContinue = true;
+        whyStopped = "No resumable work existed, so a new project and initial task were created because autoStartWhenIdle=true.";
+        nextActions = [`Continue task ${task.id} in project ${newProject.id}.`];
+        createdProject = { projectId: newProject.id, title: newProject.title };
+        createdTask = taskSummary({ ...task, blockedBy: [], blocked: false, dependents: [], blockedReasons: [] });
+        project = {
+          id: newProject.id,
+          title: newProject.title,
+          status: newProject.status,
+          publishedUrl: newProject.publishedUrl,
+          taskCounts: { todo: 1 },
+          resumeTask: createdTask
+        };
+      }
+
+      const result = { state, canContinue, whyStopped, jobs: jobState, project, createdProject, createdTask, nextActions };
+      return {
+        ok: true,
+        summary: `Code-MCP status: ${state}. ${whyStopped}`,
+        artifacts: [createdProject?.projectId, project?.id].filter((value): value is string => Boolean(value)),
+        structuredContent: result,
+        logs: [JSON.stringify(result, null, 2)],
+        errors: []
+      };
     }
   },
   {

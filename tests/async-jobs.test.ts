@@ -1,20 +1,24 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { getToolModule } from "../src/mcp/registry.js";
 import { saveJob, getJob, type JobRecord } from "../src/jobs/store.js";
+import { createProject, upsertProjectTask } from "../src/projects/store.js";
 import { skillRegistry } from "../src/skills/registry.js";
 import type { ToolContext } from "../src/mcp/types.js";
 
-function toolContext(): ToolContext {
+function toolContext(root = "/tmp/async-test"): ToolContext {
   return {
     publicBaseUrl: "https://example.test",
-    workspaceRoot: "/tmp/async-test",
+    workspaceRoot: path.join(root, "workspace"),
     commandTimeoutMs: 1000,
-    shareRoot: "/tmp/async-test/shares",
-    artifactRoot: "/tmp/async-test/artifacts",
-    feedbackRoot: "/tmp/async-test/feedback",
+    shareRoot: path.join(root, "shares"),
+    artifactRoot: path.join(root, "artifacts"),
+    feedbackRoot: path.join(root, "feedback"),
     telemetryRoot: "",
-    projectRoot: "/tmp/async-test/projects",
+    projectRoot: path.join(root, "projects"),
     clientId: "test-client"
   };
 }
@@ -26,6 +30,7 @@ test("run_tool_async and get_job_status are registered and skill-exposed", () =>
   assert.ok(getToolModule("cancel_background_job"), "cancel_background_job registered");
   assert.ok(getToolModule("retry_background_job"), "retry_background_job registered");
   assert.ok(getToolModule("recover_job_partial_result"), "recover_job_partial_result registered");
+  assert.ok(getToolModule("diagnose_code_mcp_status"), "diagnose_code_mcp_status registered");
 });
 
 test("get_job_status returns ok:false for an unknown job", async () => {
@@ -166,11 +171,100 @@ test("background jobs are tenant-isolated: a non-owner cannot read, cancel, or r
   assert.equal(aliceRecover.ok, true, "the owner recovers her own partial result");
 });
 
+test("diagnose_code_mcp_status reports idle with no jobs or projects", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "async-diagnose-idle-"));
+  try {
+    const diagnose = getToolModule("diagnose_code_mcp_status");
+    assert.ok(diagnose);
+    const ctx = { ...toolContext(root), userId: `idle-user-${Date.now()}` };
+    const result = await diagnose!.handler({ latestUserIntent: "build a demo" }, ctx);
+    assert.equal(result.ok, true);
+    const payload = result.structuredContent as { state: string; canContinue: boolean; createdProject?: unknown; nextActions: string[] };
+    assert.equal(payload.state, "idle_no_project");
+    assert.equal(payload.canContinue, false);
+    assert.equal(payload.createdProject, undefined);
+    assert.ok(payload.nextActions.some((action) => action.includes("create_app_project")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("diagnose_code_mcp_status summarizes running, failed, and successful jobs", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "async-diagnose-jobs-"));
+  try {
+    const userId = `diag-jobs-${Date.now()}`;
+    saveJob({ ...job(`job_${userId}_running`, "running"), ownerUserId: userId, updatedAt: "2026-06-23T02:13:00.000Z" });
+    saveJob({ ...job(`job_${userId}_error`, "error"), ownerUserId: userId, updatedAt: "2026-06-23T02:12:00.000Z" });
+    saveJob({ ...job(`job_${userId}_success`, "success"), ownerUserId: userId, updatedAt: "2026-06-23T02:11:00.000Z" });
+    const diagnose = getToolModule("diagnose_code_mcp_status")!;
+    const result = await diagnose.handler({}, { ...toolContext(root), userId });
+    assert.equal(result.ok, true);
+    const payload = result.structuredContent as {
+      state: string;
+      jobs: {
+        running: Array<{ id: string }>;
+        failed: Array<{ id: string }>;
+        succeeded: Array<{ id: string }>;
+      };
+      nextActions: string[];
+    };
+    assert.equal(payload.state, "job_running");
+    assert.equal(payload.jobs.running.some((item) => item.id === `job_${userId}_running`), true);
+    assert.equal(payload.jobs.failed.some((item) => item.id === `job_${userId}_error`), true);
+    assert.equal(payload.jobs.succeeded.some((item) => item.id === `job_${userId}_success`), true);
+    assert.ok(payload.nextActions.some((action) => action.includes("get_job_status")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("diagnose_code_mcp_status returns resume action for unfinished project tasks", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "async-diagnose-project-"));
+  try {
+    const ctx = { ...toolContext(root), userId: `diag-project-${Date.now()}` };
+    const project = await createProject(ctx.projectRoot, { title: "Resume project", createdByClientId: "test-client" });
+    const task = await upsertProjectTask(ctx.projectRoot, project.id, {
+      title: "Finish implementation",
+      status: "doing",
+      priority: "high",
+      notes: "Continue from generated work.",
+      progress: 50
+    });
+    const diagnose = getToolModule("diagnose_code_mcp_status")!;
+    const result = await diagnose.handler({ projectId: project.id }, ctx);
+    assert.equal(result.ok, true);
+    const payload = result.structuredContent as { state: string; project: { resumeTask: { id: string } }; nextActions: string[] };
+    assert.equal(payload.state, "project_resume_available");
+    assert.equal(payload.project.resumeTask.id, task.id);
+    assert.ok(payload.nextActions.some((action) => action.includes(task.id)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("diagnose_code_mcp_status auto-starts a project when idle", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "async-diagnose-autostart-"));
+  try {
+    const ctx = { ...toolContext(root), userId: `diag-autostart-${Date.now()}` };
+    const diagnose = getToolModule("diagnose_code_mcp_status")!;
+    const result = await diagnose.handler({ latestUserIntent: "build inventory app", autoStartWhenIdle: true }, ctx);
+    assert.equal(result.ok, true);
+    const payload = result.structuredContent as { state: string; createdProject: { projectId: string }; createdTask: { id: string }; project: { id: string; resumeTask: { id: string } } };
+    assert.equal(payload.state, "new_project_started");
+    assert.match(payload.createdProject.projectId, /^project_/);
+    assert.equal(payload.project.id, payload.createdProject.projectId);
+    assert.equal(payload.project.resumeTask.id, payload.createdTask.id);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("job-queue skill exposes queue tools through core, coding, and debug skills", () => {
   const toolNames = [
     "run_tool_async",
     "get_job_status",
     "list_background_jobs",
+    "diagnose_code_mcp_status",
     "cancel_background_job",
     "retry_background_job",
     "recover_job_partial_result"

@@ -52,6 +52,14 @@ Back up `.docker-data/` if you need to preserve projects, shared pages, artifact
 
 The Docker image installs `fluidsynth` and `ffmpeg` automatically in both the build and runtime stages. It also downloads and validates the free commercial-friendly GeneralUser GS SoundFont during image build, storing it under `/app/soundfonts/generaluser-gs/` with `GeneralUser-GS.sf2`, `LICENSE.txt`, and `README.md`.
 
+GeneralUser GS is fetched from upstream commit `684543d5e5efaef08d02be50dcda8d552478fa60`, not a moving branch. The Docker build verifies SHA-256 before writing each bundled file:
+
+- `GeneralUser-GS.sf2`: `9575028c7a1f589f5770fccc8cff2734566af40cd26ed836944e9a5152688cfe`
+- `LICENSE.txt`: `7b32efefdf95ce38a043799f0659853ddc00fbaa14d8c50f0aca16b9b8b405be`
+- `README.md`: `f1a5d1ef99591763617689d064e57113b1db900a920e145233aa2789331e085a`
+
+If upstream content changes or a download is tampered with, the image build fails instead of silently bundling different audio assets or license text.
+
 At runtime, `install_free_soundfont_pack` first copies this bundled SoundFont into the target project assets and records SHA-256, source URL, license path, README path, `productionUseApproved`, and `qualityTier=production_candidate`. It only downloads from upstream if the bundled cache is missing. This keeps normal ChatGPT tool usage offline from the SoundFont source after the Docker image is built.
 
 GeneralUser GS is not MIT. Treat it as the built-in free/commercial-friendly production-candidate SoundFont after the license/hash/QA gates pass.

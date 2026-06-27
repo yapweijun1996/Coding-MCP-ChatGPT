@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 import { callTool } from "../src/mcp/router.js";
 import type { ToolContext } from "../src/mcp/types.js";
-import { bindProjectWorkspace, createProject, getProjectManifest, getProjectWorkspaceDirectory, writeProjectAsset } from "../src/projects/store.js";
+import { bindProjectWorkspace, createProject, getProjectManifest, getProjectWorkspaceDirectory, readProjectFile, writeProjectAsset } from "../src/projects/store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -205,6 +205,52 @@ test("publish_project_dist only replaces files from its previous publish and pre
     assert.ok(manifest.files.some((file) => file.path === "app.js"));
     assert.ok(manifest.files.some((file) => file.path === "music/final.wav"));
     assert.ok(!manifest.files.some((file) => file.path === "old.js"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("publish_project_dist failed replacement preserves previous published app files", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "coding-mcp-app-publish-fail-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, {
+      title: "App publish rollback",
+      createdByClientId: "test-client"
+    });
+    const workspace = getProjectWorkspaceDirectory(ctx.projectRoot, project.id);
+    const dist = path.join(workspace, "dist");
+
+    await writeProjectAsset(ctx.projectRoot, project.id, "music/final.wav", tinyWav(), "audio/wav");
+    await mkdir(dist, { recursive: true });
+    await writeFile(path.join(dist, "index.html"), "<!doctype html><html><body><script src=\"./old.js\"></script></body></html>", "utf8");
+    await writeFile(path.join(dist, "old.js"), "console.log('old');\n", "utf8");
+
+    const firstPublish = await callTool("publish_project_dist", {
+      projectId: project.id,
+      outputDir: "dist",
+      entryFile: "index.html"
+    }, ctx);
+    assert.equal(firstPublish.ok, true);
+
+    await writeFile(path.join(dist, "index.html"), "<!doctype html><html><body><script src=\"./missing.js\"></script></body></html>", "utf8");
+    await writeFile(path.join(dist, "app.js"), "console.log('new should not publish');\n", "utf8");
+    await rm(path.join(dist, "old.js"), { force: true });
+
+    const failedPublish = await callTool("publish_project_dist", {
+      projectId: project.id,
+      outputDir: "dist",
+      entryFile: "index.html"
+    }, ctx);
+    assert.equal(failedPublish.ok, false);
+    assert.match(failedPublish.errors.join("\n"), /missing\.js/);
+
+    const manifest = await getProjectManifest(ctx.projectRoot, project.id);
+    assert.ok(manifest.files.some((file) => file.path === "index.html"));
+    assert.ok(manifest.files.some((file) => file.path === "old.js"));
+    assert.ok(manifest.files.some((file) => file.path === "music/final.wav"));
+    assert.ok(!manifest.files.some((file) => file.path === "app.js"));
+    assert.equal(await readProjectFile(ctx.projectRoot, project.id, "index.html"), "<!doctype html><html><body><script src=\"./old.js\"></script></body></html>");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

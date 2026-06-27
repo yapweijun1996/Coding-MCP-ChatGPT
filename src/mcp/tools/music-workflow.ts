@@ -404,6 +404,7 @@ const exportMusicProjectInputSchema = z.object({
   stemPaths: z.array(z.string().min(1).max(240)).max(120).optional().default([]),
   chordChartPaths: z.array(z.string().min(1).max(240)).max(40).optional().default([]),
   renderReportPaths: z.array(z.string().min(1).max(240)).max(80).optional().default([]),
+  qualityReportPaths: z.array(z.string().min(1).max(240)).max(20).optional().default([]),
   licenseManifestPath: z.string().min(1).max(240).optional(),
   version: z.string().min(1).max(80).optional(),
   bpm: z.number().int().min(20).max(300).optional(),
@@ -1778,21 +1779,36 @@ async function findProductionRenderGateWarnings(ctx: ToolContext, projectId: str
   return { warnings: Array.from(new Set(warnings)), resolvedReports };
 }
 
-async function findMusicQualityGateWarnings(ctx: ToolContext, projectId: string) {
+async function findMusicQualityGateWarnings(ctx: ToolContext, projectId: string, qualityReportPaths: string[] = []) {
   const warnings: string[] = [];
-  try {
-    const report = JSON.parse(await readProjectFile(ctx.projectRoot, projectId, "music/audio-quality-report.json", 2 * 1024 * 1024)) as Record<string, unknown>;
-    const blockingReasons = Array.isArray(report.blockingReasons) ? report.blockingReasons.map(String) : [];
-    const findings = Array.isArray(report.findings) ? report.findings as Array<Record<string, unknown>> : [];
-    if (report.productionSafe === false) warnings.push("Audio QA gate: productionSafe=false.");
-    for (const reason of blockingReasons) warnings.push(`Audio QA gate: ${reason}`);
-    for (const finding of findings) {
-      if (finding.severity === "high") warnings.push(`Audio QA gate: high finding: ${String(finding.message ?? "unknown finding")}`);
+  const resolvedReports: Array<{ reportPath: string; productionSafe: boolean | "unknown"; blockingReasonCount: number; highFindingCount: number }> = [];
+  const explicitPaths = new Set(qualityReportPaths);
+  const reportCandidates = [...new Set([...qualityReportPaths, "music/audio-quality-report.json"])];
+  for (const reportPath of reportCandidates) {
+    try {
+      const report = JSON.parse(await readProjectFile(ctx.projectRoot, projectId, reportPath, 2 * 1024 * 1024)) as Record<string, unknown>;
+      const blockingReasons = Array.isArray(report.blockingReasons) ? report.blockingReasons.map(String) : [];
+      const findings = Array.isArray(report.findings) ? report.findings as Array<Record<string, unknown>> : [];
+      const highFindings = findings.filter((finding) => finding.severity === "high");
+      resolvedReports.push({
+        reportPath,
+        productionSafe: typeof report.productionSafe === "boolean" ? report.productionSafe : "unknown",
+        blockingReasonCount: blockingReasons.length,
+        highFindingCount: highFindings.length
+      });
+      if (report.productionSafe === false) warnings.push("Audio QA gate: productionSafe=false.");
+      for (const reason of blockingReasons) warnings.push(`Audio QA gate: ${reason}`);
+      for (const finding of highFindings) {
+        warnings.push(`Audio QA gate: high finding: ${String(finding.message ?? "unknown finding")}`);
+      }
+    } catch (error) {
+      if (explicitPaths.has(reportPath)) {
+        const message = error instanceof Error ? error.message : String(error);
+        warnings.push(`Audio QA gate: unable to read quality report ${reportPath}: ${message}`);
+      }
     }
-  } catch {
-    // QA report is optional here; explicit high-severity reports are blocking when present.
   }
-  return Array.from(new Set(warnings));
+  return { warnings: Array.from(new Set(warnings)), resolvedReports };
 }
 
 function renderMusicExportReadme(manifest: {
@@ -2218,7 +2234,8 @@ const generalUserGsPack = {
   packId: "generaluser_gs",
   displayName: "GeneralUser GS",
   version: "2.0",
-  baseUrl: "https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/master",
+  upstreamCommit: "684543d5e5efaef08d02be50dcda8d552478fa60",
+  baseUrl: "https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/684543d5e5efaef08d02be50dcda8d552478fa60",
   sf2File: "GeneralUser-GS.sf2",
   licenseSourcePath: "documentation/LICENSE.txt",
   licenseFile: "LICENSE.txt",
@@ -3803,7 +3820,7 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "export_music_project", description: "Export a production music project package with tracks, sessions, stems, MIDI, chord charts, license checks, README, playlist metadata, and optional public listening/download page.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, projectManifestPath: { type: "string" }, packageName: { type: "string" }, selectedVersionIds: { type: "array", items: { type: "string" } }, exports: { type: "array", items: { type: "string" } }, renderedAudioPaths: { type: "array", items: { type: "string" } }, midiPaths: { type: "array", items: { type: "string" } }, stemPaths: { type: "array", items: { type: "string" } }, chordChartPaths: { type: "array", items: { type: "string" } }, renderReportPaths: { type: "array", items: { type: "string" } }, licenseManifestPath: { type: "string" }, version: { type: "string" }, bpm: { type: "number" }, key: { type: "string" }, durationSeconds: { type: "number" }, demoManifestPath: { type: "string" }, sessionManifestPath: { type: "string" }, trackManifestPaths: { type: "array", items: { type: "string" } }, publish: { type: "boolean" }, outputHtmlPath: { type: "string" }, outputManifestPath: { type: "string" }, outputReadmePath: { type: "string" }, outputPackageReportPath: { type: "string" }, outputPlaylistPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "export_music_project", description: "Export a production music project package with tracks, sessions, stems, MIDI, chord charts, license checks, README, playlist metadata, and optional public listening/download page.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, projectManifestPath: { type: "string" }, packageName: { type: "string" }, selectedVersionIds: { type: "array", items: { type: "string" } }, exports: { type: "array", items: { type: "string" } }, renderedAudioPaths: { type: "array", items: { type: "string" } }, midiPaths: { type: "array", items: { type: "string" } }, stemPaths: { type: "array", items: { type: "string" } }, chordChartPaths: { type: "array", items: { type: "string" } }, renderReportPaths: { type: "array", items: { type: "string" } }, qualityReportPaths: { type: "array", items: { type: "string" } }, licenseManifestPath: { type: "string" }, version: { type: "string" }, bpm: { type: "number" }, key: { type: "string" }, durationSeconds: { type: "number" }, demoManifestPath: { type: "string" }, sessionManifestPath: { type: "string" }, trackManifestPaths: { type: "array", items: { type: "string" } }, publish: { type: "boolean" }, outputHtmlPath: { type: "string" }, outputManifestPath: { type: "string" }, outputReadmePath: { type: "string" }, outputPackageReportPath: { type: "string" }, outputPlaylistPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: exportMusicProjectInputSchema,
     handler: async (input, ctx) => {
@@ -3847,8 +3864,8 @@ export const musicWorkflowTools: ToolModule[] = [
       const unsupportedFormats = buildUnsupportedMusicExportWarnings(parsed.exports, fileInspection.exportedFiles);
       const licenseWarnings = collectMusicLicenseWarnings(licenseManifest);
       const productionGate = await findProductionRenderGateWarnings(ctx, parsed.projectId, parsed.renderedAudioPaths, parsed.renderReportPaths);
-      const qualityGateWarnings = await findMusicQualityGateWarnings(ctx, parsed.projectId);
-      const productionGateWarnings = [...productionGate.warnings, ...qualityGateWarnings];
+      const qualityGate = await findMusicQualityGateWarnings(ctx, parsed.projectId, parsed.qualityReportPaths);
+      const productionGateWarnings = [...productionGate.warnings, ...qualityGate.warnings];
       const playlist = {
         projectId: parsed.projectId,
         packageName,
@@ -3875,6 +3892,8 @@ export const musicWorkflowTools: ToolModule[] = [
         productionGateWarnings,
         renderReportPaths: parsed.renderReportPaths,
         resolvedRenderReports: productionGate.resolvedReports,
+        qualityReportPaths: parsed.qualityReportPaths,
+        resolvedQualityReports: qualityGate.resolvedReports,
         userFacingReadmePath: parsed.outputReadmePath,
         playlistPath: parsed.outputPlaylistPath
       };
@@ -3897,7 +3916,7 @@ export const musicWorkflowTools: ToolModule[] = [
       const htmlFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputHtmlPath, html);
       const publishPolicy = parsed.publish ? buildProjectPublishOptions(ctx) : undefined;
       const published = publishPolicy ? await publishProject(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, parsed.outputHtmlPath, publishPolicy.options) : undefined;
-      const manifest = { projectId: parsed.projectId, packageName, projectManifestPath: parsed.projectManifestPath, demoManifestPath: parsed.demoManifestPath, sessionManifestPath: parsed.sessionManifestPath, trackManifestPaths: parsed.trackManifestPaths, selectedVersionIds: parsed.selectedVersionIds, requestedExports: parsed.exports, demoUrl: demo?.publishedUrl, exportPagePath: htmlFile.path, publishedUrl: published?.publishedUrl, readmePath: readmeFile.path, packageReportPath: packageReportFile.path, playlistPath: playlistFile.path, exportedFiles: fileInspection.exportedFiles, missingFiles: fileInspection.missingFiles, brokenAudioReferences: fileInspection.brokenAudioReferences, largeFiles: fileInspection.largeFiles, unsupportedFormats, licenseWarnings, productionGateWarnings, renderReportPaths: parsed.renderReportPaths, resolvedRenderReports: productionGate.resolvedReports, naming, tracks, sessionSummary: session ? { targetDurationMinutes: session.targetDurationMinutes, slots: Array.isArray(session.schedule) ? session.schedule.length : 0 } : undefined, license: licenseManifest ?? { output: "generated_original", dependencies: ["Built-in safe synth unless external assets are added later."] }, packageNotes: ["ZIP/MP3/OGG export requires a verified archive/encoder step.", "ZIP bundle creation can be completed with export package archive tools after this music package manifest passes checks.", "MP3/OGG exports require verified encoded files; this tool reports missing encoded formats instead of fabricating them.", "Production export requires production_candidate render evidence from render_midi_with_soundfont."] };
+      const manifest = { projectId: parsed.projectId, packageName, projectManifestPath: parsed.projectManifestPath, demoManifestPath: parsed.demoManifestPath, sessionManifestPath: parsed.sessionManifestPath, trackManifestPaths: parsed.trackManifestPaths, selectedVersionIds: parsed.selectedVersionIds, requestedExports: parsed.exports, demoUrl: demo?.publishedUrl, exportPagePath: htmlFile.path, publishedUrl: published?.publishedUrl, readmePath: readmeFile.path, packageReportPath: packageReportFile.path, playlistPath: playlistFile.path, exportedFiles: fileInspection.exportedFiles, missingFiles: fileInspection.missingFiles, brokenAudioReferences: fileInspection.brokenAudioReferences, largeFiles: fileInspection.largeFiles, unsupportedFormats, licenseWarnings, productionGateWarnings, renderReportPaths: parsed.renderReportPaths, resolvedRenderReports: productionGate.resolvedReports, qualityReportPaths: parsed.qualityReportPaths, resolvedQualityReports: qualityGate.resolvedReports, naming, tracks, sessionSummary: session ? { targetDurationMinutes: session.targetDurationMinutes, slots: Array.isArray(session.schedule) ? session.schedule.length : 0 } : undefined, license: licenseManifest ?? { output: "generated_original", dependencies: ["Built-in safe synth unless external assets are added later."] }, packageNotes: ["ZIP/MP3/OGG export requires a verified archive/encoder step.", "ZIP bundle creation can be completed with export package archive tools after this music package manifest passes checks.", "MP3/OGG exports require verified encoded files; this tool reports missing encoded formats instead of fabricating them.", "Production export requires production_candidate render evidence from render_midi_with_soundfont."] };
       const manifestFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
       const blockingErrors = [
         ...fileInspection.missingFiles.map((filePath) => `Missing export file: ${filePath}`),
