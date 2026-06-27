@@ -12,9 +12,9 @@ import {
   getProjectManifest,
   getProjectStoredFilePath,
   getProjectWorkspaceDirectory,
-  maxProjectFileBytes,
   publishProject,
   validateProjectAssetBytes,
+  validateProjectTextFileContent,
   validateProject,
   writeProjectAsset,
   writeProjectFile
@@ -221,9 +221,7 @@ async function validateDistBeforePublish(distRoot: string, files: string[], entr
       try {
         assertSafeProjectFilePath(file);
         const content = await readFile(absolutePath, "utf8");
-        if (Buffer.byteLength(content, "utf8") > maxProjectFileBytes) {
-          errors.push(`Project file content exceeds 1 MiB: ${file}`);
-        }
+        validateProjectTextFileContent(file, content);
       } catch (error) {
         errors.push(`Invalid dist text file ${file}: ${error instanceof Error ? error.message : "invalid file"}`);
       }

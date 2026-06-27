@@ -133,15 +133,32 @@ function findPlugin(plugins: PluginRecord[], pluginId: string): PluginRecord | u
   return plugins.find((plugin) => plugin.id === pluginId || plugin.id === `skill:${pluginId}`);
 }
 
+function expandedDiscoveryTerms(query: string): string[] {
+  const normalized = query.toLowerCase().trim();
+  if (!normalized) return [];
+  const terms = new Set(normalized.split(/\s+/).filter(Boolean));
+  if (/\b(?:ppt|powerpoint|slide|slides|deck|presentation)\b/.test(normalized)) {
+    for (const term of ["presentation", "create_html_deck", "create_pptx_deck", "deliver_static_project", "publish_project", "coding"]) terms.add(term);
+  }
+  if (/\b(?:project|demo|html|site|app|create|write|publish|deliver|build)\b/.test(normalized)) {
+    for (const term of ["coding", "create_project", "write_project_file", "deliver_static_project", "publish_project"]) terms.add(term);
+  }
+  if (/\b(?:status|continue|resume|stopped|stop|why)\b/.test(normalized)) {
+    for (const term of ["job", "diagnose_code_mcp_status", "project", "coding", "deliver_static_project", "create_html_deck"]) terms.add(term);
+  }
+  return [...terms];
+}
+
 function filterPlugins(plugins: PluginRecord[], input: z.infer<typeof discoverPluginsSchema>): PluginRecord[] {
-  const query = input.query.toLowerCase();
+  const queryTerms = expandedDiscoveryTerms(input.query);
   return plugins
     .filter((plugin) => input.includeDisabled || plugin.status !== "disabled")
     .filter((plugin) => !input.status || plugin.status === input.status)
     .filter((plugin) => !input.category || plugin.category === input.category)
     .filter((plugin) => {
-      if (!query) return true;
-      return [plugin.id, plugin.name, plugin.description, plugin.category, plugin.capabilities.join(" "), plugin.toolNames.join(" ")].join(" ").toLowerCase().includes(query);
+      if (queryTerms.length === 0) return true;
+      const searchable = [plugin.id, plugin.name, plugin.description, plugin.category, plugin.capabilities.join(" "), plugin.toolNames.join(" ")].join(" ").toLowerCase();
+      return queryTerms.some((term) => searchable.includes(term));
     })
     .map((plugin) => input.includeTools ? plugin : { ...plugin, toolNames: [], capabilities: plugin.capabilities.slice(0, 8) });
 }

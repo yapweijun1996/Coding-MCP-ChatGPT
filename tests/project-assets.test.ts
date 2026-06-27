@@ -88,6 +88,23 @@ test("writeProjectFile accepts web app manifests", async () => {
   });
 });
 
+test("writeProjectFile and patchProjectFile reject unsafe SVG text content", async () => {
+  await withProject(async (root, projectId) => {
+    await assert.rejects(
+      writeProjectFile(root, projectId, "icons/bad.svg", "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>"),
+      /SVG assets must not contain script tags/
+    );
+
+    const original = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\"><rect width=\"10\" height=\"10\"/></svg>";
+    await writeProjectFile(root, projectId, "icons/good.svg", original);
+    await assert.rejects(
+      patchProjectFile(root, projectId, "icons/good.svg", [{ find: "</svg>", replace: "<script>alert(1)</script></svg>" }]),
+      /SVG assets must not contain script tags/
+    );
+    assert.equal(await readProjectFile(root, projectId, "icons/good.svg"), original);
+  });
+});
+
 test("readProjectFilePartial truncates oversized files instead of throwing", async () => {
   await withProject(async (root, projectId) => {
     const body = "A".repeat(10000);

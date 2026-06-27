@@ -32,6 +32,22 @@ test("MCP plugin registry discovers, registers, toggles, tests, versions, and do
     const discoveryPayload = discovered.structuredContent as { plugins: Array<{ id: string; source: string; toolNames: string[] }> };
     assert.equal(discoveryPayload.plugins.some((plugin) => plugin.id === "skill:mcp-plugin-registry" && plugin.source === "built_in_skill"), true);
 
+    const statusDiscovery = await callTool("discover_mcp_plugins", { projectId: project.id, query: "status" }, ctx);
+    assert.equal(statusDiscovery.ok, true);
+    const statusPayload = statusDiscovery.structuredContent as { plugins: Array<{ id: string; toolNames: string[] }> };
+    const statusCoding = statusPayload.plugins.find((plugin) => plugin.id === "skill:coding");
+    assert.ok(statusCoding, "status-oriented discovery should still expose coding delivery tools for next actions");
+    assert.ok(statusCoding.toolNames.includes("deliver_static_project"));
+    assert.ok(statusCoding.toolNames.includes("create_html_deck"));
+
+    const pptDiscovery = await callTool("discover_mcp_plugins", { projectId: project.id, query: "make ppt today news" }, ctx);
+    assert.equal(pptDiscovery.ok, true);
+    const pptPayload = pptDiscovery.structuredContent as { plugins: Array<{ id: string; toolNames: string[] }> };
+    const pptCoding = pptPayload.plugins.find((plugin) => plugin.id === "skill:coding");
+    assert.ok(pptCoding, "PPT intent should discover project creation and publishing tools");
+    assert.ok(pptCoding.toolNames.includes("create_html_deck"));
+    assert.ok(pptCoding.toolNames.includes("publish_project"));
+
     const registered = await callTool("register_mcp_plugin", {
       projectId: project.id,
       pluginId: "project:handoff",

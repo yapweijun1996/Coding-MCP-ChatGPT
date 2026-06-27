@@ -503,6 +503,15 @@ export function validateProjectAssetBytes(relativePath: string, buffer: Buffer, 
   if (extension === ".svg") validateSvgAsset(buffer);
 }
 
+export function validateProjectTextFileContent(relativePath: string, content: string): void {
+  if (Buffer.byteLength(content, "utf8") > maxProjectFileBytes) {
+    throw new Error("Project file content exceeds 1 MiB.");
+  }
+  if (path.extname(relativePath).toLowerCase() === ".svg") {
+    validateSvgAsset(Buffer.from(content, "utf8"));
+  }
+}
+
 function maxProjectAssetBytesForExtension(extension: string): number {
   if (extension === ".zip") return maxProjectArchiveAssetBytes;
   if (extension === ".pptx") return maxProjectPresentationAssetBytes;
@@ -1240,20 +1249,19 @@ export async function deleteProjectTask(projectRoot: string, projectId: string, 
 
 export async function writeProjectFile(projectRoot: string, projectId: string, relativePath: string, content: string): Promise<ProjectFileInfo> {
   return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
-  if (Buffer.byteLength(content, "utf8") > maxProjectFileBytes) {
-    throw new Error("Project file content exceeds 1 MiB.");
-  }
+  const safeRelativePath = assertSafeProjectFilePath(relativePath);
+  validateProjectTextFileContent(safeRelativePath, content);
 
   const metadata = await getProject(projectRoot, projectId);
   if (metadata.status === "deleted") throw new Error("Cannot write to a deleted project.");
 
-  const absolutePath = resolveProjectFilePath(projectRoot, projectId, relativePath);
+  const absolutePath = resolveProjectStoredPath(projectRoot, projectId, safeRelativePath);
   await mkdir(path.dirname(absolutePath), { recursive: true });
   await atomicWrite(absolutePath, content);
 
   const fileStat = await stat(absolutePath);
   const file = {
-    path: assertSafeProjectFilePath(relativePath),
+    path: safeRelativePath,
     size: fileStat.size,
     modifiedAt: fileStat.mtime.toISOString()
   };
@@ -1303,6 +1311,7 @@ export async function patchProjectFile(
   if (Buffer.byteLength(content, "utf8") > maxProjectFileBytes) {
     throw new Error("Patched project file content exceeds 1 MiB.");
   }
+  validateProjectTextFileContent(safeRelativePath, content);
 
   await atomicWrite(absolutePath, content);
   const fileStat = await stat(absolutePath);
@@ -1451,11 +1460,36 @@ function extractLocalHtmlReferences(entryFile: string, html: string): string[] {
   return [...references].sort();
 }
 
+interface ProjectTextFileContent {
+  path: string;
+  content: string;
+}
+
+function hasRenderedAudioAsset(files: ProjectFileInfo[]): boolean {
+  return files.some((file) => [".mp3", ".wav", ".ogg"].includes(path.extname(file.path).toLowerCase()));
+}
+
+function validateRealisticMusicDelivery(files: ProjectFileInfo[], textFiles: ProjectTextFileContent[]): string[] {
+  if (hasRenderedAudioAsset(files)) return [];
+
+  const combinedText = textFiles.map((file) => file.content).join("\n");
+  const realisticMusicIntent = /\b(?:piano|jazz|starbucks|coffeehouse|coffee\s+house|cafe|caf[eé]|background\s+music|lounge|bossa|restaurant|hotel\s+lobby)\b/i.test(combinedText);
+  if (!realisticMusicIntent) return [];
+
+  const webAudioSynthesis = /\b(?:createOscillator|OscillatorNode|createBufferSource|AudioBufferSourceNode|createBuffer)\b/i.test(combinedText);
+  if (!webAudioSynthesis) return [];
+
+  return [
+    "Pure Web Audio synthesis is blocked for realistic piano/jazz/cafe background music deliverables. Use the music workflow to compose/render MIDI into a real WAV/MP3/OGG audio asset, then publish an HTML audio player instead."
+  ];
+}
+
 export async function validateProject(projectRoot: string, projectId: string, entryFile?: string, profile: ProjectValidationProfile = "static_html"): Promise<ProjectValidationResult> {
   return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
   const metadata = await getProject(projectRoot, projectId);
   const warnings: string[] = [];
   const errors: string[] = [];
+  const textFiles: ProjectTextFileContent[] = [];
   const checkedAt = new Date().toISOString();
   const files = await listProjectFiles(projectRoot, projectId);
   const filePaths = new Set(files.map((file) => file.path));
@@ -1483,7 +1517,18 @@ export async function validateProject(projectRoot: string, projectId: string, en
     if (file.size > maxBytes) {
       errors.push(`File exceeds max size: ${file.path}`);
     }
+    if (isProjectTextFilePath(file.path) && file.size <= maxProjectFileBytes) {
+      try {
+        textFiles.push({
+          path: file.path,
+          content: await readProjectFile(projectRoot, projectId, file.path, maxProjectFileBytes)
+        });
+      } catch (error) {
+        errors.push(`Unable to inspect text file ${file.path}: ${error instanceof Error ? error.message : "read failed"}`);
+      }
+    }
   }
+  errors.push(...validateRealisticMusicDelivery(files, textFiles));
 
   const entry = files.find((file) => file.path === safeEntryFile);
   if (!entry) {
