@@ -1,6 +1,17 @@
 import type { BlogPost, BlogTheme } from "./store.js";
 import { renderMarkdown, escapeBlogHtml as escapeHtml } from "./markdown.js";
 import { sanitizeBlogCss, sanitizeBlogHtml } from "./sanitize-html.js";
+import { buildBlogIndexHead, buildBlogPostHead } from "../http/seo.js";
+
+function blogRoot(baseUrl: string): string {
+  return baseUrl.replace(/\/$/, "");
+}
+
+function absoluteImageUrl(baseUrl: string, coverImageUrl: string | null): string | undefined {
+  if (!coverImageUrl) return undefined;
+  if (/^https?:\/\//i.test(coverImageUrl)) return coverImageUrl;
+  return `${blogRoot(baseUrl)}/${coverImageUrl.replace(/^\/+/, "")}`;
+}
 
 function renderBody(post: BlogPost): string {
   return post.format === "html" ? sanitizeBlogHtml(post.content) : renderMarkdown(post.content);
@@ -35,7 +46,7 @@ function formatDate(iso: string | null): string {
   return d.toISOString().slice(0, 10);
 }
 
-function shell(theme: BlogTheme, bodyInner: string, pageTitle: string, metaDescription?: string): string {
+function shell(theme: BlogTheme, bodyInner: string, pageTitle: string, metaDescription?: string, seoHead?: string): string {
   const title = escapeHtml(theme.title || "Blog");
   const headerHtml = theme.headerHtml ? sanitizeBlogHtml(theme.headerHtml) : `<a href="/blog/"><h1 class="blog-title">${title}</h1></a>`;
   const footerHtml = theme.footerHtml ? sanitizeBlogHtml(theme.footerHtml) : "";
@@ -48,6 +59,7 @@ function shell(theme: BlogTheme, bodyInner: string, pageTitle: string, metaDescr
 <title>${escapeHtml(pageTitle)}</title>
 ${metaDescription ? `<meta name="description" content="${escapeHtml(metaDescription)}">` : ""}
 <link rel="alternate" type="application/rss+xml" title="${title}" href="/blog/rss.xml">
+${seoHead ?? ""}
 <style>${baseCss}\n${themeCss}</style>
 </head>
 <body>
@@ -60,7 +72,7 @@ ${footerHtml ? `<footer class="blog-footer">${footerHtml}</footer>` : ""}
 </html>`;
 }
 
-export function renderBlogIndex(posts: BlogPost[], theme: BlogTheme): string {
+export function renderBlogIndex(posts: BlogPost[], theme: BlogTheme, baseUrl = ""): string {
   const cards = posts.length === 0
     ? `<p class="blog-empty">No posts published yet.</p>`
     : posts.map((post) => `
@@ -69,7 +81,8 @@ export function renderBlogIndex(posts: BlogPost[], theme: BlogTheme): string {
         <p class="post-meta">${formatDate(post.publishedAt ?? post.createdAt)}${post.tags.length ? ` · ${post.tags.map((tag) => escapeHtml(tag)).join(", ")}` : ""}</p>
         ${post.excerpt ? `<p class="post-excerpt">${escapeHtml(post.excerpt)}</p>` : ""}
       </article>`).join("");
-  return shell(theme, cards, theme.title || "Blog");
+  const seoHead = baseUrl ? buildBlogIndexHead({ title: theme.title || "Blog", url: `${blogRoot(baseUrl)}/blog/` }) : undefined;
+  return shell(theme, cards, theme.title || "Blog", undefined, seoHead);
 }
 
 function escapeXml(value: string): string {
@@ -106,7 +119,7 @@ ${items}
 </rss>`;
 }
 
-export function renderBlogPost(post: BlogPost, theme: BlogTheme): string {
+export function renderBlogPost(post: BlogPost, theme: BlogTheme, baseUrl = ""): string {
   const body = `
     <a class="blog-back" href="/blog/">← All posts</a>
     <article class="post-full">
@@ -114,5 +127,17 @@ export function renderBlogPost(post: BlogPost, theme: BlogTheme): string {
       <p class="post-meta">${formatDate(post.publishedAt ?? post.createdAt)}${post.tags.length ? ` · ${post.tags.map((tag) => escapeHtml(tag)).join(", ")}` : ""}</p>
       <div class="post-body">${renderBody(post)}</div>
     </article>`;
-  return shell(theme, body, `${post.title} — ${theme.title || "Blog"}`, post.seoDescription ?? post.excerpt ?? undefined);
+  const description = post.seoDescription ?? post.excerpt ?? undefined;
+  const seoHead = baseUrl
+    ? buildBlogPostHead({
+      title: post.title,
+      description,
+      url: `${blogRoot(baseUrl)}/blog/${encodeURIComponent(post.slug)}`,
+      imageUrl: absoluteImageUrl(baseUrl, post.coverImageUrl),
+      publishedAt: post.publishedAt ?? post.createdAt,
+      modifiedAt: post.updatedAt,
+      siteName: theme.title || "Blog"
+    })
+    : undefined;
+  return shell(theme, body, `${post.title} — ${theme.title || "Blog"}`, description, seoHead);
 }

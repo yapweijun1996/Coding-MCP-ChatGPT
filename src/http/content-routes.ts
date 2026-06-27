@@ -26,6 +26,7 @@ import {
 } from "../user-store.js";
 import { configuredHostsAreSeparate, contentUrl, sameConfiguredHost } from "./hosts.js";
 import { asyncRoute } from "./util.js";
+import { buildHomepageSeoTags, buildRobotsTxt, buildSitemapXml, injectHeadHtml, type SitemapEntry } from "./seo.js";
 
 const strictProjectContentCsp = "sandbox allow-scripts allow-popups allow-modals; form-action 'none';";
 const contentHostProjectCsp = "sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads; base-uri 'none'; form-action 'self';";
@@ -43,7 +44,7 @@ function injectCanonicalLink(html: string, canonicalUrl: string): string {
   return `${link}\n${html}`;
 }
 
-async function sendPublishedProjectFile(req: express.Request, res: express.Response, root: string, projectId: string, filename: string, canonicalUrl?: string, requireShareAccess = true, htmlCsp = strictProjectContentCsp): Promise<boolean> {
+async function sendPublishedProjectFile(req: express.Request, res: express.Response, root: string, projectId: string, filename: string, canonicalUrl?: string, requireShareAccess = true, htmlCsp = strictProjectContentCsp, injectHomepageSeo = false): Promise<boolean> {
   const project = await getProject(root, projectId);
   if (project.status !== "published") return false;
   if (requireShareAccess && !await canViewPublishedProjectShare({ cookieHeader: req.header("cookie"), projectRoot: root, shareAccess: project.shareAccess })) {
@@ -60,7 +61,16 @@ async function sendPublishedProjectFile(req: express.Request, res: express.Respo
   }
   if (isProjectTextFilePath(filename)) {
     const content = await readProjectFile(root, project.id, filename, 1024 * 1024);
-    res.type(contentType).send(contentType === "text/html" && canonicalUrl ? injectCanonicalLink(content, canonicalUrl) : content);
+    let html = content;
+    if (contentType === "text/html" && canonicalUrl) {
+      // The homepage gets full social/discovery metadata sourced from project metadata (not the
+      // arbitrary HTML body), injected only where the author left a gap. Other shares keep the
+      // existing canonical-only behavior.
+      html = injectHomepageSeo
+        ? injectHeadHtml(content, buildHomepageSeoTags(content, { title: project.title, description: project.summary || undefined, url: canonicalUrl }))
+        : injectCanonicalLink(content, canonicalUrl);
+    }
+    res.type(contentType).send(html);
     return true;
   }
 
@@ -156,7 +166,8 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
       const project = await getProject(root, home.homeProjectId);
       if (project.status !== "published") return "unavailable";
       const filename = relativePath && relativePath !== "/" ? relativePath.replace(/^\/+/, "") : project.entryFile;
-      return await sendPublishedProjectFile(req, res, root, home.homeProjectId, filename, `${contentBaseUrl.replace(/\/$/, "")}/`, false, projectHtmlCspForRequest(req))
+      const isEntryDocument = !relativePath || relativePath === "/";
+      return await sendPublishedProjectFile(req, res, root, home.homeProjectId, filename, `${contentBaseUrl.replace(/\/$/, "")}/`, false, projectHtmlCspForRequest(req), isEntryDocument)
         ? "served"
         : relativePath ? "not_found" : "unavailable";
     } catch {
@@ -302,10 +313,36 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
     }
   }));
 
+  app.get("/robots.txt", (_req, res) => {
+    res.type("text/plain").send(buildRobotsTxt(`${publicBaseUrl.replace(/\/$/, "")}/sitemap.xml`, ["/admin", "/outcome"]));
+  });
+
+  app.get("/sitemap.xml", asyncRoute(async (_req, res) => {
+    const publicRoot = publicBaseUrl.replace(/\/$/, "");
+    const entries: SitemapEntry[] = [];
+    // The homepage is the one published project promoted to "/"; it lives on the content host.
+    // Per-share /share/:id preview URLs are ephemeral and deliberately excluded from the sitemap.
+    const home = getHomepage();
+    if (home.homeProjectId && home.homeOwnerUserId) {
+      entries.push({ loc: `${contentBaseUrl.replace(/\/$/, "")}/`, changefreq: "weekly", priority: "1.0" });
+    }
+    entries.push({ loc: `${publicRoot}/blog/`, changefreq: "daily", priority: "0.8" });
+    const posts = await listBlogPosts({ status: "published" });
+    for (const post of posts) {
+      entries.push({
+        loc: `${publicRoot}/blog/${encodeURIComponent(post.slug)}`,
+        lastmod: post.publishedAt ?? post.updatedAt ?? undefined,
+        changefreq: "monthly",
+        priority: "0.6"
+      });
+    }
+    res.type("application/xml").send(buildSitemapXml(entries));
+  }));
+
   app.get(["/blog", "/blog/"], asyncRoute(async (_req, res) => {
     const [posts, theme] = await Promise.all([listBlogPosts({ status: "published" }), getBlogTheme()]);
     res.setHeader("Content-Security-Policy", blogCsp);
-    res.type("html").send(renderBlogIndex(posts, theme));
+    res.type("html").send(renderBlogIndex(posts, theme, publicBaseUrl));
   }));
 
   app.get("/blog/rss.xml", asyncRoute(async (_req, res) => {
@@ -321,7 +358,7 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
     }
     const theme = await getBlogTheme();
     res.setHeader("Content-Security-Policy", blogCsp);
-    res.type("html").send(renderBlogPost(post, theme));
+    res.type("html").send(renderBlogPost(post, theme, publicBaseUrl));
   }));
 
   // Fallback: serve root-level assets of the homepage project (e.g. /styles.css, /assets/app.js).

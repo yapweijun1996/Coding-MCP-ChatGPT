@@ -198,6 +198,51 @@ test("blog routes render index and post, and gate writes to admins", async () =>
   });
 });
 
+test("served blog HTML carries OG/JSON-LD SEO tags, and sitemap.xml + robots.txt are crawlable", async () => {
+  await initializeBlogStore({ statePath: process.env.BLOG_STATE_PATH! });
+  const publishTool = blogTools.find((tool) => tool.definition.name === "publish_blog_post");
+  assert.ok(publishTool);
+  const ctxBase = { publicBaseUrl: "https://example.test", workspaceRoot: root, commandTimeoutMs: 1000, shareRoot: root, artifactRoot: root, feedbackRoot: root, projectRoot: root, clientId: "test" };
+
+  await withServer(async (baseUrl) => {
+    const login = await fetch(`${baseUrl}/admin/api/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: "admin@example.test", password: "test-admin-password" }) });
+    const cookie = login.headers.get("set-cookie")!.split(";")[0];
+    const session = await (await fetch(`${baseUrl}/admin/api/session`, { headers: { Cookie: cookie } })).json() as { user?: { id?: string } };
+    const adminId = session.user?.id;
+    assert.ok(adminId);
+
+    const created = await publishTool.handler({ title: "SEO Ready Post", content: "Body text.", seoDescription: "A crawlable summary.", coverImageUrl: "https://cdn.test/cover.png" }, { ...ctxBase, userId: adminId });
+    assert.equal(created.ok, true);
+
+    // Served blog post HTML must actually contain the SEO tags (not just generate them).
+    const postHtml = await (await fetch(`${baseUrl}/blog/seo-ready-post`)).text();
+    assert.match(postHtml, /<link rel="canonical" href="https:\/\/example\.test\/blog\/seo-ready-post">/);
+    assert.match(postHtml, /<meta property="og:type" content="article">/);
+    assert.match(postHtml, /<meta property="og:image" content="https:\/\/cdn\.test\/cover\.png">/);
+    assert.match(postHtml, /<meta name="twitter:card" content="summary_large_image">/);
+    const ld = postHtml.match(/<script type="application\/ld\+json">(.+?)<\/script>/);
+    assert.ok(ld, "served post must include JSON-LD");
+    assert.equal(JSON.parse(ld![1])["@type"], "BlogPosting");
+
+    // Blog index carries website OG.
+    assert.match(await (await fetch(`${baseUrl}/blog/`)).text(), /<meta property="og:type" content="website">/);
+
+    // sitemap.xml lists the blog index and the published post.
+    const sitemap = await fetch(`${baseUrl}/sitemap.xml`);
+    assert.match(sitemap.headers.get("content-type") ?? "", /xml/);
+    const sitemapBody = await sitemap.text();
+    assert.match(sitemapBody, /<loc>https:\/\/example\.test\/blog\/<\/loc>/);
+    assert.match(sitemapBody, /<loc>https:\/\/example\.test\/blog\/seo-ready-post<\/loc>/);
+
+    // robots.txt allows crawling and advertises the sitemap.
+    const robots = await fetch(`${baseUrl}/robots.txt`);
+    assert.equal(robots.status, 200);
+    const robotsBody = await robots.text();
+    assert.match(robotsBody, /Sitemap: https:\/\/example\.test\/sitemap\.xml/);
+    assert.match(robotsBody, /Disallow: \/admin/);
+  });
+});
+
 test("admin API lists, deletes blog posts and saves the theme", async () => {
   await initializeBlogStore({ statePath: process.env.BLOG_STATE_PATH! });
   await upsertBlogPost({ title: "Admin Managed", content: "body", tags: ["ops"] });
