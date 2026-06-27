@@ -2655,25 +2655,101 @@ function productionRenderBlockersForPack(pack: JazzPackRecord | undefined, reque
   return blockers;
 }
 
-async function resolveProductionSoundfont(ctx: ToolContext, parsed: z.infer<typeof renderMidiWithSoundfontInputSchema>) {
-  let registry: { packs?: JazzPackRecord[]; readyPackIds?: string[] } | undefined;
-  try {
-    registry = JSON.parse(await readProjectFile(ctx.projectRoot, parsed.projectId, "music/jazz-instrument-packs.json", 2 * 1024 * 1024));
-  } catch {
-    registry = undefined;
+// Pure: from discovered suggestedRegistration payloads, keep only the ones safe to auto-register
+// without human review — production_candidate, license-approved, commercial-safe — narrowed to the
+// render call's requested pack id/path so we never silently register a different instrument than
+// was asked for. This is what bridges "discovered & license-cleared" to "registered ready pack".
+export function selectAutoRegistrablePacks(
+  registrations: Array<Record<string, unknown> | undefined>,
+  opts: { soundfontPackId?: string; soundfontPath?: string }
+): z.infer<typeof jazzInstrumentPackSchema>[] {
+  const selected: z.infer<typeof jazzInstrumentPackSchema>[] = [];
+  for (const raw of registrations) {
+    if (!raw) continue;
+    if (raw.qualityTier !== "production_candidate") continue;
+    if (raw.productionUseApproved !== true) continue;
+    if (raw.commercialUseAllowed !== true) continue;
+    const parsed = jazzInstrumentPackSchema.safeParse(raw);
+    if (!parsed.success) continue;
+    const pack = parsed.data;
+    if (opts.soundfontPackId && pack.packId !== opts.soundfontPackId) continue;
+    if (opts.soundfontPath && !pack.assetPaths.includes(opts.soundfontPath)) continue;
+    selected.push(pack);
   }
-  const packs = registry?.packs ?? [];
-  const pack = packs.find((candidate) => {
+  return selected;
+}
+
+async function readJazzPackRegistry(ctx: ToolContext, projectId: string): Promise<{ packs?: JazzPackRecord[]; readyPackIds?: string[] } | undefined> {
+  try {
+    return JSON.parse(await readProjectFile(ctx.projectRoot, projectId, "music/jazz-instrument-packs.json", 2 * 1024 * 1024));
+  } catch {
+    return undefined;
+  }
+}
+
+function findRegisteredPack(registry: { packs?: JazzPackRecord[] } | undefined, parsed: z.infer<typeof renderMidiWithSoundfontInputSchema>): JazzPackRecord | undefined {
+  return (registry?.packs ?? []).find((candidate) => {
     if (parsed.soundfontPackId && candidate.packId === parsed.soundfontPackId) return true;
     if (parsed.soundfontPath && candidate.assetPaths.includes(parsed.soundfontPath)) return true;
     return false;
   });
-  const blockers = productionRenderBlockersForPack(pack, parsed.soundfontPath);
-  if (blockers.length || !pack) return { ok: false as const, blockers, pack };
+}
+
+async function buildResolvedSoundfont(ctx: ToolContext, parsed: z.infer<typeof renderMidiWithSoundfontInputSchema>, pack: JazzPackRecord) {
   const soundfontPath = instrumentAssetPathForPack(pack, parsed.soundfontPath)!;
   const renderer = rendererForAssetPath(soundfontPath) ?? rendererForPack(pack)!;
   const absolutePath = await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, soundfontPath);
-  return { ok: true as const, pack, renderer, soundfontPath, absolutePath, blockers: [] };
+  return { ok: true as const, pack, renderer, soundfontPath, absolutePath, blockers: [] as string[] };
+}
+
+// Self-heal the registry↔renderer gap. discover_soundfont_packs already produces a
+// suggestedRegistration shaped exactly like manage_jazz_instrument_packs input, but nothing
+// auto-applies it, so a license-cleared production_candidate SoundFont sitting in project assets
+// renders as "no registered ready pack". Discover, auto-register the safe ones, and (when we
+// cannot) return the exact manage_jazz_instrument_packs call so the agent's next step is unambiguous.
+async function autoRegisterDiscoveredProductionPacks(ctx: ToolContext, parsed: z.infer<typeof renderMidiWithSoundfontInputSchema>): Promise<{ registered: boolean; remediation: string[] }> {
+  let discovery: Awaited<ReturnType<typeof discoverSoundfontPacks>>;
+  try {
+    discovery = await discoverSoundfontPacks(ctx, discoverSoundfontPacksInputSchema.parse({ projectId: parsed.projectId, includeLocalMusicPacks: false }));
+  } catch {
+    return { registered: false, remediation: [] };
+  }
+  const selected = selectAutoRegistrablePacks(discovery.candidates.map((candidate) => candidate.suggestedRegistration), { soundfontPackId: parsed.soundfontPackId, soundfontPath: parsed.soundfontPath });
+  if (!selected.length) {
+    const remediation = discovery.ready
+      .filter((candidate) => candidate.suggestedRegistration && candidate.projectAssetPath)
+      .map((candidate) => `A ready SoundFont (${candidate.projectAssetPath}) is in project assets but not registered. Call manage_jazz_instrument_packs with packs=[${JSON.stringify(candidate.suggestedRegistration)}], then re-run the render.`);
+    return { registered: false, remediation };
+  }
+  const manageInput = manageJazzInstrumentPacksInputSchema.parse({ projectId: parsed.projectId, packs: selected });
+  const registry = await manageJazzInstrumentPacks(manageInput, ctx.projectRoot);
+  await writeProjectFile(ctx.projectRoot, parsed.projectId, manageInput.outputPath, `${JSON.stringify(registry, null, 2)}\n`);
+  await writeProjectFile(ctx.projectRoot, parsed.projectId, manageInput.outputLicenseManifestPath, `${JSON.stringify(registry.licenseManifest, null, 2)}\n`);
+  return {
+    registered: registry.readyPackIds.length > 0,
+    remediation: registry.readyPackIds.length ? [] : ["Auto-registration analyzed the discovered SoundFont but it did not pass as production-ready; inspect its license sidecar and SHA-256."]
+  };
+}
+
+async function resolveProductionSoundfont(ctx: ToolContext, parsed: z.infer<typeof renderMidiWithSoundfontInputSchema>) {
+  const registry = await readJazzPackRegistry(ctx, parsed.projectId);
+  let pack = findRegisteredPack(registry, parsed);
+  let blockers = productionRenderBlockersForPack(pack, parsed.soundfontPath);
+  if (!blockers.length && pack) return buildResolvedSoundfont(ctx, parsed, pack);
+
+  // Only self-heal when no registry exists yet — never clobber a populated registry, where a
+  // miss means "no pack matches this request" and the right answer is remediation, not rewrite.
+  if (!registry?.packs?.length) {
+    const auto = await autoRegisterDiscoveredProductionPacks(ctx, parsed);
+    if (auto.registered) {
+      const refreshed = await readJazzPackRegistry(ctx, parsed.projectId);
+      pack = findRegisteredPack(refreshed, parsed);
+      blockers = productionRenderBlockersForPack(pack, parsed.soundfontPath);
+      if (!blockers.length && pack) return buildResolvedSoundfont(ctx, parsed, pack);
+    }
+    return { ok: false as const, blockers: [...blockers, ...auto.remediation], pack };
+  }
+  return { ok: false as const, blockers, pack };
 }
 
 async function resolveProductionPackForRole(ctx: ToolContext, input: {
