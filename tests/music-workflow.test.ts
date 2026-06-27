@@ -370,7 +370,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
       outputFormats: ["wav", "mp3"],
       stems: true
     }, ctx);
-    assert.equal(renderResult.ok, true);
+    assert.equal(renderResult.ok, false);
     const wavPath = await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/rendered-preview.wav");
     const wav = await readFile(wavPath);
     assert.equal(wav.subarray(0, 4).toString("ascii"), "RIFF");
@@ -963,7 +963,7 @@ test("compose_music creates a shaped piano sketch instead of block-chord placeho
       outputAudioPath: "music/piano-quality.wav",
       outputReportPath: "music/piano-quality-render.json"
     }, ctx);
-    assert.equal(renderResult.ok, true);
+    assert.equal(renderResult.ok, false);
     const qaResult = await inspect!.handler({
       projectId: project.id,
       audioPath: "music/piano-quality.wav",
@@ -978,6 +978,72 @@ test("compose_music creates a shaped piano sketch instead of block-chord placeho
     assert.deepEqual(qa.technicalReport.silenceGaps, []);
     assert.equal(qa.musicalityReport.hasPlan, true);
     assert.ok(qa.musicalityReport.mechanicalScore < 0.72);
+
+    const roboticComposition = {
+      ...composition,
+      performance: undefined,
+      musicalityReport: undefined,
+      tracks: Object.fromEntries(Object.entries(composition.tracks).map(([track, notes]) => [
+        track,
+        notes.map((note, index) => ({
+          ...note,
+          startBeat: Math.round(note.startBeat * 4) / 4,
+          velocity: 64 + (index % 2)
+        }))
+      ]))
+    };
+    await writeProjectFile(ctx.projectRoot, project.id, "music/robotic-quality.json", `${JSON.stringify(roboticComposition, null, 2)}\n`);
+    const roboticRenderResult = await render!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/robotic-quality.json",
+      sampleRate: 16000,
+      instrumentMap: { piano: "warm_acoustic_piano" },
+      outputAudioPath: "music/robotic-quality.wav",
+      outputReportPath: "music/robotic-quality-render.json"
+    }, ctx);
+    assert.equal(roboticRenderResult.ok, false);
+    const roboticQaResult = await inspect!.handler({
+      projectId: project.id,
+      audioPath: "music/robotic-quality.wav",
+      compositionManifestPath: "music/robotic-quality.json",
+      useCase: "solo piano sketch",
+      checkLoop: false,
+      outputPath: "music/robotic-quality-qa.json"
+    }, ctx);
+    assert.equal(roboticQaResult.ok, false);
+    const roboticQa = roboticQaResult.structuredContent as {
+      productionSafe: boolean;
+      blockingReasons: string[];
+      musicalityReport: { hasHumanizedPerformance: boolean; mechanicalScore: number };
+      findings: Array<{ severity: string; message: string }>;
+    };
+    assert.equal(roboticQa.productionSafe, false);
+    assert.equal(roboticQa.musicalityReport.hasHumanizedPerformance, false);
+    assert.ok(roboticQa.musicalityReport.mechanicalScore >= 0);
+    assert.ok(roboticQa.blockingReasons.some((reason) => reason.includes("Robotic music output is banned")));
+    assert.ok(roboticQa.findings.some((finding) => finding.severity === "high" && finding.message.includes("Robotic music output is banned")));
+
+    const shortComposeResult = await compose!.handler({
+      projectId: project.id,
+      title: "Short Non Loop",
+      style: "smooth_piano",
+      tempo: 72,
+      durationSeconds: 5,
+      instruments: ["piano"],
+      loopable: false,
+      outputManifestPath: "music/short-form.json",
+      outputMidiPath: "music/short-form.mid"
+    }, ctx);
+    assert.equal(shortComposeResult.ok, true);
+    const shortComposition = shortComposeResult.structuredContent as {
+      durationSeconds: number;
+      tempo: number;
+      compositionPlan: { form: Array<{ name: string; bars: number }> };
+      sections: Array<{ name: string; bars: number }>;
+    };
+    const expectedBars = Math.max(4, Math.round(Math.round(shortComposition.durationSeconds / 60 * shortComposition.tempo) / 4));
+    assert.equal(shortComposition.compositionPlan.form.reduce((sum, section) => sum + section.bars, 0), expectedBars);
+    assert.equal(shortComposition.sections.reduce((sum, section) => sum + section.bars, 0), expectedBars);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -990,6 +1056,7 @@ test("production music workflow publishes auditions, extends arrangements, assem
     const project = await createProject(ctx.projectRoot, { title: "Production music", createdByClientId: "producer" });
     const variations = getToolModule("generate_music_variations");
     const publishDemo = getToolModule("publish_music_audition_demo");
+    const render = getToolModule("render_midi_to_audio");
     const extend = getToolModule("extend_music_arrangement");
     const session = getToolModule("assemble_music_session");
     const originalSession = getToolModule("assemble_original_music_session");
@@ -998,21 +1065,22 @@ test("production music workflow publishes auditions, extends arrangements, assem
     const master = getToolModule("apply_music_mix_master_chain");
     const productionReview = getToolModule("review_music_production_export");
     const exportProject = getToolModule("export_music_project");
-    for (const [name, tool] of Object.entries({ variations, publishDemo, extend, session, originalSession, normalize, productionPlan, master, productionReview, exportProject })) assert.ok(tool, `${name} registered`);
+    for (const [name, tool] of Object.entries({ variations, publishDemo, render, extend, session, originalSession, normalize, productionPlan, master, productionReview, exportProject })) assert.ok(tool, `${name} registered`);
 
     const variationsResult = await variations!.handler({
       projectId: project.id,
       brief: "warm cafe jazz with piano, upright bass, brushes",
       styles: ["cafe_jazz", "bossa_nova", "lo_fi"],
       durationSeconds: 12,
-      renderAudio: true
+      renderAudio: false
     }, ctx);
     assert.equal(variationsResult.ok, true);
-    const variationsPayload = variationsResult.structuredContent as { variations: Array<{ id: string; manifestPath: string; midiPath: string; audioPath: string; label: string }> };
+    const variationsPayload = variationsResult.structuredContent as { productionReady: boolean; variations: Array<{ id: string; manifestPath: string; midiPath: string; audioPath?: string; label: string; qualityTier: string; productionReady: boolean }> };
+    assert.equal(variationsPayload.productionReady, false);
     assert.equal(variationsPayload.variations.length, 3);
     assert.equal(variationsPayload.variations[0].id, "version_A");
-    const variationAudioPath = await getProjectStoredFilePath(ctx.projectRoot, project.id, variationsPayload.variations[0].audioPath);
-    assert.equal((await readFile(variationAudioPath)).subarray(0, 4).toString("ascii"), "RIFF");
+    assert.equal(variationsPayload.variations[0].audioPath, undefined);
+    assert.equal(variationsPayload.variations[0].qualityTier, "requires_production_render");
 
     const demoResult = await publishDemo!.handler({
       projectId: project.id,
@@ -1020,20 +1088,11 @@ test("production music workflow publishes auditions, extends arrangements, assem
       title: "Cafe Music Audition",
       publish: true
     }, ctx);
-    assert.equal(demoResult.ok, true);
-    const demoPayload = demoResult.structuredContent as { demoUrl: string; publishedUrl: string; feedbackFields: string[]; variations: unknown[]; versionIds: string[]; selectedVersionWorkflow: { nextTool: string } };
-    assert.match(demoPayload.demoUrl, /https:\/\/example\.test/);
-    assert.match(demoPayload.publishedUrl, /https:\/\/example\.test/);
-    assert.ok(demoPayload.feedbackFields.includes("winner"));
-    assert.ok(demoPayload.feedbackFields.includes("rating"));
-    assert.deepEqual(demoPayload.versionIds, ["version_A", "version_B", "version_C"]);
-    assert.equal(demoPayload.selectedVersionWorkflow.nextTool, "extend_music_arrangement");
+    assert.equal(demoResult.ok, false);
+    const demoPayload = demoResult.structuredContent as { productionReady: boolean; blockingReasons: string[]; variations: unknown[] };
+    assert.equal(demoPayload.productionReady, false);
+    assert.ok(demoPayload.blockingReasons.some((reason) => reason.includes("production_candidate")));
     assert.equal(demoPayload.variations.length, 3);
-    const demoHtml = await readProjectFile(ctx.projectRoot, project.id, "music-demo.html");
-    assert.match(demoHtml, /<audio controls/);
-    assert.match(demoHtml, /Version A/);
-    assert.match(demoHtml, /Warmer piano/);
-    assert.match(demoHtml, /Rating/);
 
     const extendResult = await extend!.handler({
       projectId: project.id,
@@ -1090,9 +1149,21 @@ test("production music workflow publishes auditions, extends arrangements, assem
     assert.match(sessionHtml, /Music Session Assembly/);
     assert.match(sessionHtml, /Transition Map/);
 
+    const scratchRender = await render!.handler({
+      projectId: project.id,
+      compositionManifestPath: variationsPayload.variations[0].manifestPath,
+      outputAudioPath: "music/production-scratch.wav",
+      outputReportPath: "music/production-scratch-render.json",
+      sampleRate: 12000
+    }, ctx);
+    assert.equal(scratchRender.ok, false);
+    const scratchPayload = scratchRender.structuredContent as { fullMixPath: string; qualityTier: string; productionReady: boolean };
+    assert.equal(scratchPayload.qualityTier, "preview_only");
+    assert.equal(scratchPayload.productionReady, false);
+
     const normalizeResult = await normalize!.handler({
       projectId: project.id,
-      audioPath: variationsPayload.variations[0].audioPath,
+      audioPath: scratchPayload.fullMixPath,
       targetRms: 0.16
     }, ctx);
     assert.equal(normalizeResult.ok, true);
@@ -1137,7 +1208,7 @@ test("production music workflow publishes auditions, extends arrangements, assem
 
     const masterAResult = await master!.handler({
       projectId: project.id,
-      audioPath: variationsPayload.variations[0].audioPath,
+      audioPath: scratchPayload.fullMixPath,
       stemPaths: ["music/stems/piano.wav", "music/stems/bass.wav", "music/stems/drums.wav"],
       chain: ["eq_cleanup", "gentle_compression", "limiter", "loudness_normalize"],
       targetRms: 0.16,
@@ -1159,7 +1230,7 @@ test("production music workflow publishes auditions, extends arrangements, assem
 
     const masterBResult = await master!.handler({
       projectId: project.id,
-      audioPath: variationsPayload.variations[0].audioPath,
+      audioPath: scratchPayload.fullMixPath,
       chain: ["limiter", "loudness_normalize"],
       targetRms: 0.14,
       truePeakCeiling: 0.86,
@@ -1340,7 +1411,7 @@ test("export_music_project fails when requested encoded formats are missing", as
       outputReportPath: "music/encoded-only-report.json",
       sampleRate: 12000
     }, ctx);
-    assert.equal(encodedOnlyResult.ok, true);
+    assert.equal(encodedOnlyResult.ok, false);
     const encodedOnlyPayload = encodedOnlyResult.structuredContent as { fullMixPath: string; renderReport: { requestedFormats: string[]; renderedFormats: string[] } };
     assert.equal(encodedOnlyPayload.fullMixPath, "music/encoded-only.wav");
     assert.deepEqual(encodedOnlyPayload.renderReport.requestedFormats, ["mp3"]);
@@ -1471,9 +1542,47 @@ test("render_midi_with_soundfont blocks missing renderer and unsafe packs", asyn
         redistributionAllowed: true
       }]
     }, ctx);
+    await writeProjectAsset(ctx.projectRoot, project.id, "instruments/mismatch.sfz", Buffer.from("<region> sample=piano-C4.wav key=60\n", "utf8"), "text/plain");
+    await packManager!.handler({
+      projectId: project.id,
+      packs: [
+        {
+          packId: "ready_pd",
+          displayName: "Ready PD",
+          instrumentRole: "realistic_piano",
+          format: "soundfont",
+          assetPaths: ["instruments/unsafe.sf2"],
+          licenseType: "public_domain",
+          source: "fixture",
+          commercialUseAllowed: true,
+          redistributionAllowed: true
+        },
+        {
+          packId: "mixed_soundfont",
+          displayName: "Mixed SoundFont",
+          instrumentRole: "realistic_piano",
+          format: "soundfont",
+          assetPaths: ["instruments/unsafe.sf2", "instruments/mismatch.sfz"],
+          licenseType: "public_domain",
+          source: "fixture",
+          commercialUseAllowed: true,
+          redistributionAllowed: true
+        }
+      ]
+    }, ctx);
     const readyOldPathForInputValidation = process.env.PATH;
     process.env.PATH = `${await installFakeFluidSynth(root)}:${readyOldPathForInputValidation}`;
     try {
+      const mismatchedPathResult = await soundfontRender!.handler({
+        projectId: project.id,
+        compositionManifestPath: "music/soundfont-gate.json",
+        soundfontPackId: "mixed_soundfont",
+        soundfontPath: "instruments/mismatch.sfz",
+        outputReportPath: "music/mismatched-renderer-report.json"
+      }, ctx);
+      assert.equal(mismatchedPathResult.ok, false);
+      assert.ok(mismatchedPathResult.errors.some((error) => error.includes("does not match soundfont pack")));
+
       const channelMapMidiOnly = await soundfontRender!.handler({
         projectId: project.id,
         midiPath: "music/soundfont-gate.mid",
@@ -1586,8 +1695,8 @@ test("music audition publisher accepts direct version metadata and returns conti
       projectId: project.id,
       projectTitle: "Cafe Jazz Auditions",
       versions: [
-        { id: "A", audioPath: "music/direct-a.wav", midiPath: "music/direct-a.mid", manifestPath: "music/direct-a.json", title: "Warm Piano Trio", bpm: 82, key: "F major", durationSec: 75, instruments: ["piano", "upright bass", "brushes"], moodTags: ["warm", "relaxed"], styleNotes: ["soft trio"], generatedPrompt: "warm cafe jazz" },
-        { id: "B", audioPath: "music/direct-b.wav", midiPath: "music/direct-b.mid", manifestPath: "music/direct-b.json", title: "Bossa Lounge", bpm: 92, key: "D minor", durationSec: 80, instruments: ["piano", "bass", "brushes"], moodTags: ["bossa", "smooth"], styleNotes: ["lighter groove"], generatedPrompt: "bossa cafe lounge" }
+        { id: "A", audioPath: "music/direct-a.wav", midiPath: "music/direct-a.mid", manifestPath: "music/direct-a.json", title: "Warm Piano Trio", bpm: 82, key: "F major", durationSec: 75, instruments: ["piano", "upright bass", "brushes"], moodTags: ["warm", "relaxed"], styleNotes: ["soft trio"], generatedPrompt: "warm cafe jazz", renderer: "fluidsynth", qualityTier: "production_candidate", productionReady: true, soundfontName: "verified commercial-safe piano", licenseStatus: "commercial_safe" },
+        { id: "B", audioPath: "music/direct-b.wav", midiPath: "music/direct-b.mid", manifestPath: "music/direct-b.json", title: "Bossa Lounge", bpm: 92, key: "D minor", durationSec: 80, instruments: ["piano", "bass", "brushes"], moodTags: ["bossa", "smooth"], styleNotes: ["lighter groove"], generatedPrompt: "bossa cafe lounge", renderer: "sfizz", qualityTier: "production_candidate", productionReady: true, soundfontName: "verified commercial-safe SFZ", licenseStatus: "commercial_safe" }
       ],
       outputHtmlPath: "direct-audition.html",
       outputManifestPath: "music/direct-audition-manifest.json"

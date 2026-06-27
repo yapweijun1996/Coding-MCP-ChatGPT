@@ -220,7 +220,7 @@ const generateMusicVariationsInputSchema = z.object({
   brief: z.string().min(1).max(500),
   styles: z.array(musicStyleSchema).min(1).max(6).optional().default(["cafe_jazz", "bossa_nova", "lo_fi"]),
   durationSeconds: z.number().int().min(10).max(120).optional().default(30),
-  renderAudio: z.boolean().optional().default(true),
+  renderAudio: z.boolean().optional().default(false),
   outputPath: z.string().min(1).max(240).optional().default("music/production-variations.json")
 });
 
@@ -245,6 +245,7 @@ const auditionVersionSchema = z.object({
   renderReportPath: z.string().min(1).max(240).optional(),
   renderer: z.string().min(1).max(80).optional(),
   qualityTier: z.string().min(1).max(80).optional(),
+  productionReady: z.boolean().optional(),
   soundfontName: z.string().min(1).max(160).optional(),
   licenseStatus: z.string().min(1).max(160).optional(),
   qaScore: z.number().min(0).max(100).optional()
@@ -746,14 +747,20 @@ function deterministicShape(seed: number) {
 }
 
 function buildCompositionPlan(input: z.infer<typeof composeMusicInputSchema>, bars: number) {
+  const introBars = Math.min(4, bars);
+  const remainingAfterIntro = Math.max(0, bars - introBars);
+  const outroBars = remainingAfterIntro > 1 ? Math.min(2, remainingAfterIntro) : 0;
+  const bodyBars = Math.max(0, bars - introBars - outroBars);
+  const aBars = bodyBars > 0 ? Math.max(1, Math.ceil(bodyBars * 0.56)) : 0;
+  const bBars = Math.max(0, bodyBars - aBars);
   const form = input.loopable
     ? [{ name: "loop_A", bars, role: "repeatable main idea", targetIntensity: 0.58 }]
     : [
-      { name: "intro", bars: Math.min(4, bars), role: "establish texture and motif", targetIntensity: 0.28 },
-      { name: "A", bars: Math.max(4, Math.floor((bars - 6) * 0.45)), role: "state the main motif clearly", targetIntensity: 0.55 },
-      { name: "B", bars: Math.max(4, Math.floor((bars - 6) * 0.35)), role: "develop the motif with higher register or harmonic tension", targetIntensity: 0.72 },
-      { name: "outro", bars: Math.max(2, bars - Math.min(4, bars) - Math.max(4, Math.floor((bars - 6) * 0.45)) - Math.max(4, Math.floor((bars - 6) * 0.35))), role: "release tension and land cleanly", targetIntensity: 0.32 }
-    ];
+      { name: "intro", bars: introBars, role: "establish texture and motif", targetIntensity: 0.28 },
+      { name: "A", bars: aBars, role: "state the main motif clearly", targetIntensity: 0.55 },
+      { name: "B", bars: bBars, role: "develop the motif with higher register or harmonic tension", targetIntensity: 0.72 },
+      { name: "outro", bars: outroBars, role: "release tension and land cleanly", targetIntensity: 0.32 }
+    ].filter((section) => section.bars > 0);
   const energyCurve = Array.from({ length: bars }, (_, index) => {
     const position = bars <= 1 ? 0 : index / (bars - 1);
     return Number((0.25 + Math.sin(Math.PI * position) * 0.55 + (index % 4 === 3 ? 0.08 : 0)).toFixed(3));
@@ -1340,8 +1347,8 @@ function qualityForComposition(composition: Composition, options: { audio?: Buff
   if (repeated) addFinding(findings, "low", "repetition", "Chord progression is highly repetitive.", "Add a B section or light reharmonization every 16-32 bars.");
   const musicalityReport = musicalityForComposition(composition);
   if (!musicalityReport.hasPlan) addFinding(findings, "low", "musicality", "Composition has no explicit form or motif plan.", "Generate or attach a compositionPlan before rendering final audition candidates.");
-  if (!musicalityReport.hasHumanizedPerformance) addFinding(findings, "low", "performance", "Composition has no humanized performance layer.", "Add timing, velocity, sustain pedal, and phrase-level performance shaping.");
-  if (musicalityReport.mechanicalScore > 0.72) addFinding(findings, "medium", "musicality", "Composition is likely to sound mechanical.", "Reduce grid lock, vary adjacent bars, widen dynamics, and add motif development.");
+  if (!musicalityReport.hasHumanizedPerformance) addFinding(findings, "high", "performance", "Robotic music output is banned: composition has no humanized performance layer.", "Add timing, velocity, sustain pedal, and phrase-level performance shaping before render/export.");
+  if (musicalityReport.mechanicalScore > 0.72) addFinding(findings, "high", "musicality", "Robotic music output is banned: composition is likely to sound mechanical.", "Reduce grid lock, vary adjacent bars, widen dynamics, and add motif development before render/export.");
   const noteDensityPerMinute = allNotes.length / Math.max(1, composition.durationSeconds / 60);
   if (noteDensityPerMinute > 900) addFinding(findings, "medium", "background_suitability", "Note density is high for long background listening.", "Lower drum subdivisions, simplify comping, or thin the melody.");
   if (composition.durationSeconds < 10 && options.useCase.includes("background")) addFinding(findings, "low", "duration", "Preview is very short for judging background comfort.", "Render at least 30-60 seconds before final QA.");
@@ -2098,6 +2105,12 @@ function isSfzAssetPath(assetPath: string) {
 
 type JazzPackRecord = ReturnType<typeof analyzeJazzPack>;
 
+function rendererForAssetPath(assetPath: string) {
+  if (isSoundfontAssetPath(assetPath)) return "fluidsynth";
+  if (isSfzAssetPath(assetPath)) return "sfizz";
+  return undefined;
+}
+
 function rendererForPack(pack: JazzPackRecord | undefined) {
   if (!pack || pack.status !== "ready") return undefined;
   if (pack.format === "soundfont" && pack.assetPaths.some(isSoundfontAssetPath)) return "fluidsynth";
@@ -2119,6 +2132,12 @@ function productionRenderBlockersForPack(pack: JazzPackRecord | undefined, reque
   if (pack.format === "soundfont" && !pack.assetPaths.some(isSoundfontAssetPath)) blockers.push(`Pack ${pack.packId} has no .sf2/.sf3 asset.`);
   if (pack.format === "sfz" && !pack.assetPaths.some(isSfzAssetPath)) blockers.push(`Pack ${pack.packId} has no .sfz asset.`);
   if (requestedPath && !pack.assetPaths.includes(requestedPath)) blockers.push(`Requested soundfontPath is not registered on ready pack ${pack.packId}.`);
+  if (requestedPath && pack.assetPaths.includes(requestedPath)) {
+    const requestedRenderer = rendererForAssetPath(requestedPath);
+    if (!requestedRenderer) blockers.push(`Requested soundfontPath ${requestedPath} is not a supported .sf2/.sf3 or .sfz asset.`);
+    if (pack.format === "soundfont" && requestedRenderer !== "fluidsynth") blockers.push(`Requested soundfontPath ${requestedPath} does not match soundfont pack ${pack.packId}; expected .sf2/.sf3.`);
+    if (pack.format === "sfz" && requestedRenderer !== "sfizz") blockers.push(`Requested soundfontPath ${requestedPath} does not match SFZ pack ${pack.packId}; expected .sfz.`);
+  }
   if (!pack.commercialUseAllowed) blockers.push(`Pack ${pack.packId} is not marked commercial-use allowed.`);
   if (pack.riskFlags.length) blockers.push(`Pack ${pack.packId} has unresolved risk flags: ${pack.riskFlags.join(", ")}.`);
   if (!pack.computedSha256) blockers.push(`Pack ${pack.packId} has no computed hash.`);
@@ -2141,8 +2160,8 @@ async function resolveProductionSoundfont(ctx: ToolContext, parsed: z.infer<type
   });
   const blockers = productionRenderBlockersForPack(pack, parsed.soundfontPath);
   if (blockers.length || !pack) return { ok: false as const, blockers, pack };
-  const renderer = rendererForPack(pack)!;
   const soundfontPath = instrumentAssetPathForPack(pack, parsed.soundfontPath)!;
+  const renderer = rendererForAssetPath(soundfontPath) ?? rendererForPack(pack)!;
   const absolutePath = await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, soundfontPath);
   return { ok: true as const, pack, renderer, soundfontPath, absolutePath, blockers: [] };
 }
@@ -2506,6 +2525,18 @@ dt{font-weight:700;margin-top:10px}.ok{color:#166534}.warn{color:#9a3412}.timeli
 </body>
 </html>
 `;
+}
+
+function productionReadyVariationBlockers(variations: Array<Record<string, unknown>>) {
+  const blockers: string[] = [];
+  for (const [index, variation] of variations.entries()) {
+    const label = String(variation.id ?? variation.label ?? `version_${index + 1}`);
+    if (typeof variation.audioPath !== "string" || !variation.audioPath.trim()) blockers.push(`${label} has no production audioPath.`);
+    if (String(variation.qualityTier ?? "") !== "production_candidate") blockers.push(`${label} is not qualityTier=production_candidate.`);
+    if (variation.productionReady !== true) blockers.push(`${label} is not marked productionReady=true.`);
+    if (String(variation.renderer ?? "") === "built_in_procedural_synth") blockers.push(`${label} uses built_in_procedural_synth, which is preview_only.`);
+  }
+  return blockers;
 }
 
 async function writeCompositionBundle(ctx: ToolContext, projectId: string, composition: Composition, basePath: string, renderAudio = true) {
@@ -2981,6 +3012,9 @@ export const musicWorkflowTools: ToolModule[] = [
     schema: generateMusicVariationsInputSchema,
     handler: async (input, ctx) => {
       const parsed = generateMusicVariationsInputSchema.parse(input);
+      const blockingReasons = parsed.renderAudio
+        ? ["renderAudio=true is disabled for production music generation because built-in procedural audio is preview_only. Generate MIDI/manifests, then render each selected version with render_midi_with_soundfont."]
+        : [];
       const variations = [];
       const artifacts: string[] = [];
       for (let index = 0; index < parsed.styles.length; index += 1) {
@@ -3001,13 +3035,13 @@ export const musicWorkflowTools: ToolModule[] = [
           outputMidiPath: "unused.mid"
         });
         const basePath = `music/variations/variation-${String.fromCharCode(97 + index)}`;
-        const bundle = await writeCompositionBundle(ctx, parsed.projectId, composition, basePath, parsed.renderAudio);
+        const bundle = await writeCompositionBundle(ctx, parsed.projectId, composition, basePath, false);
         artifacts.push(...bundle.artifacts);
-        variations.push({ id: `version_${String.fromCharCode(65 + index)}`, label: `Version ${String.fromCharCode(65 + index)}`, style, tempo: composition.tempo, key: composition.key, instruments: composition.instruments, durationSeconds: composition.durationSeconds, manifestPath: bundle.manifestPath, midiPath: bundle.midiPath, audioPath: bundle.audioPath, styleNotes: [`${style.replaceAll("_", " ")} arrangement`, "background-friendly density", "generated original"] });
+        variations.push({ id: `version_${String.fromCharCode(65 + index)}`, label: `Version ${String.fromCharCode(65 + index)}`, style, tempo: composition.tempo, key: composition.key, instruments: composition.instruments, durationSeconds: composition.durationSeconds, manifestPath: bundle.manifestPath, midiPath: bundle.midiPath, audioPath: bundle.audioPath, qualityTier: "requires_production_render", productionReady: false, requiredRenderer: "render_midi_with_soundfont", requiredNextTool: "render_midi_with_soundfont", styleNotes: [`${style.replaceAll("_", " ")} arrangement`, "background-friendly density", "generated original", "requires SoundFont/SFZ production render"] });
       }
-      const manifest = { brief: parsed.brief, durationSeconds: parsed.durationSeconds, variations, reviewPrompts: ["Choose winner", "More jazz", "Less drums", "Warmer piano", "Smoother loop"] };
+      const manifest = { brief: parsed.brief, durationSeconds: parsed.durationSeconds, qualityPolicy: "production_ready_required", productionReady: false, blockingReasons, requiredNextTools: ["manage_jazz_instrument_packs", "render_midi_with_soundfont", "inspect_audio_quality", "publish_music_audition_demo"], variations, reviewPrompts: ["Choose winner", "More jazz", "Less drums", "Warmer piano", "Smoother loop"] };
       const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(manifest, null, 2)}\n`);
-      return { ok: true, summary: `Generated ${variations.length} music variation(s).`, jobId: parsed.projectId, artifacts: [file.path, ...artifacts], structuredContent: manifest, logs: [JSON.stringify(manifest, null, 2)], errors: [] };
+      return { ok: blockingReasons.length === 0, summary: `Generated ${variations.length} production-ready composition candidate(s); render with SoundFont/SFZ before publishing audio.`, jobId: parsed.projectId, artifacts: [file.path, ...artifacts], structuredContent: manifest, logs: [JSON.stringify(manifest, null, 2)], errors: blockingReasons };
     }
   },
   {
@@ -3031,6 +3065,12 @@ export const musicWorkflowTools: ToolModule[] = [
           durationSeconds: variation.durationSeconds ?? variation.durationSec
         };
       });
+      const productionBlockers = productionReadyVariationBlockers(variations);
+      if (productionBlockers.length) {
+        const manifest = { title, projectId: parsed.projectId, brief: variationsManifest.brief, variations, productionReady: false, blockingReasons: productionBlockers };
+        const manifestFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+        return { ok: false, summary: `Music audition demo blocked: ${productionBlockers.length} version(s) are not production-ready.`, jobId: parsed.projectId, artifacts: [manifestFile.path], structuredContent: { ...manifest, manifestPath: manifestFile.path }, logs: [JSON.stringify(manifest, null, 2)], errors: productionBlockers };
+      }
       const html = renderAuditionHtml(title, variations, parsed.allowDownloads);
       const htmlFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputHtmlPath, html);
       const publishPolicy = parsed.publish ? buildProjectPublishOptions(ctx) : undefined;
@@ -3041,7 +3081,7 @@ export const musicWorkflowTools: ToolModule[] = [
         requiredUserInput: ["winner", "revisionNotes"],
         revisionOptions: ["warmer piano", "less drums", "more jazz", "smoother transition", "longer intro", "less repetitive"]
       };
-      const manifest = { title, projectId: parsed.projectId, brief: variationsManifest.brief, pagePath: htmlFile.path, demoUrl: published?.publishedUrl, publishedUrl: published?.publishedUrl, versionIds: variations.map((variation) => variation.id), variations, feedbackFields: ["winner", "rating", "revisionNotes", "warmerPiano", "lessDrums", "moreJazz", "smootherTransition", "longerIntro", "lessRepetitive"], selectedVersionWorkflow };
+      const manifest = { title, projectId: parsed.projectId, brief: variationsManifest.brief, pagePath: htmlFile.path, demoUrl: published?.publishedUrl, publishedUrl: published?.publishedUrl, productionReady: true, versionIds: variations.map((variation) => variation.id), variations, feedbackFields: ["winner", "rating", "revisionNotes", "warmerPiano", "lessDrums", "moreJazz", "smootherTransition", "longerIntro", "lessRepetitive"], selectedVersionWorkflow };
       const manifestFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
       return { ok: true, summary: `Published music audition demo with ${variations.length} version(s).`, jobId: parsed.projectId, previewUrl: published?.publishedUrl, shareUrl: published?.publishedUrl, artifacts: [htmlFile.path, manifestFile.path], structuredContent: { ...manifest, manifestPath: manifestFile.path }, logs: [JSON.stringify(manifest, null, 2)], errors: [] };
     }
@@ -3527,7 +3567,8 @@ export const musicWorkflowTools: ToolModule[] = [
       };
       const reportFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputReportPath, `${JSON.stringify(report, null, 2)}\n`);
       artifacts.push(reportFile.path);
-      return { ok: warnings.every((warning) => /requires a verified encoder|fallback/i.test(warning)), summary: `Rendered preview_only MIDI audio with ${Object.keys(stemPaths).length} stem(s) and ${warnings.length} warning(s).`, jobId: parsed.projectId, artifacts, structuredContent: report, logs: [JSON.stringify(report, null, 2)], errors: warnings };
+      const blockingReasons = [...report.blockingReasons, ...warnings];
+      return { ok: false, summary: `Blocked preview_only MIDI audio with ${Object.keys(stemPaths).length} stem(s); use render_midi_with_soundfont for production-ready music.`, jobId: parsed.projectId, artifacts, structuredContent: report, logs: [JSON.stringify(report, null, 2)], errors: blockingReasons };
     }
   },
   {
