@@ -461,7 +461,7 @@ function validateSvgAsset(buffer: Buffer): void {
   }
 }
 
-function validateProjectAssetBytes(relativePath: string, buffer: Buffer, contentType?: string): void {
+export function validateProjectAssetBytes(relativePath: string, buffer: Buffer, contentType?: string): void {
   const extension = path.extname(relativePath).toLowerCase();
   ensureContentTypeMatches(extension, contentType);
 

@@ -321,27 +321,35 @@ export const asyncJobTools: ToolModule[] = [
         resumeTask?: ReturnType<typeof taskSummary>;
       } | undefined;
       let resumeTask: ProjectTaskGraphNode | undefined;
+      let projectLookupError: { projectId: string; message: string } | undefined;
 
       if (selectedProjectId) {
-        const activity = await getProjectActivity(ctx.projectRoot, selectedProjectId);
-        const graph = await getProjectTaskGraph(ctx.projectRoot, selectedProjectId);
-        resumeTask = graph.nodes.find((task) => task.status === "doing" && !task.blocked)
-          ?? graph.readyTasks.find((task) => task.status === "todo")
-          ?? graph.blockedTasks[0];
-        const counts = graph.nodes.reduce<Record<string, number>>((accumulator, task) => {
-          accumulator[task.status] = (accumulator[task.status] ?? 0) + 1;
-          return accumulator;
-        }, {});
-        const projectSummary = projects.find((item) => item.id === selectedProjectId);
-        project = {
-          id: selectedProjectId,
-          title: projectSummary?.title ?? selectedProjectId,
-          status: activity.status,
-          publishedUrl: activity.publishedUrl,
-          lastValidation: activity.lastValidation,
-          taskCounts: counts,
-          resumeTask: taskSummary(resumeTask)
-        };
+        try {
+          const activity = await getProjectActivity(ctx.projectRoot, selectedProjectId);
+          const graph = await getProjectTaskGraph(ctx.projectRoot, selectedProjectId);
+          resumeTask = graph.nodes.find((task) => task.status === "doing" && !task.blocked)
+            ?? graph.readyTasks.find((task) => task.status === "todo")
+            ?? graph.blockedTasks[0];
+          const counts = graph.nodes.reduce<Record<string, number>>((accumulator, task) => {
+            accumulator[task.status] = (accumulator[task.status] ?? 0) + 1;
+            return accumulator;
+          }, {});
+          const projectSummary = projects.find((item) => item.id === selectedProjectId);
+          project = {
+            id: selectedProjectId,
+            title: projectSummary?.title ?? selectedProjectId,
+            status: activity.status,
+            publishedUrl: activity.publishedUrl,
+            lastValidation: activity.lastValidation,
+            taskCounts: counts,
+            resumeTask: taskSummary(resumeTask)
+          };
+        } catch (error) {
+          projectLookupError = {
+            projectId: selectedProjectId,
+            message: error instanceof Error ? error.message : String(error)
+          };
+        }
       }
 
       let state = "idle_no_project";
@@ -371,13 +379,17 @@ export const asyncJobTools: ToolModule[] = [
           `Call recover_job_partial_result with jobId=${jobState.failed[0].id}.`,
           ...(jobState.failed[0].canRetry ? [`Call retry_background_job with jobId=${jobState.failed[0].id} if the partial result is insufficient.`] : [])
         ];
+      } else if (projectLookupError) {
+        state = "project_not_found";
+        whyStopped = `Project ${projectLookupError.projectId} could not be inspected.`;
+        nextActions = ["Check the projectId, call list_projects/search_projects_global, or create a new project for the latest user intent."];
       } else if (project) {
         state = "idle_project_complete_or_empty";
         whyStopped = "A project exists, but it has no unfinished resumable task.";
         nextActions = ["Call upsert_project_task to seed the next task, or run the next project workflow tool directly."];
       }
 
-      if (!canContinue && parsed.autoStartWhenIdle && !resumeTask && jobState.running.length === 0) {
+      if (!canContinue && !projectLookupError && parsed.autoStartWhenIdle && !resumeTask && jobState.running.length === 0) {
         const title = parsed.latestUserIntent ? initialTaskTitle(parsed.latestUserIntent) : "Code MCP Work Session";
         const newProject = await createProject(ctx.projectRoot, {
           title,
@@ -408,7 +420,7 @@ export const asyncJobTools: ToolModule[] = [
         };
       }
 
-      const result = { state, canContinue, whyStopped, jobs: jobState, project, createdProject, createdTask, nextActions };
+      const result = { state, canContinue, whyStopped, jobs: jobState, project, projectLookupError, createdProject, createdTask, nextActions };
       return {
         ok: true,
         summary: `Code-MCP status: ${state}. ${whyStopped}`,

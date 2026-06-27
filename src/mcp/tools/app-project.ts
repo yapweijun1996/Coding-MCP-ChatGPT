@@ -5,12 +5,16 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import {
   appendProjectTaskHistory,
+  assertSafeProjectAssetPath,
+  assertSafeProjectFilePath,
   createProject,
   getProject,
   getProjectManifest,
   getProjectStoredFilePath,
   getProjectWorkspaceDirectory,
+  maxProjectFileBytes,
   publishProject,
+  validateProjectAssetBytes,
   validateProject,
   writeProjectAsset,
   writeProjectFile
@@ -212,7 +216,25 @@ async function validateDistBeforePublish(distRoot: string, files: string[], entr
   const errors: string[] = [];
   for (const file of files) {
     const extension = path.extname(file).toLowerCase();
-    if (!textDistExtensions.has(extension) && !assetDistExtensions.has(extension)) {
+    const absolutePath = path.join(distRoot, file);
+    if (textDistExtensions.has(extension)) {
+      try {
+        assertSafeProjectFilePath(file);
+        const content = await readFile(absolutePath, "utf8");
+        if (Buffer.byteLength(content, "utf8") > maxProjectFileBytes) {
+          errors.push(`Project file content exceeds 1 MiB: ${file}`);
+        }
+      } catch (error) {
+        errors.push(`Invalid dist text file ${file}: ${error instanceof Error ? error.message : "invalid file"}`);
+      }
+    } else if (assetDistExtensions.has(extension)) {
+      try {
+        assertSafeProjectAssetPath(file);
+        validateProjectAssetBytes(file, await readFile(absolutePath));
+      } catch (error) {
+        errors.push(`Invalid dist asset ${file}: ${error instanceof Error ? error.message : "invalid asset"}`);
+      }
+    } else {
       errors.push(`Unsupported dist file extension: ${file}`);
     }
   }

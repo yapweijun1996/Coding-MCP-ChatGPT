@@ -256,6 +256,50 @@ test("publish_project_dist failed replacement preserves previous published app f
   }
 });
 
+test("publish_project_dist invalid asset failure leaves no partially written dist files", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "coding-mcp-app-publish-invalid-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, {
+      title: "App publish invalid asset rollback",
+      createdByClientId: "test-client"
+    });
+    const dist = path.join(getProjectWorkspaceDirectory(ctx.projectRoot, project.id), "dist");
+
+    await mkdir(dist, { recursive: true });
+    await writeFile(path.join(dist, "index.html"), "<!doctype html><html><body><script src=\"./old.js\"></script></body></html>", "utf8");
+    await writeFile(path.join(dist, "old.js"), "console.log('old');\n", "utf8");
+
+    const firstPublish = await callTool("publish_project_dist", {
+      projectId: project.id,
+      outputDir: "dist",
+      entryFile: "index.html"
+    }, ctx);
+    assert.equal(firstPublish.ok, true);
+
+    await writeFile(path.join(dist, "index.html"), "<!doctype html><html><body><img src=\"./zbad.png\"><script src=\"./app.js\"></script></body></html>", "utf8");
+    await writeFile(path.join(dist, "app.js"), "console.log('new should not publish');\n", "utf8");
+    await writeFile(path.join(dist, "zbad.png"), "not-a-png", "utf8");
+
+    const failedPublish = await callTool("publish_project_dist", {
+      projectId: project.id,
+      outputDir: "dist",
+      entryFile: "index.html"
+    }, ctx);
+    assert.equal(failedPublish.ok, false);
+    assert.match(failedPublish.errors.join("\n"), /PNG asset has invalid magic bytes/);
+
+    const manifest = await getProjectManifest(ctx.projectRoot, project.id);
+    assert.ok(manifest.files.some((file) => file.path === "index.html"));
+    assert.ok(manifest.files.some((file) => file.path === "old.js"));
+    assert.ok(!manifest.files.some((file) => file.path === "app.js"));
+    assert.ok(!manifest.files.some((file) => file.path === "zbad.png"));
+    assert.equal(await readProjectFile(ctx.projectRoot, project.id, "index.html"), "<!doctype html><html><body><script src=\"./old.js\"></script></body></html>");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("publish_project_dist accepts audio assets bundled in dist", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "coding-mcp-app-audio-dist-"));
   try {

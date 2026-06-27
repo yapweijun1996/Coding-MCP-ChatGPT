@@ -189,6 +189,30 @@ test("diagnose_code_mcp_status reports idle with no jobs or projects", async () 
   }
 });
 
+test("diagnose_code_mcp_status returns structured diagnostics for an unknown projectId", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "async-diagnose-missing-project-"));
+  try {
+    const diagnose = getToolModule("diagnose_code_mcp_status");
+    assert.ok(diagnose);
+    const ctx = { ...toolContext(root), userId: `missing-project-user-${Date.now()}` };
+    const result = await diagnose!.handler({ projectId: "project_missing_123" }, ctx);
+    assert.equal(result.ok, true);
+    const payload = result.structuredContent as {
+      state: string;
+      canContinue: boolean;
+      projectLookupError: { projectId: string; message: string };
+      nextActions: string[];
+    };
+    assert.equal(payload.state, "project_not_found");
+    assert.equal(payload.canContinue, false);
+    assert.equal(payload.projectLookupError.projectId, "project_missing_123");
+    assert.match(payload.projectLookupError.message, /does not exist/);
+    assert.ok(payload.nextActions.some((action) => action.includes("projectId")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("diagnose_code_mcp_status summarizes running, failed, and successful jobs", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "async-diagnose-jobs-"));
   try {
