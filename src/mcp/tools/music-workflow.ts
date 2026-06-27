@@ -129,6 +129,16 @@ const composeMusicInputSchema = z.object({
   instruments: z.array(instrumentSchema).min(1).max(12).optional().default(["piano", "upright_bass", "brushes"]),
   complexity: complexitySchema.optional().default("medium"),
   loopable: z.boolean().optional().default(true),
+  // Opt-in fail-closed ensemble gate (issue_0144). When set, the requested instruments must form a
+  // real simultaneous ensemble (each present with notes, overlapping in time) or compose_music
+  // returns ok:false instead of silently delivering a one-instrument cue.
+  ensembleRequirement: z.object({
+    requiredInstruments: z.array(z.string().min(1).max(80)).min(1).max(16),
+    soloInstruments: z.array(z.string().min(1).max(80)).max(16).optional().default([]),
+    maxSingleInstrumentSeconds: z.number().min(0.5).max(120).optional().default(8),
+    requireStartWithinBars: z.number().min(0).max(64).optional(),
+    barBeats: z.number().int().min(1).max(16).optional().default(4)
+  }).optional(),
   outputManifestPath: z.string().min(1).max(240).optional().default("music/composition-manifest.json"),
   outputMidiPath: z.string().min(1).max(240).optional().default("music/composition.mid")
 });
@@ -159,7 +169,11 @@ const renderMidiToAudioInputSchema = z.object({
   sampleRate: z.number().int().min(8000).max(48000).optional().default(22050),
   outputAudioPath: z.string().min(1).max(240).optional().default("music/rendered-preview.wav"),
   outputStemDirectory: z.string().min(1).max(200).optional().default("music/stems"),
-  outputReportPath: z.string().min(1).max(240).optional().default("music/render-report.json")
+  outputReportPath: z.string().min(1).max(240).optional().default("music/render-report.json"),
+  // issue_0143: the built-in procedural/WebAudio-style synth must never be silently delivered as
+  // music. This tool refuses by default; set true only to generate an explicitly throwaway,
+  // non-deliverable preview.
+  acknowledgePreviewOnly: z.boolean().optional().default(false)
 }).refine((value) => Boolean(value.compositionManifestPath || value.midiPath), {
   message: "compositionManifestPath or midiPath is required."
 });
@@ -203,7 +217,8 @@ const renderProductionMusicInputSchema = z.object({
     violin: z.string().min(1).max(80).optional(),
     strings: z.string().min(1).max(80).optional(),
     chamber_ensemble: z.string().min(1).max(80).optional(),
-    orchestral_sketch: z.string().min(1).max(80).optional()
+    orchestral_sketch: z.string().min(1).max(80).optional(),
+    general_midi: z.string().min(1).max(80).optional()
   }).optional().default({}),
   channelMap: z.record(z.number().int().min(0).max(15)).optional().default({}),
   programMap: z.record(z.number().int().min(1).max(128)).optional().default({}),
@@ -219,9 +234,10 @@ const renderProductionMusicInputSchema = z.object({
   outputReportPath: z.string().min(1).max(240).optional().default("music/production-render-pipeline.json"),
   outputHtmlPath: z.string().min(1).max(240).optional().default("music-project.html"),
   publish: z.boolean().optional().default(true)
-}).refine((value) => Boolean(value.soundfontPackId || value.soundfontPath || Object.keys(value.instrumentPackMap ?? {}).length), {
-  message: "soundfontPackId, soundfontPath, or instrumentPackMap is required."
 });
+// No pack selector is required at parse time: a registered general_midi pack (from
+// install_free_soundfont_pack) is discovered as the fallback in resolveProductionPackMap. When no
+// pack covers a required role, that layer fails closed with a clear per-role blocker.
 
 const installFreeSoundfontPackInputSchema = z.object({
   projectId: z.string().min(8).max(80),
@@ -318,7 +334,7 @@ const buildMusicLicenseManifestInputSchema = z.object({
 const jazzInstrumentPackSchema = z.object({
   packId: z.string().min(2).max(80).regex(/^[a-zA-Z0-9_.-]+$/),
   displayName: z.string().min(1).max(160),
-  instrumentRole: z.enum(["realistic_piano", "upright_bass", "brush_drums", "room_ambience", "cello", "violin", "strings", "chamber_ensemble", "orchestral_sketch"]),
+  instrumentRole: z.enum(["realistic_piano", "upright_bass", "brush_drums", "room_ambience", "cello", "violin", "strings", "chamber_ensemble", "orchestral_sketch", "general_midi"]),
   format: z.enum(["sfz", "soundfont", "wav_multisample", "impulse_response", "virtual_instrument"]),
   assetPaths: z.array(z.string().min(1).max(240)).min(1).max(80),
   version: z.string().min(1).max(80).optional(),
@@ -416,6 +432,7 @@ const extendMusicArrangementInputSchema = z.object({
   targetDurationSeconds: z.number().int().min(120).max(900).optional().default(300),
   arrangementStyle: z.enum(["background_friendly", "concert_style", "cinematic_arc", "loopable_longform"]).optional().default("background_friendly"),
   renderAudio: z.boolean().optional().default(false),
+  acknowledgePreviewOnly: z.boolean().optional().default(false),
   outputManifestPath: z.string().min(1).max(240).optional().default("music/long-arrangement-manifest.json"),
   outputMidiPath: z.string().min(1).max(240).optional().default("music/long-arrangement.mid"),
   outputAudioPath: z.string().min(1).max(240).optional().default("music/long-arrangement-preview.wav")
@@ -431,6 +448,7 @@ const extendOriginalMusicArrangementInputSchema = z.object({
   sections: z.array(z.string().min(1).max(40)).min(4).max(16).optional().default(["intro", "A", "A_variation", "B", "bridge", "light_solo", "breakdown", "reprise", "outro"]),
   originalityPolicy: z.enum(["do_not_imitate_specific_songs_or_artists"]).optional().default("do_not_imitate_specific_songs_or_artists"),
   renderAudio: z.boolean().optional().default(false),
+  acknowledgePreviewOnly: z.boolean().optional().default(false),
   outputManifestPath: z.string().min(1).max(240).optional().default("music/original-long-arrangement-manifest.json"),
   outputMidiPath: z.string().min(1).max(240).optional().default("music/original-long-arrangement.mid"),
   outputAudioPath: z.string().min(1).max(240).optional().default("music/original-long-arrangement-preview.wav")
@@ -1140,6 +1158,7 @@ function buildComposition(input: z.infer<typeof composeMusicInputSchema>): Compo
   const hasDrums = input.instruments.includes("drums") || input.instruments.includes("brushes");
   const hasPad = input.instruments.includes("pads") || input.instruments.includes("strings");
   const hasLead = input.instruments.includes("violin") || input.instruments.includes("sax_like_lead");
+  const hasCello = input.instruments.includes("cello");
   const pianoPattern = input.style === "smooth_piano" ? [0, 2, 3, 4, 3, 2, 1, 2] : [0, 1, 2, 3, 2, 1, 3, 4];
   const melodyDegrees = input.style === "smooth_piano" ? [12, 14, 15, 19, 17, 15, 14, 12, 10, 12, 15, 14] : [12, 14, 16, 19, 17, 16, 14, 12, 11, 12, 16, 14];
   for (let bar = 0; bar < bars; bar += 1) {
@@ -1175,6 +1194,17 @@ function buildComposition(input: z.infer<typeof composeMusicInputSchema>): Compo
       add("bass", root + (bar % 2 ? 7 : 12), start + 2, 1.2, 50 + Math.round(phraseLift * 8));
     }
     if (hasLead) add(input.instruments.includes("violin") ? "violin" : "lead", progression.roots[chordIndex] + melodyDegrees[(bar + 1) % melodyDegrees.length], start + 1, 1.75, 48 + Math.round(phraseLift * 12));
+    if (hasCello) {
+      // Sustained cello voice in cello register (~MIDI 36-72), entering at every bar start so it
+      // overlaps the piano from bar 0 — a real simultaneous ensemble, not a sequential handoff.
+      const intoCelloRange = (midi: number) => { let value = midi; while (value > 72) value -= 12; while (value < 36) value += 12; return value; };
+      const root = progression.roots[chordIndex];
+      add("cello", intoCelloRange(root - 12), start, input.loopable ? 3.9 : 3.6, 50 + Math.round(phraseLift * 10));
+      if (input.complexity !== "simple" || bar % 2 === 1) {
+        // Move to the fifth of the chord mid-bar for a simple, musical counter-line.
+        add("cello", intoCelloRange(root - 12 + 7), start + 2, 1.7, 46 + Math.round(phraseLift * 8));
+      }
+    }
     if (hasDrums) {
       add("drums", 42, start, 0.18, 32 + Math.round(phraseLift * 8));
       add("drums", 38, start + 2, 0.2, 34 + Math.round(phraseLift * 10));
@@ -2949,12 +2979,12 @@ function instrumentCoverageForSinglePack(composition: Composition, pack?: JazzPa
     requiredRole: entry.requiredRole,
     selectedPackId: pack?.packId,
     selectedPackRole: pack?.instrumentRole,
-    covered: Boolean(entry.requiredRole && pack?.instrumentRole === entry.requiredRole),
+    covered: packCoversRole(pack, entry.requiredRole),
     reason: !entry.requiredRole
       ? `Track ${entry.track} has no supported production instrument role.`
       : !pack
         ? `Track ${entry.track} has no selected instrument pack.`
-        : pack.instrumentRole === entry.requiredRole
+        : packCoversRole(pack, entry.requiredRole)
           ? "covered"
           : `Track ${entry.track} requires ${entry.requiredRole}, but selected pack ${pack.packId} is ${pack.instrumentRole}.`
   }));
@@ -2968,12 +2998,12 @@ function instrumentCoverageForPackMap(composition: Composition, packsByRole: Par
       requiredRole: entry.requiredRole,
       selectedPackId: pack?.packId,
       selectedPackRole: pack?.instrumentRole,
-      covered: Boolean(entry.requiredRole && pack?.instrumentRole === entry.requiredRole),
+      covered: packCoversRole(pack, entry.requiredRole),
       reason: !entry.requiredRole
         ? `Track ${entry.track} has no supported production instrument role.`
         : !pack
           ? `Track ${entry.track} requires ${entry.requiredRole}, but no ready pack was selected.`
-          : pack.instrumentRole === entry.requiredRole
+          : packCoversRole(pack, entry.requiredRole)
             ? "covered"
             : `Track ${entry.track} requires ${entry.requiredRole}, but selected pack ${pack.packId} is ${pack.instrumentRole}.`
     };
@@ -3126,24 +3156,35 @@ async function resolveProductionPackForRole(ctx: ToolContext, input: {
   });
   const resolved = await resolveProductionSoundfont(ctx, parsed);
   if (!resolved.ok) return { ...resolved, role: input.role };
-  if (resolved.pack.instrumentRole !== input.role) {
+  if (!packCoversRole(resolved.pack, input.role)) {
     return {
       ok: false as const,
       role: input.role,
       pack: resolved.pack,
-      blockers: [`Pack ${resolved.pack.packId} is ${resolved.pack.instrumentRole}; ${input.role} tracks require a matching ${input.role} pack.`]
+      blockers: [`Pack ${resolved.pack.packId} is ${resolved.pack.instrumentRole}; ${input.role} tracks require a matching ${input.role} or general_midi pack.`]
     };
   }
   return { ...resolved, role: input.role };
+}
+
+// A ready general_midi pack registered in the project can stand in for any role, so a single
+// install_free_soundfont_pack (GeneralUser GS) renders a full ensemble without per-role mapping.
+function findGeneralMidiPackId(registry: { packs?: JazzPackRecord[]; readyPackIds?: string[] } | undefined): string | undefined {
+  const ready = new Set(registry?.readyPackIds ?? []);
+  return registry?.packs?.find((pack) => pack.instrumentRole === "general_midi" && (ready.has(pack.packId) || pack.status === "ready"))?.packId;
 }
 
 async function resolveProductionPackMap(ctx: ToolContext, parsed: z.infer<typeof renderProductionMusicInputSchema>, composition: Composition) {
   const requiredRoles = requiredProductionRoles(composition);
   const packsByRole: Partial<Record<JazzInstrumentRole, Awaited<ReturnType<typeof resolveProductionPackForRole>> & { ok: true }>> = {};
   const blockers: string[] = [];
+  // A registered general_midi pack (or an explicit top-level soundfontPackId) covers any role the
+  // caller did not map explicitly, so one GeneralUser GS install renders the whole ensemble.
+  const registry = await readJazzPackRegistry(ctx, parsed.projectId);
+  const generalMidiPackId = findGeneralMidiPackId(registry);
   for (const role of requiredRoles) {
-    const packId = parsed.instrumentPackMap[role] ?? (role === "realistic_piano" ? parsed.soundfontPackId : undefined);
-    const soundfontPath = role === "realistic_piano" ? parsed.soundfontPath : undefined;
+    const packId = parsed.instrumentPackMap[role] ?? parsed.soundfontPackId ?? generalMidiPackId;
+    const soundfontPath = parsed.instrumentPackMap[role] ? undefined : parsed.soundfontPath;
     const resolved = await resolveProductionPackForRole(ctx, {
       projectId: parsed.projectId,
       role,
@@ -3498,8 +3539,18 @@ const jazzPackAllowedFormats: Record<z.infer<typeof jazzInstrumentPackSchema>["i
   violin: ["sfz", "soundfont", "wav_multisample", "virtual_instrument"],
   strings: ["sfz", "soundfont", "wav_multisample", "virtual_instrument"],
   chamber_ensemble: ["sfz", "soundfont", "wav_multisample", "virtual_instrument"],
-  orchestral_sketch: ["sfz", "soundfont", "wav_multisample", "virtual_instrument"]
+  orchestral_sketch: ["sfz", "soundfont", "wav_multisample", "virtual_instrument"],
+  // A General MIDI soundfont (e.g. GeneralUser GS) carries every instrument program in one file, so
+  // a single registered general_midi pack can satisfy any melodic/percussion role below.
+  general_midi: ["soundfont", "sfz"]
 };
+
+// A general_midi pack covers any required role because the one .sf2 contains all GM programs, and
+// midiBuffer emits the correct per-track Program Change events for FluidSynth to honour.
+function packCoversRole(pack: { instrumentRole: JazzInstrumentRole } | undefined, requiredRole: JazzInstrumentRole | undefined): boolean {
+  if (!pack || !requiredRole) return false;
+  return pack.instrumentRole === requiredRole || pack.instrumentRole === "general_midi";
+}
 
 const jazzPackSafeLicenses = new Set(["generated_original", "public_domain", "cc0", "cc_by", "mit", "apache_2", "commercial_license", "generaluser_gs_2_0"]);
 const jazzPackReviewLicenses = new Set(["user_provided", "lgpl", "gpl", "proprietary", "unknown"]);
@@ -3654,6 +3705,85 @@ async function manageJazzInstrumentPacks(input: z.infer<typeof manageJazzInstrum
     },
     ok: blockedPacks.length === 0 && reviewPacks.length === 0,
     warnings: [...reviewPacks.map((pack) => `${pack.packId}: license or redistribution review required (${pack.riskFlags.join(", ") || pack.licenseType}).`), ...blockedPacks.map((pack) => `${pack.packId}: blocked (${pack.riskFlags.join(", ")}).`)]
+  };
+}
+
+// Rebuild a registry record back into a manage_jazz_instrument_packs input spec so an existing
+// registry can be merged (not clobbered) when a new pack is auto-registered. declaredSha256 reuses
+// the previously computed hash so re-analysis of unchanged assets still verifies.
+function jazzPackRecordToInputSpec(record: JazzPackRecord): z.infer<typeof jazzInstrumentPackSchema> {
+  const declaredSha256 = record.declaredSha256 ?? record.computedSha256;
+  return {
+    packId: record.packId,
+    displayName: record.displayName,
+    instrumentRole: record.instrumentRole,
+    format: record.format,
+    assetPaths: record.assetPaths,
+    version: record.version,
+    ...(declaredSha256 && /^[a-fA-F0-9]{64}$/.test(declaredSha256) ? { declaredSha256 } : {}),
+    licenseType: record.licenseType,
+    source: record.source,
+    ...(record.sourceUrl ? { sourceUrl: record.sourceUrl } : {}),
+    ...(record.licenseTextPath ? { licenseTextPath: record.licenseTextPath } : {}),
+    ...(record.readmePath ? { readmePath: record.readmePath } : {}),
+    productionUseApproved: record.productionUseApproved,
+    qualityTier: record.qualityTier as z.infer<typeof jazzInstrumentPackSchema>["qualityTier"],
+    ...(record.attribution ? { attribution: record.attribution } : {}),
+    commercialUseAllowed: record.commercialUseAllowed,
+    redistributionAllowed: record.redistributionAllowed,
+    modificationsAllowed: record.modificationsAllowed,
+    ...(record.notes ? { notes: record.notes } : {})
+  };
+}
+
+// Auto-register a freshly installed GeneralUser GS pack into the project's jazz instrument registry
+// as a general_midi pack, MERGING with any existing packs, so render_midi_with_soundfont /
+// render_production_music can use the returned pack id immediately (issue_0145). One GM pack then
+// covers every melodic/percussion role of an ensemble.
+async function autoRegisterInstalledGeneralMidiPack(ctx: ToolContext, projectId: string, installResult: Extract<Awaited<ReturnType<typeof installGeneralUserGsPack>>, { ok: true }>) {
+  const gmSpec: z.infer<typeof jazzInstrumentPackSchema> = {
+    packId: installResult.packId,
+    displayName: installResult.displayName,
+    instrumentRole: "general_midi",
+    format: "soundfont",
+    assetPaths: installResult.assetPaths,
+    version: installResult.version,
+    declaredSha256: installResult.computedSha256,
+    licenseType: installResult.licenseType,
+    source: installResult.source,
+    sourceUrl: installResult.sourceUrl,
+    licenseTextPath: installResult.licenseTextPath,
+    readmePath: installResult.readmePath,
+    attribution: "GeneralUser GS by S. Christian Collins",
+    productionUseApproved: true,
+    qualityTier: "production_candidate",
+    commercialUseAllowed: true,
+    redistributionAllowed: true,
+    modificationsAllowed: true
+  };
+  const existing = await readJazzPackRegistry(ctx, projectId);
+  // NOTE: existing packs are re-analyzed on merge. A previously-registered pack whose stored
+  // attribution/sourceUrl is empty could re-acquire a risk flag here; install's ok only gates on the
+  // GM pack so it won't lie, but a second user pack could be quietly demoted to review_required.
+  const existingSpecs = (existing?.packs ?? [])
+    .filter((record) => record.packId !== gmSpec.packId)
+    .map(jazzPackRecordToInputSpec);
+  const parsedInput = manageJazzInstrumentPacksInputSchema.parse({
+    projectId,
+    intendedUse: "client_delivery",
+    packs: [...existingSpecs, gmSpec]
+  });
+  const registry = await manageJazzInstrumentPacks(parsedInput, ctx.projectRoot);
+  const [registryFile] = await Promise.all([
+    writeProjectFile(ctx.projectRoot, projectId, parsedInput.outputPath, `${JSON.stringify(registry, null, 2)}\n`),
+    writeProjectFile(ctx.projectRoot, projectId, parsedInput.outputLicenseManifestPath, `${JSON.stringify(registry.licenseManifest, null, 2)}\n`)
+  ]);
+  return {
+    registryPath: registryFile.path,
+    registered: registry.readyPackIds.includes(gmSpec.packId),
+    readyPackIds: registry.readyPackIds,
+    reviewRequiredPackIds: registry.reviewRequiredPackIds,
+    blockedPackIds: registry.blockedPackIds
   };
 }
 
@@ -4283,7 +4413,7 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "extend_music_arrangement", description: "Extend a short sketch into a 5-10 minute long-form arrangement with intro, A/B, bridge, solo texture, reprise, outro, MIDI, and optional WAV preview.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, targetDurationSeconds: { type: "number" }, arrangementStyle: { type: "string", enum: ["background_friendly", "concert_style", "cinematic_arc", "loopable_longform"] }, renderAudio: { type: "boolean" }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" }, outputAudioPath: { type: "string" } }, required: ["projectId", "compositionManifestPath"], additionalProperties: false } },
+    definition: { name: "extend_music_arrangement", description: "Extend a short sketch into a 5-10 minute long-form arrangement with intro, A/B, bridge, solo texture, reprise, outro, MIDI, and optional WAV preview.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, targetDurationSeconds: { type: "number" }, arrangementStyle: { type: "string", enum: ["background_friendly", "concert_style", "cinematic_arc", "loopable_longform"] }, renderAudio: { type: "boolean" }, acknowledgePreviewOnly: { type: "boolean" }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" }, outputAudioPath: { type: "string" } }, required: ["projectId", "compositionManifestPath"], additionalProperties: false } },
     enabledByDefault: true,
     schema: extendMusicArrangementInputSchema,
     handler: async (input, ctx) => {
@@ -4293,12 +4423,18 @@ export const musicWorkflowTools: ToolModule[] = [
         (await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(extended, null, 2)}\n`)).path,
         (await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(extended), "audio/midi")).path
       ];
-      if (parsed.renderAudio) artifacts.push((await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputAudioPath, wavBuffer(extended, 12000), "audio/wav")).path);
-      return { ok: true, summary: `Extended arrangement to ${Math.round(extended.durationSeconds / 60)} minute(s).`, jobId: parsed.projectId, artifacts, structuredContent: { ...extended, manifestPath: parsed.outputManifestPath, midiPath: parsed.outputMidiPath, audioPath: parsed.renderAudio ? parsed.outputAudioPath : undefined }, logs: [JSON.stringify({ sections: extended.sections, durationSeconds: extended.durationSeconds }, null, 2)], errors: [] };
+      // issue_0143: never silently emit procedural preview audio. Only write it when explicitly
+      // acknowledged as throwaway; otherwise deliver MIDI and steer to the real render path.
+      const emitPreview = parsed.renderAudio && parsed.acknowledgePreviewOnly;
+      const previewWarning = parsed.renderAudio && !parsed.acknowledgePreviewOnly
+        ? "Procedural preview audio was not written (fail-closed). Render with render_production_music / render_midi_with_soundfont using a registered SoundFont, or pass acknowledgePreviewOnly=true for a throwaway scratch preview."
+        : undefined;
+      if (emitPreview) artifacts.push((await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputAudioPath, wavBuffer(extended, 12000), "audio/wav")).path);
+      return { ok: true, summary: `Extended arrangement to ${Math.round(extended.durationSeconds / 60)} minute(s).`, jobId: parsed.projectId, artifacts, structuredContent: { ...extended, manifestPath: parsed.outputManifestPath, midiPath: parsed.outputMidiPath, audioPath: emitPreview ? parsed.outputAudioPath : undefined, ...(previewWarning ? { previewWarning } : {}) }, logs: [JSON.stringify({ sections: extended.sections, durationSeconds: extended.durationSeconds }, null, 2)], errors: [] };
     }
   },
   {
-    definition: { name: "extend_original_music_arrangement", description: "Extend a selected original short sketch into a 5-10 minute background-friendly arrangement with section map, development report, originality notes, warnings, MIDI, and optional audio preview.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, sourceManifestPath: { type: "string" }, targetDurationSec: { type: "number" }, styleFamily: { type: "string" }, backgroundUse: { type: "string" }, variationLevel: { type: "string" }, sections: { type: "array", items: { type: "string" } }, originalityPolicy: { type: "string" }, renderAudio: { type: "boolean" }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" }, outputAudioPath: { type: "string" } }, required: ["projectId", "sourceManifestPath"], additionalProperties: false } },
+    definition: { name: "extend_original_music_arrangement", description: "Extend a selected original short sketch into a 5-10 minute background-friendly arrangement with section map, development report, originality notes, warnings, MIDI, and optional audio preview.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, sourceManifestPath: { type: "string" }, targetDurationSec: { type: "number" }, styleFamily: { type: "string" }, backgroundUse: { type: "string" }, variationLevel: { type: "string" }, sections: { type: "array", items: { type: "string" } }, originalityPolicy: { type: "string" }, renderAudio: { type: "boolean" }, acknowledgePreviewOnly: { type: "boolean" }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" }, outputAudioPath: { type: "string" } }, required: ["projectId", "sourceManifestPath"], additionalProperties: false } },
     enabledByDefault: true,
     schema: extendOriginalMusicArrangementInputSchema,
     handler: async (input, ctx) => {
@@ -4310,13 +4446,18 @@ export const musicWorkflowTools: ToolModule[] = [
         (await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(manifest, null, 2)}\n`)).path,
         (await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(arranged.extended), "audio/midi")).path
       ];
-      if (parsed.renderAudio) artifacts.push((await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputAudioPath, wavBuffer(arranged.extended, 12000), "audio/wav")).path);
+      // issue_0143: fail-closed procedural preview — only emit when explicitly acknowledged.
+      const emitPreview = parsed.renderAudio && parsed.acknowledgePreviewOnly;
+      const previewWarning = parsed.renderAudio && !parsed.acknowledgePreviewOnly
+        ? "Procedural preview audio was not written (fail-closed). Render with render_production_music / render_midi_with_soundfont using a registered SoundFont, or pass acknowledgePreviewOnly=true for a throwaway scratch preview."
+        : undefined;
+      if (emitPreview) artifacts.push((await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputAudioPath, wavBuffer(arranged.extended, 12000), "audio/wav")).path);
       return {
         ok: arranged.warnings.length === 0,
         summary: `Extended original arrangement to ${Math.round(parsed.targetDurationSec / 60)} minute(s) with ${arranged.warnings.length} warning(s).`,
         jobId: parsed.projectId,
         artifacts,
-        structuredContent: { extendedMidiPath: parsed.outputMidiPath, arrangementManifestPath: parsed.outputManifestPath, audioPath: parsed.renderAudio ? parsed.outputAudioPath : undefined, sectionMap: arranged.sectionMap, developmentReport: arranged.developmentReport, originalityNotes: arranged.originalityNotes, warnings: arranged.warnings, renderReady: arranged.renderReady },
+        structuredContent: { extendedMidiPath: parsed.outputMidiPath, arrangementManifestPath: parsed.outputManifestPath, audioPath: emitPreview ? parsed.outputAudioPath : undefined, sectionMap: arranged.sectionMap, developmentReport: arranged.developmentReport, originalityNotes: arranged.originalityNotes, warnings: arranged.warnings, renderReady: arranged.renderReady, ...(previewWarning ? { previewWarning } : {}) },
         logs: [JSON.stringify({ sectionMap: arranged.sectionMap, developmentReport: arranged.developmentReport, warnings: arranged.warnings }, null, 2)],
         errors: arranged.warnings
       };
@@ -4579,17 +4720,31 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "compose_music", description: "Compose a structured original music cue and write a project MIDI file plus composition manifest.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, title: { type: "string" }, style: { type: "string", enum: ["cafe_jazz", "lo_fi", "bossa_nova", "smooth_piano", "acoustic_pop", "cinematic_background", "corporate_intro", "game_bgm", "orchestral_sketch", "ambient", "chill_lounge"] }, mood: { type: "string" }, tempo: { type: "number" }, key: { type: "string" }, durationSeconds: { type: "number" }, useCase: { type: "string" }, instruments: { type: "array", items: { type: "string", enum: ["piano", "electric_piano", "upright_bass", "acoustic_bass", "violin", "cello", "drums", "brushes", "guitar", "strings", "pads", "synth", "sax_like_lead"] } }, complexity: { type: "string", enum: ["simple", "medium", "rich"] }, loopable: { type: "boolean" }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "compose_music", description: "Compose a structured original music cue and write a project MIDI file plus composition manifest.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, title: { type: "string" }, style: { type: "string", enum: ["cafe_jazz", "lo_fi", "bossa_nova", "smooth_piano", "acoustic_pop", "cinematic_background", "corporate_intro", "game_bgm", "orchestral_sketch", "ambient", "chill_lounge"] }, mood: { type: "string" }, tempo: { type: "number" }, key: { type: "string" }, durationSeconds: { type: "number" }, useCase: { type: "string" }, instruments: { type: "array", items: { type: "string", enum: ["piano", "electric_piano", "upright_bass", "acoustic_bass", "violin", "cello", "drums", "brushes", "guitar", "strings", "pads", "synth", "sax_like_lead"] } }, complexity: { type: "string", enum: ["simple", "medium", "rich"] }, loopable: { type: "boolean" }, ensembleRequirement: { type: "object", properties: { requiredInstruments: { type: "array", items: { type: "string" } }, soloInstruments: { type: "array", items: { type: "string" } }, maxSingleInstrumentSeconds: { type: "number" }, requireStartWithinBars: { type: "number" }, barBeats: { type: "number" } } }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: composeMusicInputSchema,
     handler: async (input, ctx) => {
       const parsed = composeMusicInputSchema.parse(input);
       const composition = buildComposition(parsed);
+      // issue_0144: when the caller declares an ensemble, verify the requested instruments actually
+      // play together (cello track present, with notes, overlapping piano) before reporting success.
+      const ensembleReport = parsed.ensembleRequirement ? analyzeEnsemble(composition, parsed.ensembleRequirement) : undefined;
       const [manifestFile, midiFile] = await Promise.all([
         writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(composition, null, 2)}\n`),
         writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(composition), "audio/midi")
       ]);
-      return { ok: true, summary: `Composed ${composition.style} cue with ${Object.keys(composition.tracks).length} track(s).`, jobId: parsed.projectId, artifacts: [manifestFile.path, midiFile.path], structuredContent: { ...composition, manifestPath: manifestFile.path, midiPath: midiFile.path }, logs: [JSON.stringify(composition, null, 2)], errors: [] };
+      const ensembleOk = ensembleReport ? ensembleReport.ok : true;
+      return {
+        ok: ensembleOk,
+        summary: ensembleOk
+          ? `Composed ${composition.style} cue with ${Object.keys(composition.tracks).length} track(s).`
+          : `Ensemble requirement not met: ${ensembleReport!.failures.length} blocking issue(s). MIDI written for inspection but not a deliverable ensemble.`,
+        jobId: parsed.projectId,
+        artifacts: [manifestFile.path, midiFile.path],
+        structuredContent: { ...composition, manifestPath: manifestFile.path, midiPath: midiFile.path, ensembleReport },
+        logs: [JSON.stringify({ ...composition, ensembleReport }, null, 2)],
+        errors: ensembleOk ? [] : ensembleReport!.failures
+      };
     }
   },
   {
@@ -4810,14 +4965,31 @@ export const musicWorkflowTools: ToolModule[] = [
     handler: async (input, ctx) => {
       const parsed = installFreeSoundfontPackInputSchema.parse(input);
       const result = await installGeneralUserGsPack(ctx, parsed);
-      const artifacts = result.ok ? [...result.assetPaths, result.licenseTextPath, result.readmePath] : [];
+      // issue_0145: auto-register the installed pack so render tools can use the pack id directly,
+      // instead of dead-ending the user at "install succeeded but render doesn't recognize it".
+      const registration = result.ok ? await autoRegisterInstalledGeneralMidiPack(ctx, parsed.projectId, result) : undefined;
+      const artifacts = result.ok ? [...result.assetPaths, result.licenseTextPath, result.readmePath, ...(registration ? [registration.registryPath] : [])] : [];
+      const structuredContent = result.ok
+        ? {
+          ...result,
+          autoRegistered: registration?.registered ?? false,
+          packRegistryPath: registration?.registryPath,
+          readyPackIds: registration?.readyPackIds ?? [],
+          renderUsage: registration?.registered
+            ? `Pack "${result.packId}" is registered and ready. Render directly with render_midi_with_soundfont or render_production_music using soundfontPackId="${result.packId}" (a general_midi pack covers every instrument role).`
+            : "Auto-registration did not pass production gates; inspect the registry and license sidecar.",
+          recommendedNextTool: "render_production_music"
+        }
+        : result;
       return {
-        ok: result.ok,
-        summary: result.ok ? `Installed ${result.displayName} with SHA-256 ${result.computedSha256}.` : `Failed to install ${result.displayName}.`,
+        ok: result.ok && (registration?.registered ?? true),
+        summary: result.ok
+          ? `Installed ${result.displayName} (SHA-256 ${result.computedSha256}) and ${registration?.registered ? `auto-registered pack id "${result.packId}" — ready to render` : "auto-registration needs review"}.`
+          : `Failed to install ${result.displayName}.`,
         jobId: parsed.projectId,
         artifacts,
-        structuredContent: result,
-        logs: [JSON.stringify(result, null, 2)],
+        structuredContent,
+        logs: [JSON.stringify(structuredContent, null, 2)],
         errors: result.ok ? [] : result.errors
       };
     }
@@ -5000,11 +5172,31 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "render_midi_to_audio", description: "Render generated MIDI/composition manifests into playable audio using a safe procedural instrument library, with full mix, optional stems, render report, license manifest, and format warnings.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, instrumentMap: { type: "object", additionalProperties: { type: "string", enum: ["warm_acoustic_piano", "soft_electric_piano", "upright_bass", "acoustic_bass", "jazz_brushes", "light_drum_kit", "guitar", "violin", "cello", "strings", "pads", "mallets", "soft_synth"] } }, renderPreset: { type: "string", enum: ["warm_cafe", "lo_fi_soft", "cinematic_soft", "clean_corporate", "game_loop"] }, outputFormats: { type: "array", items: { type: "string", enum: ["wav", "mp3", "ogg"] } }, stems: { type: "boolean" }, licenseConstraints: { type: "string", enum: ["generated_only", "allow_bundled_safe", "third_party_review_required"] }, format: { type: "string", enum: ["wav"] }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "render_midi_to_audio", description: "Render generated MIDI/composition manifests into playable audio using a safe procedural instrument library, with full mix, optional stems, render report, license manifest, and format warnings.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, instrumentMap: { type: "object", additionalProperties: { type: "string", enum: ["warm_acoustic_piano", "soft_electric_piano", "upright_bass", "acoustic_bass", "jazz_brushes", "light_drum_kit", "guitar", "violin", "cello", "strings", "pads", "mallets", "soft_synth"] } }, renderPreset: { type: "string", enum: ["warm_cafe", "lo_fi_soft", "cinematic_soft", "clean_corporate", "game_loop"] }, outputFormats: { type: "array", items: { type: "string", enum: ["wav", "mp3", "ogg"] } }, stems: { type: "boolean" }, licenseConstraints: { type: "string", enum: ["generated_only", "allow_bundled_safe", "third_party_review_required"] }, format: { type: "string", enum: ["wav"] }, sampleRate: { type: "number" }, acknowledgePreviewOnly: { type: "boolean" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: renderMidiToAudioInputSchema,
     handler: async (input, ctx) => {
       const parsed = renderMidiToAudioInputSchema.parse(input);
+      // issue_0143: fail closed. Without an explicit preview-only acknowledgement, do not emit
+      // procedural audio — point the caller at the real source-backed render path instead.
+      if (!parsed.acknowledgePreviewOnly) {
+        return {
+          ok: false,
+          summary: "Procedural synth output is disabled for delivery. Install a real SoundFont and render with a verified engine.",
+          jobId: parsed.projectId,
+          artifacts: [],
+          structuredContent: {
+            renderer: "built_in_procedural_synth",
+            qualityTier: "preview_only",
+            productionReady: false,
+            blockingReasons: ["Built-in procedural synth output is not a deliverable. There is no real audio source registered for this render."],
+            recommendedNextTools: ["install_free_soundfont_pack", "render_production_music", "render_midi_with_soundfont"],
+            howToFix: "Run install_free_soundfont_pack (auto-registers a GeneralUser GS general_midi pack), then render with render_production_music or render_midi_with_soundfont using that pack id. To generate an explicitly throwaway, non-deliverable scratch preview instead, re-call this tool with acknowledgePreviewOnly=true."
+          },
+          logs: [],
+          errors: ["render_midi_to_audio is fail-closed: procedural preview requires acknowledgePreviewOnly=true and must never be delivered as finished music."]
+        };
+      }
       const warnings: string[] = [];
       let composition: Composition;
       if (parsed.compositionManifestPath) {
