@@ -243,6 +243,44 @@ test("served blog HTML carries OG/JSON-LD SEO tags, and sitemap.xml + robots.txt
   });
 });
 
+test("get_blog_post hides draft content from non-admins without leaking existence", async () => {
+  await initializeBlogStore({ statePath: process.env.BLOG_STATE_PATH! });
+  const getTool = blogTools.find((tool) => tool.definition.name === "get_blog_post");
+  const publishTool = blogTools.find((tool) => tool.definition.name === "publish_blog_post");
+  assert.ok(getTool && publishTool);
+  const ctxBase = { publicBaseUrl: "https://example.test", workspaceRoot: root, commandTimeoutMs: 1000, shareRoot: root, artifactRoot: root, feedbackRoot: root, projectRoot: root, clientId: "test" };
+
+  await withServer(async (baseUrl) => {
+    const login = await fetch(`${baseUrl}/admin/api/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: "admin@example.test", password: "test-admin-password" }) });
+    const cookie = login.headers.get("set-cookie")!.split(";")[0];
+    const session = await (await fetch(`${baseUrl}/admin/api/session`, { headers: { Cookie: cookie } })).json() as { user?: { id?: string } };
+    const adminId = session.user?.id;
+    assert.ok(adminId);
+
+    const draft = await publishTool!.handler({ title: "Secret Draft", content: "unpublished body text", status: "draft" }, { ...ctxBase, userId: adminId });
+    assert.equal(draft.ok, true);
+
+    // A non-admin draft request is indistinguishable from a missing slug (only the echoed slug
+    // differs): same ok/errors shape, no content, no existence leak.
+    const asAnon = await getTool!.handler({ slug: "secret-draft" }, { ...ctxBase, userId: undefined });
+    const missing = await getTool!.handler({ slug: "does-not-exist" }, { ...ctxBase, userId: undefined });
+    assert.equal(asAnon.ok, false);
+    assert.deepEqual(asAnon.errors, missing.errors);
+    assert.match(asAnon.summary, /^No blog post with slug/);
+    assert.doesNotMatch(`${asAnon.summary}\n${asAnon.logs.join("\n")}`, /unpublished body text/);
+
+    // The admin can read the draft.
+    const asAdmin = await getTool!.handler({ slug: "secret-draft" }, { ...ctxBase, userId: adminId });
+    assert.equal(asAdmin.ok, true);
+    assert.match(asAdmin.logs.join("\n"), /unpublished body text/);
+
+    // A published post stays readable by anyone.
+    await publishTool!.handler({ title: "Public One", content: "public body", status: "published" }, { ...ctxBase, userId: adminId });
+    const pub = await getTool!.handler({ slug: "public-one" }, { ...ctxBase, userId: undefined });
+    assert.equal(pub.ok, true);
+  });
+});
+
 test("admin API lists, deletes blog posts and saves the theme", async () => {
   await initializeBlogStore({ statePath: process.env.BLOG_STATE_PATH! });
   await upsertBlogPost({ title: "Admin Managed", content: "body", tags: ["ops"] });
