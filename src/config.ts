@@ -27,15 +27,42 @@ export interface ServerConfig {
   blogStatePath: string;
   commandTimeoutMs: number;
   devToken?: string;
+  configWarnings: string[];
   adminPasscode: string;
   oauthConfig: OAuthConfig;
   adminDistPath: string;
+}
+
+export interface DevTokenResolution {
+  token?: string;
+  warnings: string[];
+}
+
+// Pure: decides whether the static MCP_DEV_TOKEN OAuth bypass is allowed, and why not.
+// The bypass grants full MCP access with no per-user isolation, so it is only honored for a
+// strong secret (>=32 chars) AND outside production unless explicitly force-enabled. Anything
+// rejected returns no token plus an actionable warning that server.ts logs at startup.
+export function resolveDevToken(raw: string | undefined, nodeEnv: string | undefined, allowInProd: boolean): DevTokenResolution {
+  const value = raw?.trim();
+  if (!value) return { warnings: [] };
+  const isProd = nodeEnv === "production";
+  if (value.length < 32) {
+    return { warnings: ["MCP_DEV_TOKEN is set but shorter than 32 characters; the OAuth bypass is DISABLED. Use a 32+ character random secret to enable it."] };
+  }
+  if (isProd && !allowInProd) {
+    return { warnings: ["MCP_DEV_TOKEN is set but NODE_ENV=production; the OAuth bypass is DISABLED. Set MCP_DEV_TOKEN_ALLOW_PROD=true to force-enable it (NOT recommended)."] };
+  }
+  const warning = isProd
+    ? "SECURITY: MCP_DEV_TOKEN OAuth bypass is ENABLED in production via MCP_DEV_TOKEN_ALLOW_PROD. Any holder of this token has full MCP access as the legacy user."
+    : "MCP_DEV_TOKEN OAuth bypass is enabled (non-production). Do not ship this token to production.";
+  return { token: value, warnings: [warning] };
 }
 
 function resolveConfig(): ServerConfig {
   const publicBaseUrl = process.env.PUBLIC_BASE_URL ?? "https://gmb01.xyz";
   const contentBaseUrl = process.env.CONTENT_BASE_URL ?? publicBaseUrl;
   const workspaceRoot = process.env.WORKSPACE_ROOT ?? process.cwd();
+  const devTokenResolution = resolveDevToken(process.env.MCP_DEV_TOKEN, process.env.NODE_ENV, process.env.MCP_DEV_TOKEN_ALLOW_PROD === "true");
   return {
     port: Number.parseInt(process.env.PORT ?? "6859", 10),
     host: process.env.HOST ?? "127.0.0.1",
@@ -56,7 +83,8 @@ function resolveConfig(): ServerConfig {
     siteStatePath: process.env.SITE_STATE_PATH ?? `${workspaceRoot}/.state/site-state.json`,
     blogStatePath: process.env.BLOG_STATE_PATH ?? `${workspaceRoot}/.state/blog-state.json`,
     commandTimeoutMs: Number.parseInt(process.env.COMMAND_TIMEOUT_MS ?? "30000", 10),
-    devToken: process.env.MCP_DEV_TOKEN,
+    devToken: devTokenResolution.token,
+    configWarnings: devTokenResolution.warnings,
     adminPasscode: process.env.ADMIN_PASSCODE ?? process.env.KB_MCP_OAUTH_PASSCODE ?? "",
     oauthConfig: {
       issuer: process.env.KB_MCP_OAUTH_ISSUER ?? publicBaseUrl,
