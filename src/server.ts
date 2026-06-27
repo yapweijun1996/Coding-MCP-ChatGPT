@@ -21,6 +21,10 @@ import { getUserByEmail, initializeUserStore } from "./user-store.js";
 
 export const app = express();
 
+// Surface configuration warnings (e.g. a disabled or production-enabled dev-token bypass)
+// loudly at startup so a misconfigured deployment is visible in the logs.
+for (const warning of config.configWarnings) console.warn(`[config] ${warning}`);
+
 // --- Store initialization. Ordered and awaited before any route is registered so the
 // first request never races a half-initialized store. ---
 initializeOAuthState(config.oauthConfig.statePath);

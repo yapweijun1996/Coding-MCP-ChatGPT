@@ -190,6 +190,38 @@ function isRedirectAllowed(client: OAuthClient, redirectUri: string): boolean {
   return client.redirectUris.includes(redirectUri);
 }
 
+// Pure: the machine-enforceable floor for a dynamically-registered redirect_uri, under the
+// human consent gate. DCR clients are unknown ahead of time, so we cannot vet WHO they are,
+// but we can require WHERE the auth code is delivered to be safe: https only (or http loopback
+// for local dev), with no embedded credentials (blocks https://trusted@attacker.com) and no
+// fragment. This runs at both registration and authorize-time adoption.
+export function isRedirectUriAllowed(redirectUri: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(redirectUri);
+  } catch {
+    return false;
+  }
+  if (url.username || url.password) return false;
+  if (url.hash) return false;
+  if (url.protocol === "https:") return true;
+  if (url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1")) return true;
+  return false;
+}
+
+// Anonymous POST /register lets anyone create a client, so bound the state file: when over
+// capacity, evict the oldest clients that were never bound to a user (registration spam /
+// flooding artifacts). Owned clients (real, authorized connectors) are never evicted.
+const MAX_OAUTH_CLIENTS = 500;
+function evictUnownedClientsForCapacity(): void {
+  if (clients.size < MAX_OAUTH_CLIENTS) return;
+  const unowned = [...clients.values()].filter((client) => !client.ownerUserId).sort((a, b) => a.createdAt - b.createdAt);
+  for (const client of unowned) {
+    if (clients.size < MAX_OAUTH_CLIENTS) break;
+    clients.delete(client.clientId);
+  }
+}
+
 function adoptClientFromAuthorize(params: AuthorizeParams, ownerUserId?: string): OAuthClient {
   const client: OAuthClient = {
     clientId: params.clientId,
@@ -259,8 +291,13 @@ export function parseAuthorizeParams(req: Request): AuthorizeParams | undefined 
 
 export function registerClient(rawBody: unknown): Record<string, unknown> {
   const input = registerSchema.parse(rawBody ?? {});
-  const clientId = `client_${randomUUID()}`;
   const redirectUris = input.redirect_uris ?? [];
+  const invalidRedirects = redirectUris.filter((uri) => !isRedirectUriAllowed(uri));
+  if (invalidRedirects.length) {
+    throw new Error(`Invalid redirect_uri: ${invalidRedirects.join(", ")}. Must be https (or http://localhost for development), with no embedded credentials or fragment.`);
+  }
+  evictUnownedClientsForCapacity();
+  const clientId = `client_${randomUUID()}`;
   const client: OAuthClient = {
     clientId,
     clientName: input.client_name ?? "ChatGPT MCP Connector",
@@ -359,6 +396,9 @@ export function createAuthorizationRedirect(params: AuthorizeParams, passcode: s
 export function createAuthorizationRedirectForUser(params: AuthorizeParams, ownerUserId: string | undefined, config: OAuthConfig): string {
   if (!clients.has(params.clientId)) {
     if (ownerUserId) {
+      if (!isRedirectUriAllowed(params.redirectUri)) {
+        throw new Error("redirect_uri must be https (or http://localhost for development), with no embedded credentials or fragment.");
+      }
       adoptClientFromAuthorize(params, ownerUserId);
     } else {
       throw new Error("Unknown OAuth client. Register the client via /oauth/register before authorizing.");

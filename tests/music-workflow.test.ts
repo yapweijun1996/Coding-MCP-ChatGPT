@@ -509,6 +509,57 @@ test("MusicXML score can render through a commercial-safe CC BY piano SoundFont 
   }
 });
 
+test("render auto-registers a discovered license-cleared SoundFont instead of dead-ending on 'no registered ready pack'", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "musicxml-autoregister-"));
+  const oldPath = process.env.PATH;
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Auto Register SoundFont", createdByClientId: "producer" });
+    const importer = getToolModule("import_musicxml_score");
+    const soundfontRender = getToolModule("render_midi_with_soundfont");
+    assert.ok(importer);
+    assert.ok(soundfontRender);
+
+    await importer!.handler({
+      projectId: project.id,
+      musicXmlString: simplePianoMusicXml,
+      outputManifestPath: "music/score.json",
+      outputMidiPath: "music/score.mid"
+    }, ctx);
+
+    // A license-cleared GeneralUser-GS SoundFont sits in project assets with its sidecars, but is
+    // NEVER registered via manage_jazz_instrument_packs — the exact registry-to-renderer mismatch.
+    await writeProjectAsset(ctx.projectRoot, project.id, "soundfonts/GeneralUser-GS.sf2", fakeSoundfontBytes(), "audio/soundfont");
+    await writeProjectFile(ctx.projectRoot, project.id, "soundfonts/LICENSE.txt", "GeneralUser GS license fixture\n");
+    await writeProjectFile(ctx.projectRoot, project.id, "soundfonts/README.md", "# GeneralUser GS fixture\n");
+
+    // No registry file exists yet.
+    await assert.rejects(readProjectFile(ctx.projectRoot, project.id, "music/jazz-instrument-packs.json", 1024 * 1024));
+
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${await installFakeSfizz(root)}:${oldPath}`;
+    const renderResult = await soundfontRender!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/score.json",
+      soundfontPath: "soundfonts/GeneralUser-GS.sf2",
+      outputAudioPath: "music/score-soundfont.wav",
+      outputReportPath: "music/score-soundfont-report.json"
+    }, ctx);
+
+    assert.equal(renderResult.ok, true, `expected self-heal to render, got: ${JSON.stringify(renderResult.errors)}`);
+    const renderPayload = renderResult.structuredContent as { qualityTier: string; productionReady: boolean };
+    assert.equal(renderPayload.qualityTier, "production_candidate");
+    assert.equal(renderPayload.productionReady, true);
+
+    // The self-heal must have written the registry so subsequent renders resolve directly.
+    const registry = JSON.parse(await readProjectFile(ctx.projectRoot, project.id, "music/jazz-instrument-packs.json", 1024 * 1024)) as { readyPackIds: string[]; packs: Array<{ assetPaths: string[] }> };
+    assert.ok(registry.readyPackIds.length > 0, "auto-registration should produce a ready pack");
+    assert.ok(registry.packs.some((pack) => pack.assetPaths.includes("soundfonts/GeneralUser-GS.sf2")));
+  } finally {
+    process.env.PATH = oldPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("music workflow composes, edits, renders, audits, and exports music assets", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "music-workflow-"));
   try {
