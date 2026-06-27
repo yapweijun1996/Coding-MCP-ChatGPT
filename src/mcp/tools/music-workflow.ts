@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { z } from "zod";
-import { getProjectStoredFilePath, publishProject, readProjectFile, writeProjectAsset, writeProjectFile } from "../../projects/store.js";
+import { getProjectFilesDirectory, getProjectStoredFilePath, publishProject, readProjectFile, writeProjectAsset, writeProjectFile } from "../../projects/store.js";
 import { buildProjectPublishOptions } from "../../projects/publish-policy.js";
 import type { ToolContext, ToolModule } from "../types.js";
 
@@ -92,6 +92,46 @@ const renderMidiWithSoundfontInputSchema = z.object({
   message: "compositionManifestPath or midiPath is required."
 }).refine((value) => Boolean(value.soundfontPackId || value.soundfontPath), {
   message: "soundfontPackId or soundfontPath is required."
+});
+
+const checkMusicRenderEnvironmentInputSchema = z.object({
+  projectId: z.string().min(8).max(80).optional(),
+  includeLocalMusicPacks: z.boolean().optional().default(true),
+  projectSearchDirectories: z.array(z.string().min(1).max(200)).max(20).optional().default(["soundfonts", "instruments", "music"])
+});
+
+const renderProductionMusicInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  compositionManifestPath: z.string().min(1).max(240),
+  soundfontPackId: z.string().min(1).max(80).optional(),
+  soundfontPath: z.string().min(1).max(240).optional(),
+  channelMap: z.record(z.number().int().min(0).max(15)).optional().default({}),
+  sampleRate: z.number().int().min(8000).max(96000).optional().default(44100),
+  targetRms: z.number().min(0.02).max(0.5).optional().default(0.16),
+  truePeakCeiling: z.number().min(0.5).max(0.99).optional().default(0.89),
+  outputProductionWavPath: z.string().min(1).max(240).optional().default("music/production.wav"),
+  outputPreviewMp3Path: z.string().min(1).max(240).optional().default("music/preview.mp3"),
+  outputRawRenderPath: z.string().min(1).max(240).optional().default("music/production/raw-render.wav"),
+  outputStemDirectory: z.string().min(1).max(200).optional().default("music/stems"),
+  outputMidiStemDirectory: z.string().min(1).max(200).optional().default("music/midi-stems"),
+  outputLicensesPath: z.string().min(1).max(240).optional().default("LICENSES.md"),
+  outputReportPath: z.string().min(1).max(240).optional().default("music/production-render-pipeline.json"),
+  outputHtmlPath: z.string().min(1).max(240).optional().default("music-project.html"),
+  publish: z.boolean().optional().default(true)
+}).refine((value) => Boolean(value.soundfontPackId || value.soundfontPath), {
+  message: "soundfontPackId or soundfontPath is required."
+});
+
+const installFreeSoundfontPackInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  packId: z.enum(["generaluser_gs"]),
+  outputDirectory: z.string().min(1).max(200).optional().default("soundfonts/generaluser-gs")
+});
+
+const discoverSoundfontPacksInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  includeLocalMusicPacks: z.boolean().optional().default(true),
+  projectSearchDirectories: z.array(z.string().min(1).max(200)).max(20).optional().default(["soundfonts", "instruments", "music"])
 });
 
 const generateJazzHarmonyInputSchema = z.object({
@@ -182,8 +222,13 @@ const jazzInstrumentPackSchema = z.object({
   assetPaths: z.array(z.string().min(1).max(240)).min(1).max(80),
   version: z.string().min(1).max(80).optional(),
   declaredSha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
-  licenseType: z.enum(["generated_original", "user_provided", "public_domain", "cc0", "cc_by", "mit", "apache_2", "commercial_license", "lgpl", "gpl", "proprietary", "non_commercial", "unknown"]),
+  licenseType: z.enum(["generated_original", "user_provided", "public_domain", "cc0", "cc_by", "mit", "apache_2", "commercial_license", "generaluser_gs_2_0", "lgpl", "gpl", "proprietary", "non_commercial", "unknown"]),
   source: z.string().min(1).max(240),
+  sourceUrl: z.string().url().max(500).optional(),
+  licenseTextPath: z.string().min(1).max(240).optional(),
+  readmePath: z.string().min(1).max(240).optional(),
+  productionUseApproved: z.boolean().optional(),
+  qualityTier: z.enum(["production_candidate", "review_required", "preview_only"]).optional(),
   attribution: z.string().min(1).max(500).optional(),
   commercialUseAllowed: z.boolean().optional(),
   redistributionAllowed: z.boolean().optional(),
@@ -722,7 +767,6 @@ function keyRoot(key: string) {
 }
 
 function progressionFor(style: string, key: string) {
-  const root = keyRoot(key);
   const names = style === "bossa_nova"
     ? ["Dm9", "G13", "Cmaj7", "A7"]
     : style === "lo_fi"
@@ -1636,6 +1680,14 @@ async function inspectProjectExportFiles(ctx: ToolContext, projectId: string, fi
   return { exportedFiles, missingFiles, largeFiles, brokenAudioReferences };
 }
 
+type MusicExportFile = {
+  path: string;
+  role: string;
+  purpose: string;
+  sizeBytes: number;
+  format: string;
+};
+
 function collectMusicLicenseWarnings(licenseManifest: unknown) {
   const warnings: string[] = [];
   if (!licenseManifest || typeof licenseManifest !== "object") return warnings;
@@ -1693,21 +1745,54 @@ async function findProductionRenderGateWarnings(ctx: ToolContext, projectId: str
     if (qualityTier !== "production_candidate" || productionReady !== true) {
       warnings.push(`Production gate: ${audioPath} is ${qualityTier} from ${String(report.renderer ?? nested?.renderer ?? report.reportPath)}; run render_midi_with_soundfont with a ready SoundFont pack before production export.`);
     }
+    const soundfont = (report.soundfont ?? nested?.soundfont) as Record<string, unknown> | undefined;
+    const packSha256 = report.packSha256 ?? nested?.packSha256 ?? soundfont?.computedSha256;
+    const licenseTextPath = report.packLicenseTextPath ?? nested?.packLicenseTextPath ?? soundfont?.licenseTextPath;
+    const sourceUrl = report.packSourceUrl ?? nested?.packSourceUrl ?? soundfont?.sourceUrl;
+    const productionUseApproved = report.productionUseApproved ?? nested?.productionUseApproved ?? soundfont?.productionUseApproved;
+    const commercialUseAllowed = soundfont?.commercialUseAllowed;
+    if (typeof packSha256 !== "string" || !/^[a-fA-F0-9]{64}$/.test(packSha256)) warnings.push(`Production gate: ${audioPath} render report has no valid pack SHA-256.`);
+    if (typeof licenseTextPath !== "string" || !licenseTextPath.trim()) warnings.push(`Production gate: ${audioPath} render report has no license text path.`);
+    if (typeof sourceUrl !== "string" || !sourceUrl.trim()) warnings.push(`Production gate: ${audioPath} render report has no source URL.`);
+    if (productionUseApproved !== true) warnings.push(`Production gate: ${audioPath} render report is not productionUseApproved=true.`);
+    if (commercialUseAllowed !== true) warnings.push(`Production gate: ${audioPath} render report is not commercial-use clean.`);
     const blockingReasons = Array.isArray(report.blockingReasons) ? report.blockingReasons : Array.isArray(nested?.blockingReasons) ? nested.blockingReasons : [];
     for (const reason of blockingReasons) warnings.push(`Production gate: ${audioPath}: ${String(reason)}`);
   }
   const resolvedReports = reports.map((report) => {
     const nested = report.renderReport as Record<string, unknown> | undefined;
+    const soundfont = (report.soundfont ?? nested?.soundfont) as Record<string, unknown> | undefined;
     return {
       reportPath: report.reportPath,
       renderer: String(report.renderer ?? nested?.renderer ?? "unknown"),
       qualityTier: String(report.qualityTier ?? nested?.qualityTier ?? "unknown"),
       productionReady: report.productionReady ?? nested?.productionReady ?? false,
+      packSha256: report.packSha256 ?? nested?.packSha256 ?? soundfont?.computedSha256,
+      packLicenseTextPath: report.packLicenseTextPath ?? nested?.packLicenseTextPath ?? soundfont?.licenseTextPath,
+      packSourceUrl: report.packSourceUrl ?? nested?.packSourceUrl ?? soundfont?.sourceUrl,
+      productionUseApproved: report.productionUseApproved ?? nested?.productionUseApproved ?? soundfont?.productionUseApproved ?? false,
       fullMixPath: typeof report.fullMixPath === "string" ? report.fullMixPath : undefined,
       masteredAudioPath: typeof report.masteredAudioPath === "string" ? report.masteredAudioPath : undefined
     };
   });
   return { warnings: Array.from(new Set(warnings)), resolvedReports };
+}
+
+async function findMusicQualityGateWarnings(ctx: ToolContext, projectId: string) {
+  const warnings: string[] = [];
+  try {
+    const report = JSON.parse(await readProjectFile(ctx.projectRoot, projectId, "music/audio-quality-report.json", 2 * 1024 * 1024)) as Record<string, unknown>;
+    const blockingReasons = Array.isArray(report.blockingReasons) ? report.blockingReasons.map(String) : [];
+    const findings = Array.isArray(report.findings) ? report.findings as Array<Record<string, unknown>> : [];
+    if (report.productionSafe === false) warnings.push("Audio QA gate: productionSafe=false.");
+    for (const reason of blockingReasons) warnings.push(`Audio QA gate: ${reason}`);
+    for (const finding of findings) {
+      if (finding.severity === "high") warnings.push(`Audio QA gate: high finding: ${String(finding.message ?? "unknown finding")}`);
+    }
+  } catch {
+    // QA report is optional here; explicit high-severity reports are blocking when present.
+  }
+  return Array.from(new Set(warnings));
 }
 
 function renderMusicExportReadme(manifest: {
@@ -1752,6 +1837,40 @@ function renderMusicExportReadme(manifest: {
     "- preview/demo webpage and playlist metadata: listening and client review handoff."
   ];
   return `${lines.join("\n")}\n`;
+}
+
+function renderMusicExportHtml(input: {
+  readmePath: string;
+  packageReportPath: string;
+  playlistPath: string;
+  exportedFiles: MusicExportFile[];
+  missingFileCount: number;
+  licenseWarningCount: number;
+  unsupportedFormatCount: number;
+  productionGateWarningCount: number;
+  tracks: Array<{ title: string; durationSeconds: number; key: string; tempo: number }>;
+  session: unknown;
+}) {
+  const playableFiles = input.exportedFiles.filter((file) => file.role === "audio" || file.role === "stem");
+  const wavFile = playableFiles.find((file) => file.format === "wav");
+  const mp3File = playableFiles.find((file) => file.format === "mp3");
+  const primaryPreview = mp3File ?? wavFile ?? playableFiles[0];
+  const productionReady = playableFiles.length > 0 && input.missingFileCount === 0 && input.licenseWarningCount === 0 && input.unsupportedFormatCount === 0 && input.productionGateWarningCount === 0;
+  const statusLabel = productionReady
+    ? "Rendered with free license-cleared instruments. Suitable for production use with proper attribution."
+    : "MIDI preview only. Not production audio.";
+  const playerSection = playableFiles.length
+    ? `<h2>Listen</h2><p class="${productionReady ? "ok" : "warn"}">${escapeHtml(statusLabel)}</p>${primaryPreview ? `<div class="controls"><button type="button" onclick="document.querySelector('audio')?.play()">Play Preview</button>${wavFile ? `<a class="button" download href="${escapeHtml(wavFile.path)}">Download WAV</a>` : ""}${mp3File ? `<a class="button" download href="${escapeHtml(mp3File.path)}">Download MP3</a>` : ""}</div>` : ""}<div class="players">${playableFiles.map((file) => `<article class="player"><h3>${escapeHtml(file.path)}</h3><audio controls preload="metadata" src="${escapeHtml(file.path)}"></audio><p>${escapeHtml(file.purpose)} (${escapeHtml(file.format.toUpperCase())}, ${file.sizeBytes} bytes)</p></article>`).join("")}</div>`
+    : `<h2>Listen</h2><p class="warn">No playable audio file was exported. Provide a WAV/MP3/OGG render before publishing a listening page.</p>`;
+  const downloadItems = [
+    `<li><a href="${escapeHtml(input.readmePath)}">README</a></li>`,
+    `<li><a href="${escapeHtml(input.packageReportPath)}">Package report JSON</a></li>`,
+    `<li><a href="${escapeHtml(input.playlistPath)}">Playlist metadata JSON</a></li>`,
+    ...input.exportedFiles.map((file) => `<li><a href="${escapeHtml(file.path)}">${escapeHtml(file.path)}</a> - ${escapeHtml(file.role)}</li>`)
+  ];
+  const trackItems = input.tracks.map((track) => `<li>${escapeHtml(track.title)} - ${Math.round(track.durationSeconds / 60)} min, ${escapeHtml(track.key)}, ${track.tempo} BPM</li>`).join("");
+  const checksClass = input.missingFileCount || input.licenseWarningCount || input.productionGateWarningCount ? "warn" : "ok";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Music Project Export</title><style>body{font-family:system-ui;margin:32px;max-width:960px;color:#171717}li{margin:8px 0}.warn{color:#9a3412}.ok{color:#166534}.players{display:grid;gap:16px;margin:16px 0}.player{border:1px solid #ddd;border-radius:8px;padding:16px;background:#fafafa}.player h3{margin:0 0 10px;font-size:1rem}.player p{color:#555}.controls{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}.button,button{border:1px solid #222;border-radius:6px;background:#fff;color:#171717;padding:10px 12px;font-weight:700;text-decoration:none;cursor:pointer}audio{width:100%;display:block}</style></head><body><h1>Music Project Export</h1><p>Generated original production music handoff.</p>${playerSection}<h2>Download package</h2><ul>${downloadItems.join("")}</ul><h2>Checks</h2><p class="${checksClass}">Missing files: ${input.missingFileCount}; license warnings: ${input.licenseWarningCount}; unsupported formats: ${input.unsupportedFormatCount}; production gate warnings: ${input.productionGateWarningCount}</p><h2>Tracks</h2><ul>${trackItems}</ul><h2>Session</h2><pre>${escapeHtml(JSON.stringify(input.session ?? {}, null, 2))}</pre></body></html>`;
 }
 
 function parseMusicTimestamp(value?: string) {
@@ -2095,6 +2214,308 @@ async function toolVersion(binary: string, args = ["--version"], timeout = 2500)
   }
 }
 
+const generalUserGsPack = {
+  packId: "generaluser_gs",
+  displayName: "GeneralUser GS",
+  version: "2.0",
+  baseUrl: "https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/master",
+  sf2File: "GeneralUser-GS.sf2",
+  licenseSourcePath: "documentation/LICENSE.txt",
+  licenseFile: "LICENSE.txt",
+  readmeFile: "README.md",
+  licenseType: "generaluser_gs_2_0" as const,
+  sourceUrl: "https://github.com/mrbumpy409/GeneralUser-GS"
+};
+
+function sha256Hex(data: Buffer) {
+  return createHash("sha256").update(data).digest("hex");
+}
+
+function isValidSoundfontBytes(data: Buffer) {
+  return data.length >= 12
+    && data.subarray(0, 4).toString("ascii") === "RIFF"
+    && data.subarray(8, 12).toString("ascii") === "sfbk";
+}
+
+async function fetchBuffer(url: string) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Download failed (${response.status}) for ${url}`);
+  return Buffer.from(await response.arrayBuffer());
+}
+
+function bundledGeneralUserGsDirectories() {
+  const configured = process.env.MUSIC_SOUNDFONT_DIR?.trim();
+  const roots = [configured, "/app/soundfonts", path.join(process.cwd(), "soundfonts"), path.join(process.cwd(), ".music-packs")].filter((value): value is string => Boolean(value));
+  return [...new Set(roots)].map((root) => path.join(root, "generaluser-gs"));
+}
+
+async function readBundledGeneralUserGsPack() {
+  for (const directory of bundledGeneralUserGsDirectories()) {
+    const soundfontPath = path.join(directory, generalUserGsPack.sf2File);
+    const licensePath = path.join(directory, generalUserGsPack.licenseFile);
+    const readmePath = path.join(directory, generalUserGsPack.readmeFile);
+    try {
+      const [soundfontBytes, licenseBytes, readmeBytes] = await Promise.all([
+        readFile(soundfontPath),
+        readFile(licensePath),
+        readFile(readmePath)
+      ]);
+      if (!isValidSoundfontBytes(soundfontBytes)) throw new Error(`${soundfontPath} is not a valid RIFF/sfbk SoundFont.`);
+      if (!licenseBytes.length) throw new Error(`${licensePath} is empty.`);
+      return { directory, soundfontBytes, licenseBytes, readmeBytes, source: "bundled_runtime_soundfont" as const };
+    } catch {
+      // Try the next configured/preinstalled SoundFont directory.
+    }
+  }
+  return undefined;
+}
+
+async function installGeneralUserGsPack(ctx: ToolContext, input: z.infer<typeof installFreeSoundfontPackInputSchema>) {
+  const baseUrl = process.env.GENERALUSER_GS_BASE_URL ?? generalUserGsPack.baseUrl;
+  const paths = {
+    soundfont: `${input.outputDirectory}/${generalUserGsPack.sf2File}`,
+    license: `${input.outputDirectory}/${generalUserGsPack.licenseFile}`,
+    readme: `${input.outputDirectory}/${generalUserGsPack.readmeFile}`
+  };
+  try {
+    const bundled = await readBundledGeneralUserGsPack();
+    const [soundfontBytes, licenseBytes, readmeBytes] = bundled
+      ? [bundled.soundfontBytes, bundled.licenseBytes, bundled.readmeBytes]
+      : await Promise.all([
+        fetchBuffer(`${baseUrl}/${generalUserGsPack.sf2File}`),
+        fetchBuffer(`${baseUrl}/${generalUserGsPack.licenseSourcePath}`),
+        fetchBuffer(`${baseUrl}/${generalUserGsPack.readmeFile}`)
+      ]);
+    if (!licenseBytes.length) throw new Error("Downloaded license file is empty.");
+    if (!isValidSoundfontBytes(soundfontBytes)) throw new Error("Downloaded .sf2 is not a valid RIFF/sfbk SoundFont.");
+    const computedSha256 = sha256Hex(soundfontBytes);
+    const [soundfontFile, licenseFile, readmeFile] = await Promise.all([
+      writeProjectAsset(ctx.projectRoot, input.projectId, paths.soundfont, soundfontBytes, "audio/soundfont"),
+      writeProjectFile(ctx.projectRoot, input.projectId, paths.license, licenseBytes.toString("utf8")),
+      writeProjectFile(ctx.projectRoot, input.projectId, paths.readme, readmeBytes.toString("utf8"))
+    ]);
+    return {
+      ok: true as const,
+      packId: generalUserGsPack.packId,
+      displayName: generalUserGsPack.displayName,
+      version: generalUserGsPack.version,
+      assetPaths: [soundfontFile.path],
+      licenseTextPath: licenseFile.path,
+      readmePath: readmeFile.path,
+      computedSha256,
+      sourceUrl: generalUserGsPack.sourceUrl,
+      source: generalUserGsPack.sourceUrl,
+      installSource: bundled?.source ?? "downloaded_from_upstream",
+      bundledDirectory: bundled?.directory,
+      licenseType: generalUserGsPack.licenseType,
+      commercialUseAllowed: true,
+      redistributionAllowed: true,
+      productionUseApproved: true,
+      qualityTier: "production_candidate" as const,
+      recommendedNextTool: "manage_jazz_instrument_packs"
+    };
+  } catch (error) {
+    return {
+      ok: false as const,
+      packId: generalUserGsPack.packId,
+      displayName: generalUserGsPack.displayName,
+      sourceUrl: generalUserGsPack.sourceUrl,
+      qualityTier: "blocked" as const,
+      errors: [error instanceof Error ? error.message : String(error)]
+    };
+  }
+}
+
+type SoundfontDiscoveryCandidate = {
+  format: "soundfont" | "sfz";
+  path: string;
+  projectAssetPath?: string;
+  source: "project_asset" | "local_music_packs";
+  sha256?: string;
+  sizeBytes: number;
+  licenseTextPath?: string;
+  readmePath?: string;
+  licensePresent: boolean;
+  readmePresent: boolean;
+  status: "ready" | "review_required" | "blocked";
+  reasons: string[];
+  inferredPackId?: string;
+  recommendedNextTool?: string;
+  suggestedRegistration?: Record<string, unknown>;
+};
+
+async function pathExists(filePath: string) {
+  try {
+    await stat(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function findSidecarFile(directory: string, patterns: RegExp[]) {
+  try {
+    const entries = await readdir(directory, { withFileTypes: true });
+    const match = entries.find((entry) => entry.isFile() && patterns.some((pattern) => pattern.test(entry.name)));
+    return match ? path.join(directory, match.name) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function listFilesRecursive(root: string, maxFiles = 1000) {
+  const found: string[] = [];
+  async function visit(directory: string) {
+    if (found.length >= maxFiles) return;
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (found.length >= maxFiles) return;
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "node_modules" || entry.name === ".git") continue;
+        await visit(fullPath);
+      } else if (entry.isFile()) {
+        found.push(fullPath);
+      }
+    }
+  }
+  await visit(root);
+  return found;
+}
+
+function relativeProjectAssetPath(projectFilesRoot: string, absolutePath: string) {
+  const relativePath = path.relative(projectFilesRoot, absolutePath).replaceAll(path.sep, "/");
+  return relativePath && !relativePath.startsWith("..") && !path.isAbsolute(relativePath) ? relativePath : undefined;
+}
+
+function resolveProjectSearchDirectory(projectFilesRoot: string, relativeDirectory: string) {
+  const normalized = relativeDirectory.replaceAll("\\", "/").replace(/^\/+/, "");
+  if (!normalized || normalized.split("/").some((part) => part === "..")) return undefined;
+  const absolutePath = path.join(projectFilesRoot, normalized);
+  const relativePath = path.relative(projectFilesRoot, absolutePath);
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return undefined;
+  return absolutePath;
+}
+
+function candidateFormatForPath(filePath: string): "soundfont" | "sfz" | undefined {
+  if (isSoundfontAssetPath(filePath)) return "soundfont";
+  if (isSfzAssetPath(filePath)) return "sfz";
+  return undefined;
+}
+
+async function inspectDiscoveredSoundfontCandidate(input: {
+  absolutePath: string;
+  displayPath: string;
+  projectAssetPath?: string;
+  source: SoundfontDiscoveryCandidate["source"];
+}) {
+  const format = candidateFormatForPath(input.absolutePath);
+  if (!format) return undefined;
+  const data = await readFile(input.absolutePath);
+  const reasons: string[] = [];
+  if (format === "soundfont" && !isValidSoundfontBytes(data)) reasons.push("invalid_soundfont_magic");
+  if (format === "sfz" && !data.toString("utf8", 0, Math.min(data.length, 4096)).includes("<region")) reasons.push("sfz_missing_region");
+  const directory = path.dirname(input.absolutePath);
+  const licensePath = await findSidecarFile(directory, [/^licen[sc]e(\.|$)/i, /^copying(\.|$)/i]);
+  const readmePath = await findSidecarFile(directory, [/^readme(\.|$)/i]);
+  const licensePresent = Boolean(licensePath);
+  const readmePresent = Boolean(readmePath);
+  if (!licensePresent) reasons.push("missing_license_sidecar");
+  if (!readmePresent) reasons.push("missing_readme_sidecar");
+  if (input.source === "local_music_packs" && !input.projectAssetPath) reasons.push("local_candidate_not_project_asset");
+  const lowerName = path.basename(input.absolutePath).toLowerCase();
+  const inferredGeneralUser = lowerName.includes("generaluser") || lowerName.includes("generaluser-gs");
+  const blocked = reasons.includes("invalid_soundfont_magic") || reasons.includes("sfz_missing_region");
+  const status = blocked ? "blocked" : reasons.length ? "review_required" : "ready";
+  const projectLicensePath = licensePath && input.projectAssetPath ? path.posix.join(path.posix.dirname(input.projectAssetPath), path.basename(licensePath)) : undefined;
+  const projectReadmePath = readmePath && input.projectAssetPath ? path.posix.join(path.posix.dirname(input.projectAssetPath), path.basename(readmePath)) : undefined;
+  const suggestedRegistration = input.projectAssetPath && status === "ready"
+    ? {
+      packId: inferredGeneralUser ? generalUserGsPack.packId : slugifyMusicExportPart(path.basename(input.absolutePath, path.extname(input.absolutePath))).replaceAll("-", "_"),
+      displayName: inferredGeneralUser ? generalUserGsPack.displayName : path.basename(input.absolutePath, path.extname(input.absolutePath)),
+      instrumentRole: "realistic_piano",
+      format,
+      assetPaths: [input.projectAssetPath],
+      declaredSha256: sha256Hex(data),
+      licenseType: inferredGeneralUser ? generalUserGsPack.licenseType : "unknown",
+      source: inferredGeneralUser ? generalUserGsPack.sourceUrl : "local/project asset",
+      sourceUrl: inferredGeneralUser ? generalUserGsPack.sourceUrl : undefined,
+      licenseTextPath: projectLicensePath,
+      readmePath: projectReadmePath,
+      commercialUseAllowed: inferredGeneralUser ? true : undefined,
+      redistributionAllowed: inferredGeneralUser ? true : undefined,
+      productionUseApproved: inferredGeneralUser ? true : undefined,
+      qualityTier: inferredGeneralUser ? "production_candidate" : "review_required"
+    }
+    : undefined;
+  return {
+    format,
+    path: input.displayPath,
+    projectAssetPath: input.projectAssetPath,
+    source: input.source,
+    sha256: sha256Hex(data),
+    sizeBytes: data.length,
+    licenseTextPath: input.projectAssetPath ? projectLicensePath : licensePath,
+    readmePath: input.projectAssetPath ? projectReadmePath : readmePath,
+    licensePresent,
+    readmePresent,
+    status,
+    reasons,
+    inferredPackId: inferredGeneralUser ? generalUserGsPack.packId : undefined,
+    recommendedNextTool: status === "ready" && input.projectAssetPath ? "manage_jazz_instrument_packs" : status === "ready" ? "copy_or_install_project_asset_then_manage_jazz_instrument_packs" : undefined,
+    suggestedRegistration
+  } satisfies SoundfontDiscoveryCandidate;
+}
+
+async function discoverSoundfontPacks(ctx: ToolContext, input: z.infer<typeof discoverSoundfontPacksInputSchema>) {
+  const candidates: SoundfontDiscoveryCandidate[] = [];
+  const seen = new Set<string>();
+  const projectFilesRoot = getProjectFilesDirectory(ctx.projectRoot, input.projectId);
+  for (const directory of input.projectSearchDirectories) {
+    const absoluteDirectory = resolveProjectSearchDirectory(projectFilesRoot, directory);
+    if (!absoluteDirectory) continue;
+    const files = await listFilesRecursive(absoluteDirectory);
+    for (const file of files.filter((candidate) => candidateFormatForPath(candidate))) {
+      const key = path.resolve(file);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const projectAssetPath = relativeProjectAssetPath(projectFilesRoot, file);
+      const inspected = await inspectDiscoveredSoundfontCandidate({ absolutePath: file, displayPath: projectAssetPath ?? file, projectAssetPath, source: "project_asset" });
+      if (inspected) candidates.push(inspected);
+    }
+  }
+  if (input.includeLocalMusicPacks) {
+    const localRoot = path.join(ctx.workspaceRoot, ".music-packs");
+    if (await pathExists(localRoot)) {
+      const files = await listFilesRecursive(localRoot);
+      for (const file of files.filter((candidate) => candidateFormatForPath(candidate))) {
+        const key = path.resolve(file);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const inspected = await inspectDiscoveredSoundfontCandidate({ absolutePath: file, displayPath: file, source: "local_music_packs" });
+        if (inspected) candidates.push(inspected);
+      }
+    }
+  }
+  return {
+    projectId: input.projectId,
+    candidates,
+    ready: candidates.filter((candidate) => candidate.status === "ready"),
+    reviewRequired: candidates.filter((candidate) => candidate.status === "review_required"),
+    blocked: candidates.filter((candidate) => candidate.status === "blocked"),
+    recommendations: candidates
+      .filter((candidate) => candidate.inferredPackId === generalUserGsPack.packId && candidate.sha256 && candidate.licensePresent)
+      .map((candidate) => candidate.projectAssetPath
+        ? `GeneralUser GS candidate ${candidate.projectAssetPath} has hash/license metadata; call manage_jazz_instrument_packs with the suggestedRegistration to approve production_candidate use.`
+        : `GeneralUser GS candidate ${candidate.path} is outside project assets; install/copy it into project assets before registration.`)
+  };
+}
+
 function isSoundfontAssetPath(assetPath: string) {
   return /\.(sf2|sf3)$/i.test(assetPath);
 }
@@ -2141,6 +2562,10 @@ function productionRenderBlockersForPack(pack: JazzPackRecord | undefined, reque
   if (!pack.commercialUseAllowed) blockers.push(`Pack ${pack.packId} is not marked commercial-use allowed.`);
   if (pack.riskFlags.length) blockers.push(`Pack ${pack.packId} has unresolved risk flags: ${pack.riskFlags.join(", ")}.`);
   if (!pack.computedSha256) blockers.push(`Pack ${pack.packId} has no computed hash.`);
+  if (pack.qualityTier !== "production_candidate") blockers.push(`Pack ${pack.packId} is ${pack.qualityTier}, not production_candidate.`);
+  if (pack.productionUseApproved !== true) blockers.push(`Pack ${pack.packId} is not marked productionUseApproved=true.`);
+  if (!pack.licenseTextPath || !pack.licenseTextExists) blockers.push(`Pack ${pack.packId} has no verified licenseTextPath.`);
+  if (!pack.sourceUrl) blockers.push(`Pack ${pack.packId} has no sourceUrl metadata.`);
   if (!rendererForPack(pack)) blockers.push(`Pack ${pack.packId} has no eligible renderer for format ${pack.format}.`);
   return blockers;
 }
@@ -2219,6 +2644,163 @@ async function sfizzRender(sfzPath: string, midiPath: string, outputPath: string
 async function productionInstrumentRender(renderer: string, instrumentPath: string, midiPath: string, outputPath: string, sampleRate: number, timeout: number) {
   if (renderer === "sfizz") return sfizzRender(instrumentPath, midiPath, outputPath, sampleRate, timeout);
   return fluidSynthRender(instrumentPath, midiPath, outputPath, sampleRate, timeout);
+}
+
+async function encodeMp3WithFfmpeg(inputWavPath: string, outputMp3Path: string, timeout: number) {
+  await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", inputWavPath, "-codec:a", "libmp3lame", "-b:a", "192k", outputMp3Path], { timeout, maxBuffer: 1024 * 1024 });
+  return readFile(outputMp3Path);
+}
+
+function pcmWavFromSamples(samples: Int16Array, sampleRate: number, channelCount = 1) {
+  const pcm = Buffer.alloc(samples.length * 2);
+  for (let index = 0; index < samples.length; index += 1) pcm.writeInt16LE(samples[index], index * 2);
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVEfmt ", 8);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channelCount, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * channelCount * 2, 28);
+  header.writeUInt16LE(channelCount * 2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
+function mixPcmWavStems(stems: Buffer[]) {
+  if (!stems.length) throw new Error("At least one rendered stem is required for production mix.");
+  const parsed = stems.map((stem, index) => ({ stem, info: assertPcmWav(stem, `stem ${index + 1}`) }));
+  const first = parsed[0].info;
+  for (const item of parsed) {
+    if (item.info.sampleRate !== first.sampleRate || item.info.channelCount !== first.channelCount || item.info.bitDepth !== first.bitDepth) {
+      throw new Error("Rendered stems must share sample rate, channel count, and bit depth before mixing.");
+    }
+  }
+  const frameSamples = Math.max(...parsed.map((item) => Math.floor(item.info.dataBytes / 2)));
+  const output = new Int16Array(frameSamples);
+  const gain = Math.min(1, 0.78 / Math.sqrt(parsed.length));
+  for (let sampleIndex = 0; sampleIndex < frameSamples; sampleIndex += 1) {
+    let mixed = 0;
+    for (const item of parsed) {
+      const offset = item.info.dataOffset + sampleIndex * 2;
+      if (offset + 1 < item.info.dataOffset + item.info.dataBytes) mixed += item.stem.readInt16LE(offset) / 32768;
+    }
+    output[sampleIndex] = Math.round(Math.max(-0.95, Math.min(0.95, mixed * gain)) * 32767);
+  }
+  return pcmWavFromSamples(output, first.sampleRate, first.channelCount);
+}
+
+function productionStemGroups(composition: Composition) {
+  const entries = Object.keys(composition.tracks);
+  const pick = (patterns: RegExp[]) => entries.filter((track) => patterns.some((pattern) => pattern.test(track)));
+  return [
+    { id: "piano", label: "Piano", tracks: pick([/piano/i, /keys/i, /guitar/i]) },
+    { id: "bass", label: "Bass", tracks: pick([/bass/i]) },
+    { id: "drums", label: "Drums", tracks: pick([/drum/i, /brush/i, /percussion/i]) },
+    { id: "pad-ambience", label: "Pad / ambience", tracks: pick([/pad/i, /ambience/i, /strings/i, /synth/i]) }
+  ].map((group) => ({ ...group, tracks: group.tracks.length ? group.tracks : [] }));
+}
+
+function compositionWithSelectedTracks(composition: Composition, tracks: string[]): Composition {
+  const selected = Object.fromEntries(tracks.map((track) => [track, composition.tracks[track] ?? []]));
+  return { ...JSON.parse(JSON.stringify(composition)), tracks: selected };
+}
+
+async function inspectMusicRenderEnvironment(ctx: ToolContext, input: z.infer<typeof checkMusicRenderEnvironmentInputSchema>) {
+  const [fluidSynth, sfizz, ffmpeg, sox] = await Promise.all([
+    toolVersion("fluidsynth"),
+    toolVersion("sfizz_render"),
+    toolVersion("ffmpeg", ["-version"]),
+    toolVersion("sox", ["--version"])
+  ]);
+  const discovery = input.projectId
+    ? await discoverSoundfontPacks(ctx, {
+      projectId: input.projectId,
+      includeLocalMusicPacks: input.includeLocalMusicPacks,
+      projectSearchDirectories: input.projectSearchDirectories
+    })
+    : undefined;
+  const reasons = [
+    ...(!fluidSynth.ok && !sfizz.ok ? ["No offline instrument renderer is available; install sfizz_render or FluidSynth."] : []),
+    ...(!ffmpeg.ok ? ["FFmpeg is not available; preview.mp3 export is blocked."] : []),
+    ...(discovery && discovery.ready.length === 0 ? ["No ready .sf2/.sf3/.sfz instrument candidate with sidecar license/readme metadata was discovered."] : [])
+  ];
+  return {
+    tools: {
+      fluidsynth: { binary: "fluidsynth", ...fluidSynth },
+      sfizz: { binary: "sfizz_render", ...sfizz },
+      ffmpeg: { binary: "ffmpeg", ...ffmpeg },
+      sox: { binary: "sox", ...sox }
+    },
+    instrumentDiscovery: discovery,
+    productionSupport: {
+      available: reasons.length === 0,
+      reasons,
+      statusLabel: reasons.length === 0
+        ? "Rendered with free license-cleared instruments. Suitable for production use with proper attribution."
+        : "MIDI preview only. Not production audio."
+    }
+  };
+}
+
+function renderProductionLicensesMarkdown(input: {
+  pack: JazzPackRecord;
+  toolchain: Awaited<ReturnType<typeof inspectMusicRenderEnvironment>>["tools"];
+  productionWavPath: string;
+  previewMp3Path: string;
+  stemPaths: Record<string, string>;
+  midiStemPaths: Record<string, string>;
+}) {
+  const lines = [
+    "# Music Rendering Licenses",
+    "",
+    "## Output Files",
+    `- ${input.productionWavPath}: final offline-rendered WAV master.`,
+    `- ${input.previewMp3Path}: MP3 preview encoded from the WAV master with FFmpeg.`,
+    ...Object.entries(input.stemPaths).map(([stem, filePath]) => `- ${filePath}: rendered ${stem} WAV stem.`),
+    ...Object.entries(input.midiStemPaths).map(([stem, filePath]) => `- ${filePath}: generated ${stem} MIDI stem.`),
+    "",
+    "## Instrument Library",
+    `- Name: ${input.pack.displayName}`,
+    `- Pack ID: ${input.pack.packId}`,
+    `- Format: ${input.pack.format}`,
+    `- License: ${input.pack.licenseType}`,
+    `- Source: ${input.pack.sourceUrl ?? input.pack.source}`,
+    `- Attribution: ${input.pack.attribution || "No attribution text supplied beyond the license/source metadata."}`,
+    `- License text path: ${input.pack.licenseTextPath ?? "missing"}`,
+    `- README path: ${input.pack.readmePath ?? "missing"}`,
+    `- SHA-256: ${input.pack.computedSha256 ?? "missing"}`,
+    `- Commercial use allowed: ${input.pack.commercialUseAllowed ? "yes" : "no"}`,
+    `- Redistribution allowed: ${input.pack.redistributionAllowed ? "yes" : "no"}`,
+    "",
+    "## Rendering Tools",
+    `- sfizz_render: ${input.toolchain.sfizz.ok ? input.toolchain.sfizz.version : "not available"}`,
+    `- FluidSynth: ${input.toolchain.fluidsynth.ok ? input.toolchain.fluidsynth.version : "not available"}`,
+    `- FFmpeg: ${input.toolchain.ffmpeg.ok ? input.toolchain.ffmpeg.version : "not available"}`,
+    `- SoX: ${input.toolchain.sox.ok ? input.toolchain.sox.version : "not available"}`,
+    "",
+    "## Policy",
+    "- Raw sample libraries are not redistributed unless their license explicitly allows redistribution.",
+    "- MIDI/browser playback is preview only and must not be described as production audio.",
+    "- No Spotify-level mastering claim is made for this V1 pipeline."
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+function renderProductionMusicHtml(input: {
+  title: string;
+  statusLabel: string;
+  productionReady: boolean;
+  productionWavPath: string;
+  previewMp3Path: string;
+  licensesPath: string;
+  reportPath: string;
+}) {
+  const statusClass = input.productionReady ? "ok" : "warn";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(input.title)}</title><style>body{font-family:system-ui;margin:32px;max-width:860px;color:#171717}.status{display:inline-block;border:1px solid #d6d3d1;border-radius:6px;padding:8px 10px;margin:10px 0}.ok{color:#166534;background:#f0fdf4}.warn{color:#9a3412;background:#fff7ed}.controls{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0}.button,button{border:1px solid #222;border-radius:6px;background:#fff;color:#171717;padding:10px 12px;font-weight:700;text-decoration:none;cursor:pointer}audio{width:100%;display:block;margin:12px 0 18px}</style></head><body><h1>${escapeHtml(input.title)}</h1><p class="status ${statusClass}">${escapeHtml(input.statusLabel)}</p><audio id="preview" controls preload="metadata" src="${escapeHtml(input.previewMp3Path)}"></audio><div class="controls"><button type="button" onclick="document.getElementById('preview').play()">Play Preview</button><a class="button" download href="${escapeHtml(input.productionWavPath)}">Download WAV</a><a class="button" download href="${escapeHtml(input.previewMp3Path)}">Download MP3</a></div><h2>Production Files</h2><ul><li><a href="${escapeHtml(input.productionWavPath)}">production.wav</a></li><li><a href="${escapeHtml(input.previewMp3Path)}">preview.mp3</a></li><li><a href="${escapeHtml(input.licensesPath)}">LICENSES.md</a></li><li><a href="${escapeHtml(input.reportPath)}">Pipeline report JSON</a></li></ul></body></html>`;
 }
 
 function wavFallbackOutputPath(outputAudioPath: string) {
@@ -2338,7 +2920,7 @@ const jazzPackAllowedFormats: Record<z.infer<typeof jazzInstrumentPackSchema>["i
   room_ambience: ["impulse_response", "wav_multisample", "virtual_instrument"]
 };
 
-const jazzPackSafeLicenses = new Set(["generated_original", "public_domain", "cc0", "cc_by", "mit", "apache_2", "commercial_license"]);
+const jazzPackSafeLicenses = new Set(["generated_original", "public_domain", "cc0", "cc_by", "mit", "apache_2", "commercial_license", "generaluser_gs_2_0"]);
 const jazzPackReviewLicenses = new Set(["user_provided", "lgpl", "gpl", "proprietary", "unknown"]);
 
 function jazzPackAssetType(format: z.infer<typeof jazzInstrumentPackSchema>["format"]): z.infer<typeof musicLicenseDependencySchema>["type"] {
@@ -2362,10 +2944,14 @@ async function inspectJazzPackAssets(projectRoot: string, projectId: string, pac
     }
   }
   const missing = assets.filter((asset) => !asset.exists).map((asset) => asset.path);
+  const licenseTextExists = pack.licenseTextPath ? await pathExists(await getProjectStoredFilePath(projectRoot, projectId, pack.licenseTextPath)) : false;
+  const readmeExists = pack.readmePath ? await pathExists(await getProjectStoredFilePath(projectRoot, projectId, pack.readmePath)) : false;
   return {
     assets,
     missing,
-    combinedSha256: assets.every((asset) => asset.exists) ? hash.digest("hex") : undefined
+    combinedSha256: assets.every((asset) => asset.exists) ? hash.digest("hex") : undefined,
+    licenseTextExists,
+    readmeExists
   };
 }
 
@@ -2383,10 +2969,23 @@ function analyzeJazzPack(pack: z.infer<typeof jazzInstrumentPackSchema>, inspect
   if (pack.commercialUseAllowed === undefined && !jazzPackSafeLicenses.has(pack.licenseType)) riskFlags.push("commercial_use_permission_not_explicit");
   if (pack.redistributionAllowed === false && intendedUse === "client_delivery") riskFlags.push("redistribution_not_allowed_for_client_delivery");
   if (pack.redistributionAllowed === undefined && intendedUse === "client_delivery") riskFlags.push("redistribution_permission_not_explicit");
+  if (pack.qualityTier === "production_candidate" || pack.productionUseApproved === true) {
+    if (pack.productionUseApproved !== true) riskFlags.push("production_use_not_approved");
+    if (!inspected.combinedSha256) riskFlags.push("missing_computed_hash");
+    if (!pack.licenseTextPath || !inspected.licenseTextExists) riskFlags.push("missing_license_text_path");
+    if (!pack.sourceUrl) riskFlags.push("missing_source_url");
+    if (pack.commercialUseAllowed !== true) riskFlags.push("commercial_use_not_explicitly_allowed_for_production");
+    if (pack.redistributionAllowed === undefined && intendedUse === "client_delivery") riskFlags.push("redistribution_permission_not_explicit");
+  }
 
-  const blocked = riskFlags.some((flag) => ["non_commercial_license", "commercial_use_not_allowed", "missing_pack_assets", "declared_hash_mismatch"].includes(flag));
+  const blocked = riskFlags.some((flag) => ["non_commercial_license", "commercial_use_not_allowed", "missing_pack_assets", "declared_hash_mismatch", "missing_computed_hash", "missing_license_text_path", "commercial_use_not_explicitly_allowed_for_production"].includes(flag));
   const review = blocked || riskFlags.length > 0 || jazzPackReviewLicenses.has(pack.licenseType);
   const status = blocked ? "blocked" : review ? "review_required" : "ready";
+  const qualityTier = status === "ready" && pack.productionUseApproved === true && pack.qualityTier === "production_candidate"
+    ? "production_candidate"
+    : status === "ready"
+      ? "review_required"
+      : "preview_only";
   return {
     packId: pack.packId,
     displayName: pack.displayName,
@@ -2394,10 +2993,17 @@ function analyzeJazzPack(pack: z.infer<typeof jazzInstrumentPackSchema>, inspect
     format: pack.format,
     version: pack.version ?? "unversioned",
     source: pack.source,
+    sourceUrl: pack.sourceUrl,
+    licenseTextPath: pack.licenseTextPath,
+    readmePath: pack.readmePath,
+    licenseTextExists: inspected.licenseTextExists,
+    readmeExists: inspected.readmeExists,
     licenseType: pack.licenseType,
     commercialUseAllowed: pack.commercialUseAllowed ?? (jazzPackSafeLicenses.has(pack.licenseType) || pack.licenseType === "cc_by"),
     redistributionAllowed: pack.redistributionAllowed ?? false,
     modificationsAllowed: pack.modificationsAllowed ?? false,
+    productionUseApproved: pack.productionUseApproved ?? false,
+    qualityTier,
     attributionRequired: pack.licenseType === "cc_by" || Boolean(pack.attribution),
     attribution: pack.attribution ?? "",
     assetPaths: pack.assetPaths,
@@ -3241,7 +3847,8 @@ export const musicWorkflowTools: ToolModule[] = [
       const unsupportedFormats = buildUnsupportedMusicExportWarnings(parsed.exports, fileInspection.exportedFiles);
       const licenseWarnings = collectMusicLicenseWarnings(licenseManifest);
       const productionGate = await findProductionRenderGateWarnings(ctx, parsed.projectId, parsed.renderedAudioPaths, parsed.renderReportPaths);
-      const productionGateWarnings = productionGate.warnings;
+      const qualityGateWarnings = await findMusicQualityGateWarnings(ctx, parsed.projectId);
+      const productionGateWarnings = [...productionGate.warnings, ...qualityGateWarnings];
       const playlist = {
         projectId: parsed.projectId,
         packageName,
@@ -3275,7 +3882,18 @@ export const musicWorkflowTools: ToolModule[] = [
       const readmeFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputReadmePath, readme);
       const playlistFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPlaylistPath, `${JSON.stringify(playlist, null, 2)}\n`);
       const packageReportFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPackageReportPath, `${JSON.stringify(packageReport, null, 2)}\n`);
-      const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Music Project Export</title><style>body{font-family:system-ui;margin:32px;max-width:960px}li{margin:8px 0}.warn{color:#9a3412}.ok{color:#166534}</style></head><body><h1>Music Project Export</h1><p>Generated original production music handoff.</p><h2>Download package</h2><ul><li><a href="${escapeHtml(readmeFile.path)}">README</a></li><li><a href="${escapeHtml(packageReportFile.path)}">Package report JSON</a></li><li><a href="${escapeHtml(playlistFile.path)}">Playlist metadata JSON</a></li>${fileInspection.exportedFiles.map((file) => `<li><a href="${escapeHtml(file.path)}">${escapeHtml(file.path)}</a> - ${escapeHtml(file.role)}</li>`).join("")}</ul><h2>Checks</h2><p class="${packageReport.missingFiles.length || packageReport.licenseWarnings.length || packageReport.productionGateWarnings.length ? "warn" : "ok"}">Missing files: ${packageReport.missingFiles.length}; license warnings: ${packageReport.licenseWarnings.length}; unsupported formats: ${packageReport.unsupportedFormats.length}; production gate warnings: ${packageReport.productionGateWarnings.length}</p><h2>Tracks</h2><ul>${tracks.map((track) => `<li>${escapeHtml(track.title)} - ${Math.round(track.durationSeconds / 60)} min, ${escapeHtml(track.key)}, ${track.tempo} BPM</li>`).join("")}</ul><h2>Session</h2><pre>${escapeHtml(JSON.stringify(session ?? {}, null, 2))}</pre></body></html>`;
+      const html = renderMusicExportHtml({
+        readmePath: readmeFile.path,
+        packageReportPath: packageReportFile.path,
+        playlistPath: playlistFile.path,
+        exportedFiles: fileInspection.exportedFiles,
+        missingFileCount: packageReport.missingFiles.length,
+        licenseWarningCount: packageReport.licenseWarnings.length,
+        unsupportedFormatCount: packageReport.unsupportedFormats.length,
+        productionGateWarningCount: packageReport.productionGateWarnings.length,
+        tracks,
+        session
+      });
       const htmlFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputHtmlPath, html);
       const publishPolicy = parsed.publish ? buildProjectPublishOptions(ctx) : undefined;
       const published = publishPolicy ? await publishProject(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, parsed.outputHtmlPath, publishPolicy.options) : undefined;
@@ -3370,6 +3988,215 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
+    definition: { name: "check_music_render_environment", description: "Detect offline music rendering tools (sfizz_render, FluidSynth, FFmpeg, SoX) and available .sf2/.sf3/.sfz instrument candidates without claiming production support when requirements are missing.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, includeLocalMusicPacks: { type: "boolean" }, projectSearchDirectories: { type: "array", items: { type: "string" } } }, required: [], additionalProperties: false } },
+    enabledByDefault: true,
+    schema: checkMusicRenderEnvironmentInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = checkMusicRenderEnvironmentInputSchema.parse(input);
+      const environment = await inspectMusicRenderEnvironment(ctx, parsed);
+      return {
+        ok: environment.productionSupport.available,
+        summary: environment.productionSupport.available ? "Music production render environment is available." : "Music production render environment is incomplete.",
+        jobId: parsed.projectId,
+        artifacts: [],
+        structuredContent: environment,
+        logs: [JSON.stringify(environment, null, 2)],
+        errors: environment.productionSupport.reasons
+      };
+    }
+  },
+  {
+    definition: { name: "render_production_music", description: "Run the free production music pipeline: render MIDI stems offline with a ready license-cleared SoundFont/SFZ pack, mix stems, apply a basic master chain, encode preview.mp3 with FFmpeg, write LICENSES.md, and publish a truthful player/download page.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, sampleRate: { type: "number" }, targetRms: { type: "number" }, truePeakCeiling: { type: "number" }, outputProductionWavPath: { type: "string" }, outputPreviewMp3Path: { type: "string" }, outputRawRenderPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputMidiStemDirectory: { type: "string" }, outputLicensesPath: { type: "string" }, outputReportPath: { type: "string" }, outputHtmlPath: { type: "string" }, publish: { type: "boolean" } }, required: ["projectId", "compositionManifestPath"], additionalProperties: false } },
+    enabledByDefault: true,
+    schema: renderProductionMusicInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = renderProductionMusicInputSchema.parse(input);
+      const environment = await inspectMusicRenderEnvironment(ctx, { projectId: parsed.projectId, includeLocalMusicPacks: true, projectSearchDirectories: ["soundfonts", "instruments", "music"] });
+      const renderRequest = renderMidiWithSoundfontInputSchema.parse({
+        projectId: parsed.projectId,
+        compositionManifestPath: parsed.compositionManifestPath,
+        soundfontPackId: parsed.soundfontPackId,
+        soundfontPath: parsed.soundfontPath,
+        channelMap: parsed.channelMap,
+        stems: true,
+        sampleRate: parsed.sampleRate,
+        outputAudioPath: parsed.outputRawRenderPath,
+        outputStemDirectory: parsed.outputStemDirectory,
+        outputReportPath: parsed.outputReportPath
+      });
+      const soundfont = await resolveProductionSoundfont(ctx, renderRequest);
+      const blockers = [
+        ...(!soundfont.ok ? soundfont.blockers : []),
+        ...(soundfont.ok && soundfont.pack.instrumentRole !== "realistic_piano" ? [`Pack ${soundfont.pack.packId} is ${soundfont.pack.instrumentRole}; V1 production rendering requires a realistic_piano SFZ/SoundFont such as a license-cleared Salamander/FreePats-style piano pack.`] : []),
+        ...(!environment.tools.ffmpeg.ok ? ["FFmpeg is required to export preview.mp3."] : []),
+        ...(soundfont.ok && soundfont.renderer === "sfizz" && !environment.tools.sfizz.ok ? ["sfizz_render is required for SFZ production rendering."] : []),
+        ...(soundfont.ok && soundfont.renderer === "fluidsynth" && !environment.tools.fluidsynth.ok ? ["FluidSynth is required for SoundFont production rendering."] : [])
+      ];
+      if (blockers.length || !soundfont.ok) {
+        const report = {
+          qualityTier: "preview_only",
+          productionReady: false,
+          statusLabel: "MIDI preview only. Not production audio.",
+          blockingReasons: blockers,
+          environment
+        };
+        const reportFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputReportPath, `${JSON.stringify(report, null, 2)}\n`);
+        return { ok: false, summary: `Production music render blocked: ${blockers[0] ?? "missing production requirement"}`, jobId: parsed.projectId, artifacts: [reportFile.path], structuredContent: { ...report, reportPath: reportFile.path }, logs: [JSON.stringify(report, null, 2)], errors: blockers };
+      }
+
+      const composition = await readComposition(ctx, parsed.projectId, parsed.compositionManifestPath);
+      const tempDir = path.join(ctx.artifactRoot, `production-music-${parsed.projectId}-${Date.now()}`);
+      await mkdir(tempDir, { recursive: true });
+      try {
+        const fullMidiPath = path.join(tempDir, "full.mid");
+        const rawFullMixPath = path.join(tempDir, "raw-full.wav");
+        await writeFile(fullMidiPath, midiBuffer(composition, { channelMap: parsed.channelMap }));
+        const rawFullMix = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, fullMidiPath, rawFullMixPath, parsed.sampleRate, ctx.commandTimeoutMs);
+        const rawFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputRawRenderPath, rawFullMix, "audio/wav");
+        const stemPaths: Record<string, string> = {};
+        const midiStemPaths: Record<string, string> = {};
+        const stemBuffers: Buffer[] = [];
+        const missingStemGroups: string[] = [];
+        for (const group of productionStemGroups(composition)) {
+          if (!group.tracks.length) {
+            missingStemGroups.push(group.label);
+            continue;
+          }
+          const stemComposition = compositionWithSelectedTracks(composition, group.tracks);
+          const stemMidiBuffer = midiBuffer(stemComposition, { channelMap: parsed.channelMap });
+          const stemMidiProjectPath = `${parsed.outputMidiStemDirectory}/${group.id}.mid`;
+          const stemMidiProjectFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, stemMidiProjectPath, stemMidiBuffer, "audio/midi");
+          midiStemPaths[group.id] = stemMidiProjectFile.path;
+          const stemMidiTempPath = path.join(tempDir, `${group.id}.mid`);
+          const stemWavTempPath = path.join(tempDir, `${group.id}.wav`);
+          await writeFile(stemMidiTempPath, stemMidiBuffer);
+          const stemWav = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, stemMidiTempPath, stemWavTempPath, parsed.sampleRate, ctx.commandTimeoutMs);
+          const stemProjectFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, `${parsed.outputStemDirectory}/${group.id}.wav`, stemWav, "audio/wav");
+          stemPaths[group.id] = stemProjectFile.path;
+          stemBuffers.push(stemWav);
+        }
+        if (!stemBuffers.length) throw new Error("No renderable stems were produced from composition tracks.");
+        const mixedStems = mixPcmWavStems(stemBuffers);
+        const mastered = applyMasterChain(mixedStems, {
+          projectId: parsed.projectId,
+          audioPath: parsed.outputRawRenderPath,
+          stemPaths: Object.values(stemPaths),
+          chain: ["room_ambience", "eq_cleanup", "gentle_compression", "limiter", "loudness_normalize"],
+          targetRms: parsed.targetRms,
+          truePeakCeiling: parsed.truePeakCeiling,
+          abLabel: "production_master",
+          outputAudioPath: parsed.outputProductionWavPath,
+          outputReportPath: parsed.outputReportPath
+        });
+        const productionFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputProductionWavPath, mastered.output, "audio/wav");
+        const productionTempPath = path.join(tempDir, "production.wav");
+        const mp3TempPath = path.join(tempDir, "preview.mp3");
+        await writeFile(productionTempPath, mastered.output);
+        const mp3 = await encodeMp3WithFfmpeg(productionTempPath, mp3TempPath, ctx.commandTimeoutMs);
+        const mp3File = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputPreviewMp3Path, mp3, "audio/mpeg");
+        const licenses = renderProductionLicensesMarkdown({
+          pack: soundfont.pack,
+          toolchain: environment.tools,
+          productionWavPath: productionFile.path,
+          previewMp3Path: mp3File.path,
+          stemPaths,
+          midiStemPaths
+        });
+        const licensesFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputLicensesPath, licenses);
+        const statusLabel = "Rendered with free license-cleared instruments. Suitable for production use with proper attribution.";
+        const report = {
+          qualityTier: "production_candidate",
+          productionReady: true,
+          statusLabel,
+          renderer: soundfont.renderer,
+          environment,
+          sourceCompositionManifestPath: parsed.compositionManifestPath,
+          productionWavPath: productionFile.path,
+          previewMp3Path: mp3File.path,
+          rawRenderPath: rawFile.path,
+          stemPaths,
+          midiStemPaths,
+          licensesPath: licensesFile.path,
+          missingStemGroups,
+          mixMasterChain: ["gain_staging", "eq_cleanup", "light_compression", "room_reverb", "master_limiter", "loudness_normalize"],
+          masteringReport: { ...mastered.report, qualityTier: "production_candidate", productionReady: true, blockingReasons: [], sourceRenderPath: rawFile.path },
+          soundfont: {
+            packId: soundfont.pack.packId,
+            displayName: soundfont.pack.displayName,
+            path: soundfont.soundfontPath,
+            format: soundfont.pack.format,
+            renderer: soundfont.renderer,
+            licenseType: soundfont.pack.licenseType,
+            attribution: soundfont.pack.attribution,
+            commercialUseAllowed: soundfont.pack.commercialUseAllowed,
+            redistributionAllowed: soundfont.pack.redistributionAllowed,
+            productionUseApproved: soundfont.pack.productionUseApproved,
+            qualityTier: soundfont.pack.qualityTier,
+            computedSha256: soundfont.pack.computedSha256,
+            sourceUrl: soundfont.pack.sourceUrl,
+            licenseTextPath: soundfont.pack.licenseTextPath,
+            readmePath: soundfont.pack.readmePath
+          },
+          noSpotifyLevelClaim: true
+        };
+        const reportFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputReportPath, `${JSON.stringify(report, null, 2)}\n`);
+        const html = renderProductionMusicHtml({
+          title: composition.title,
+          statusLabel,
+          productionReady: true,
+          productionWavPath: productionFile.path,
+          previewMp3Path: mp3File.path,
+          licensesPath: licensesFile.path,
+          reportPath: reportFile.path
+        });
+        const htmlFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputHtmlPath, html);
+        const publishPolicy = parsed.publish ? buildProjectPublishOptions(ctx) : undefined;
+        const published = publishPolicy ? await publishProject(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, htmlFile.path, publishPolicy.options) : undefined;
+        const artifacts = [productionFile.path, mp3File.path, rawFile.path, ...Object.values(stemPaths), ...Object.values(midiStemPaths), licensesFile.path, reportFile.path, htmlFile.path];
+        return { ok: true, summary: `Rendered production_candidate music to ${productionFile.path} and ${mp3File.path}.`, jobId: parsed.projectId, previewUrl: published?.publishedUrl, shareUrl: published?.publishedUrl, artifacts, structuredContent: { ...report, reportPath: reportFile.path, htmlPath: htmlFile.path, publishedUrl: published?.publishedUrl }, logs: [JSON.stringify(report, null, 2)], errors: [] };
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    }
+  },
+  {
+    definition: { name: "install_free_soundfont_pack", description: "Install a free commercial-friendly SoundFont pack into project assets with license/readme/source/hash metadata for production_candidate review. v1 supports GeneralUser GS only and does not label it MIT.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, packId: { type: "string", enum: ["generaluser_gs"] }, outputDirectory: { type: "string" } }, required: ["projectId", "packId"], additionalProperties: false } },
+    enabledByDefault: true,
+    schema: installFreeSoundfontPackInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = installFreeSoundfontPackInputSchema.parse(input);
+      const result = await installGeneralUserGsPack(ctx, parsed);
+      const artifacts = result.ok ? [...result.assetPaths, result.licenseTextPath, result.readmePath] : [];
+      return {
+        ok: result.ok,
+        summary: result.ok ? `Installed ${result.displayName} with SHA-256 ${result.computedSha256}.` : `Failed to install ${result.displayName}.`,
+        jobId: parsed.projectId,
+        artifacts,
+        structuredContent: result,
+        logs: [JSON.stringify(result, null, 2)],
+        errors: result.ok ? [] : result.errors
+      };
+    }
+  },
+  {
+    definition: { name: "discover_soundfont_packs", description: "Read-only scan for .sf2/.sf3/.sfz candidates in project assets and optional .music-packs/, reporting hash, sidecar license/readme status, and registration guidance.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, includeLocalMusicPacks: { type: "boolean" }, projectSearchDirectories: { type: "array", items: { type: "string" } } }, required: ["projectId"], additionalProperties: false } },
+    enabledByDefault: true,
+    schema: discoverSoundfontPacksInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = discoverSoundfontPacksInputSchema.parse(input);
+      const result = await discoverSoundfontPacks(ctx, parsed);
+      return {
+        ok: result.blocked.length === 0,
+        summary: `Discovered ${result.candidates.length} SoundFont/SFZ candidate(s): ${result.ready.length} ready, ${result.reviewRequired.length} review, ${result.blocked.length} blocked.`,
+        jobId: parsed.projectId,
+        artifacts: [],
+        structuredContent: result,
+        logs: [JSON.stringify(result, null, 2)],
+        errors: result.blocked.flatMap((candidate) => candidate.reasons.map((reason) => `${candidate.path}: ${reason}`))
+      };
+    }
+  },
+  {
     definition: { name: "render_midi_with_soundfont", description: "Render a MIDI/composition manifest through a registered ready .sf2/.sf3 SoundFont or .sfz instrument pack, producing production_candidate WAV, optional stems, and a renderer/license report. .sf2/.sf3 uses FluidSynth; .sfz uses sfizz_render when installed.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, stems: { type: "boolean" }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: renderMidiWithSoundfontInputSchema,
@@ -3444,6 +4271,10 @@ export const musicWorkflowTools: ToolModule[] = [
           },
           qualityTier: "production_candidate",
           productionReady: true,
+          packSha256: soundfont.pack.computedSha256,
+          packLicenseTextPath: soundfont.pack.licenseTextPath,
+          packSourceUrl: soundfont.pack.sourceUrl,
+          productionUseApproved: soundfont.pack.productionUseApproved,
           blockingReasons: [],
           sourceMidiPath: parsed.midiPath,
           sourceCompositionManifestPath: parsed.compositionManifestPath,
@@ -3459,8 +4290,13 @@ export const musicWorkflowTools: ToolModule[] = [
             attribution: soundfont.pack.attribution,
             commercialUseAllowed: soundfont.pack.commercialUseAllowed,
             redistributionAllowed: soundfont.pack.redistributionAllowed,
+            productionUseApproved: soundfont.pack.productionUseApproved,
+            qualityTier: soundfont.pack.qualityTier,
             computedSha256: soundfont.pack.computedSha256,
             source: soundfont.pack.source,
+            sourceUrl: soundfont.pack.sourceUrl,
+            licenseTextPath: soundfont.pack.licenseTextPath,
+            readmePath: soundfont.pack.readmePath,
             version: soundfont.pack.version
           },
           channelMap: parsed.channelMap,

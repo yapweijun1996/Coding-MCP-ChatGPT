@@ -46,7 +46,7 @@ Enabled by default:
 - Webpage rebuild workflow: `capture_webpage`, `analyze_webpage_capture`, `generate_improved_static_page`.
 - Presentation and media generation: `create_html_deck`, `create_pptx_deck`, `create_immersive_page`, `create_video_presentation`, `create_media_scene_timeline`, `add_media_captions`, `attach_media_voice_audio`, `preview_media_frames`, `export_media_project`.
 - Video editor workflow: `create_video_project`, `import_video_asset_from_local_file`, `probe_video_asset`, `extract_video_frames`, `create_video_scene_asset`, `write_video_timeline`, `preview_video_timeline`, `render_video_timeline`.
-- Music workflow: `import_musicxml_score`, `compose_music`, `edit_midi`, `render_midi_with_soundfont`, `render_midi_to_audio`, `inspect_audio_quality`, `manage_jazz_instrument_packs`, `build_music_license_manifest`, `publish_music_audition_demo`, `export_music_project`, and supporting arrangement/export tools.
+- Music workflow: `import_musicxml_score`, `compose_music`, `edit_midi`, `check_music_render_environment`, `render_production_music`, `install_free_soundfont_pack`, `discover_soundfont_packs`, `render_midi_with_soundfont`, `render_midi_to_audio`, `inspect_audio_quality`, `manage_jazz_instrument_packs`, `build_music_license_manifest`, `publish_music_audition_demo`, `export_music_project`, and supporting arrangement/export tools.
 - Stable command checks backed by current package scripts: `run_command`, `run_typecheck`, `run_tests`, `run_build`.
 - Workspace and git tools delegated from the legacy implementation.
 
@@ -157,6 +157,8 @@ For idea-to-demo React, Vue, or Vite apps, use the App project workflow:
 6. `publish_project_dist` with `outputDir: "dist"` and `entryFile: "index.html"`.
 7. Return the `shareUrl` and Admin ZIP download link.
 
+`publish_project_dist` replaces files from its previous app-dist publish, but preserves project files created by other workflows such as `music/*.wav`, `music/*.mid`, reports, manifests, and imported media assets. If an app needs audio or model files in its own build output, include them in `dist/`; common audio, MIDI, image, video, and GLB/GLTF assets are publishable.
+
 ## Presentation workflow
 
 Use `create_video_presentation` when an agent needs a presentation-style video preview from scene data. The tool creates a published Project with `index.html`, `video.css`, `video.js`, and a vendored MIT MP4 muxer module. It returns the Project `shareUrl`; MP4 export happens inside the browser through WebCodecs when the user's browser supports H.264 encoding.
@@ -171,16 +173,24 @@ The presentation generator does not render MP4 files server-side. If WebCodecs i
 
 Use `import_musicxml_score` when a user provides MusicXML or asks for score-driven music. This path converts MusicXML into the normal composition manifest and writes a standard `.mid` file. Missing tempo, instrument, or meter metadata falls back conservatively to piano, 90 BPM, and 4/4-style timing, and the manifest records warnings.
 
+For any user-facing request to make music, a song, professional audio, cafe/venue background music, client-ready music, or a public demo, use this score-first workflow by default. Do not deliver browser oscillator, procedural synth, or other robotic preview audio as finished music.
+
 Preferred professional path:
 
 1. `import_musicxml_score` with `musicXmlPath` or `musicXmlString`.
-2. Register a commercial-safe piano SoundFont or SFZ pack with `manage_jazz_instrument_packs`, including source URL, license, attribution, SHA-256, and redistribution notes.
-3. Use `edit_midi` only if arrangement cleanup is needed.
-4. Render with `render_midi_with_soundfont`.
-5. Run `inspect_audio_quality`.
-6. Export with `export_music_project`.
+2. Use `install_free_soundfont_pack` for the v1 free GeneralUser GS candidate, or `discover_soundfont_packs` to inspect existing `.sf2`, `.sf3`, and `.sfz` assets.
+3. Register a commercial-safe piano SoundFont or SFZ pack with `manage_jazz_instrument_packs`, including source URL, license text path, README path, attribution, SHA-256, redistribution notes, `productionUseApproved`, and `qualityTier`.
+4. Use `edit_midi` only if arrangement cleanup is needed.
+5. Run `check_music_render_environment` to detect `sfizz_render`, FluidSynth, FFmpeg, SoX, and available `.sf2`/`.sf3`/`.sfz` candidates.
+6. Render the complete V1 handoff with `render_production_music`; it creates MIDI stems, rendered WAV stems, a stem-mixed `music/production.wav`, FFmpeg-encoded `music/preview.mp3`, `LICENSES.md`, a JSON pipeline report, and a page with Play Preview / Download WAV / Download MP3 controls.
+7. Run `inspect_audio_quality`.
+8. Export with `export_music_project` when an additional package manifest/playlist handoff is needed.
 
-`render_midi_with_soundfont` is preferred for production-candidate piano output when a ready instrument pack exists. `.sf2`/`.sf3` packs render through `fluidsynth`; `.sfz` packs render through `sfizz_render` when installed. `render_midi_to_audio` remains a procedural fallback and should be treated as `preview_only`; exported audition pages should make that status visible.
+`render_production_music` is the preferred V1 production path. It requires a registered `production_candidate` instrument pack, an offline renderer (`sfizz_render` for SFZ or FluidSynth for `.sf2`/`.sf3`), and FFmpeg for MP3 export. If those requirements are missing, it returns `preview_only` and the user-facing label must be “MIDI preview only. Not production audio.” `render_midi_with_soundfont` remains the lower-level production-candidate renderer for WAV/stem creation. `render_midi_to_audio` is only an internal scratch-preview fallback when the user explicitly accepts preview-only audio; it must not be used for finished music, professional music, public listening demos, or production handoff pages.
+
+GeneralUser GS is the v1 built-in free SoundFont candidate and uses license key `generaluser_gs_2_0`; do not label it MIT. Docker images preinstall it under `/app/soundfonts/generaluser-gs/`, and `install_free_soundfont_pack` copies that bundled cache into the target project before falling back to an upstream download. Treat it as a free/commercial-friendly SoundFont render candidate only after the project keeps the `.sf2`, `LICENSE.txt`, `README.md`, source URL, computed SHA-256, and clean QA/render reports. Avoid “Spotify-level” claims; use `production_candidate render` or `production-ready candidate after QA/license gates`.
+
+For V1 piano rendering, prefer a registered `realistic_piano` SFZ/SoundFont such as a license-cleared Salamander Grand Piano or FreePats-style piano pack. Do not redistribute raw sample libraries unless the license explicitly allows redistribution. DecentSampler or Decent Samples libraries may be referenced only when source URL, license text, README, attribution, redistribution notes, and commercial-use flags are stored in project metadata and `LICENSES.md`.
 
 Do not commit large `.sf2`, `.sf3`, SFZ sample sets, or other instrument binaries into git. Store local packs in project data or a configured workspace path such as `.music-packs/`, then register metadata and attribution before rendering or export.
 

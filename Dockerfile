@@ -22,6 +22,38 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends fluidsynth ffmpeg \
   && rm -rf /var/lib/apt/lists/*
 
+RUN mkdir -p /app/soundfonts/generaluser-gs \
+  && node <<'NODE'
+const fs = require("node:fs/promises");
+const path = require("node:path");
+
+const targetDir = "/app/soundfonts/generaluser-gs";
+const baseUrl = "https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/master";
+const files = [
+  ["GeneralUser-GS.sf2", "GeneralUser-GS.sf2"],
+  ["documentation/LICENSE.txt", "LICENSE.txt"],
+  ["README.md", "README.md"]
+];
+
+async function download(sourcePath, targetName) {
+  const url = `${baseUrl}/${sourcePath}`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Failed to download ${url}: ${response.status}`);
+  const buffer = Buffer.from(await response.arrayBuffer());
+  await fs.writeFile(path.join(targetDir, targetName), buffer);
+  return buffer;
+}
+
+(async () => {
+  const soundfont = await download(files[0][0], files[0][1]);
+  await download(files[1][0], files[1][1]);
+  await download(files[2][0], files[2][1]);
+  if (soundfont.length < 12 || soundfont.subarray(0, 4).toString("ascii") !== "RIFF" || soundfont.subarray(8, 12).toString("ascii") !== "sfbk") {
+    throw new Error("Downloaded GeneralUser-GS.sf2 is not a valid RIFF/sfbk SoundFont.");
+  }
+})();
+NODE
+
 ENV NODE_ENV=production \
     PORT=6859 \
     HOST=0.0.0.0 \
@@ -31,6 +63,7 @@ ENV NODE_ENV=production \
     ARTIFACT_ROOT=/data/artifacts \
     PROJECT_ROOT=/data/projects \
     JOBS_ROOT=/data/jobs \
+    MUSIC_SOUNDFONT_DIR=/app/soundfonts \
     SKILL_STATE_PATH=/data/state/skill-state.json \
     SITE_STATE_PATH=/data/state/site-state.json \
     BLOG_STATE_PATH=/data/state/blog-state.json \

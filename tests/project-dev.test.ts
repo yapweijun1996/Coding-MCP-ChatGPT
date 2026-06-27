@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 import { callTool } from "../src/mcp/router.js";
 import type { ToolContext } from "../src/mcp/types.js";
-import { bindProjectWorkspace, createProject, getProjectManifest } from "../src/projects/store.js";
+import { bindProjectWorkspace, createProject, getProjectManifest, getProjectWorkspaceDirectory, writeProjectAsset } from "../src/projects/store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,6 +29,10 @@ async function createRepoInsideWorkspace(ctx: ToolContext, name: string): Promis
   const repo = path.join(ctx.workspaceRoot, name);
   await execFileAsync("git", ["init", repo]);
   return repo;
+}
+
+function tinyWav(): Buffer {
+  return Buffer.from("RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00", "binary");
 }
 
 test("project workspace binding lets git_status inspect a real bound repository", async () => {
@@ -155,6 +159,80 @@ test("workspace asset tools can add model assets and publish them from dist", as
 
     const manifest = await getProjectManifest(ctx.projectRoot, project.id);
     assert.ok(manifest.files.some((file) => file.path === "assets/model.glb"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("publish_project_dist only replaces files from its previous publish and preserves project media assets", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "coding-mcp-app-publish-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, {
+      title: "App publish preserves media",
+      createdByClientId: "test-client"
+    });
+    const workspace = getProjectWorkspaceDirectory(ctx.projectRoot, project.id);
+    const dist = path.join(workspace, "dist");
+
+    await writeProjectAsset(ctx.projectRoot, project.id, "music/final.wav", tinyWav(), "audio/wav");
+    await mkdir(dist, { recursive: true });
+    await writeFile(path.join(dist, "index.html"), "<!doctype html><html><body><script src=\"./old.js\"></script></body></html>", "utf8");
+    await writeFile(path.join(dist, "old.js"), "console.log('old');\n", "utf8");
+
+    const firstPublish = await callTool("publish_project_dist", {
+      projectId: project.id,
+      outputDir: "dist",
+      entryFile: "index.html"
+    }, ctx);
+    assert.equal(firstPublish.ok, true);
+
+    await writeFile(path.join(dist, "index.html"), "<!doctype html><html><body><audio src=\"music/final.wav\" controls></audio><script src=\"./app.js\"></script></body></html>", "utf8");
+    await writeFile(path.join(dist, "app.js"), "console.log('new');\n", "utf8");
+    await rm(path.join(dist, "old.js"), { force: true });
+
+    const secondPublish = await callTool("publish_project_dist", {
+      projectId: project.id,
+      outputDir: "dist",
+      entryFile: "index.html"
+    }, ctx);
+    assert.equal(secondPublish.ok, true);
+    const payload = secondPublish.structuredContent as { removedFiles: string[] };
+    assert.ok(payload.removedFiles.includes("old.js"));
+
+    const manifest = await getProjectManifest(ctx.projectRoot, project.id);
+    assert.ok(manifest.files.some((file) => file.path === "index.html"));
+    assert.ok(manifest.files.some((file) => file.path === "app.js"));
+    assert.ok(manifest.files.some((file) => file.path === "music/final.wav"));
+    assert.ok(!manifest.files.some((file) => file.path === "old.js"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("publish_project_dist accepts audio assets bundled in dist", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "coding-mcp-app-audio-dist-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, {
+      title: "App publish audio asset",
+      createdByClientId: "test-client"
+    });
+    const dist = path.join(getProjectWorkspaceDirectory(ctx.projectRoot, project.id), "dist");
+
+    await mkdir(path.join(dist, "audio"), { recursive: true });
+    await writeFile(path.join(dist, "index.html"), "<!doctype html><html><body><audio src=\"./audio/track.wav\" controls></audio></body></html>", "utf8");
+    await writeFile(path.join(dist, "audio/track.wav"), tinyWav());
+
+    const publish = await callTool("publish_project_dist", {
+      projectId: project.id,
+      outputDir: "dist",
+      entryFile: "index.html"
+    }, ctx);
+    assert.equal(publish.ok, true);
+
+    const manifest = await getProjectManifest(ctx.projectRoot, project.id);
+    assert.ok(manifest.files.some((file) => file.path === "audio/track.wav"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

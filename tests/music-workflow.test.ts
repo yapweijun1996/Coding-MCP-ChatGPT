@@ -26,6 +26,20 @@ function fakeSoundfontBytes() {
   return Buffer.concat([Buffer.from("RIFF", "ascii"), Buffer.from([0x04, 0x00, 0x00, 0x00]), Buffer.from("sfbk", "ascii"), Buffer.from("pdta", "ascii")]);
 }
 
+function installMockFetch(files: Record<string, Buffer | string>, missing: string[] = []) {
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    const textUrl = String(url);
+    const name = path.basename(new URL(textUrl).pathname);
+    if (missing.includes(name) || files[name] === undefined) return new Response("missing", { status: 404 });
+    const body = files[name];
+    return new Response(body instanceof Buffer ? body : Buffer.from(body, "utf8"), { status: 200 });
+  }) as typeof fetch;
+  return () => {
+    globalThis.fetch = oldFetch;
+  };
+}
+
 const simplePianoMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="3.1">
   <work><work-title>Simple Piano Score</work-title></work>
@@ -164,6 +178,28 @@ fs.writeFileSync(out, Buffer.concat([header, pcm]));
   return bin;
 }
 
+async function installFakeFfmpeg(root: string) {
+  const bin = path.join(root, "bin-ffmpeg");
+  await mkdir(bin, { recursive: true });
+  const scriptPath = path.join(bin, "ffmpeg");
+  const script = `#!/usr/bin/env node
+const fs = require("fs");
+if (process.argv.includes("-version")) {
+  console.log("ffmpeg fake 6.1");
+  process.exit(0);
+}
+const out = process.argv[process.argv.length - 1];
+if (!out) {
+  console.error("missing output");
+  process.exit(2);
+}
+fs.writeFileSync(out, Buffer.concat([Buffer.from("ID3", "ascii"), Buffer.alloc(256, 1)]));
+`;
+  await writeFile(scriptPath, script);
+  await chmod(scriptPath, 0o755);
+  return bin;
+}
+
 test("music workflow imports MusicXML score into manifest and MIDI", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "musicxml-import-"));
   try {
@@ -232,6 +268,168 @@ test("music workflow imports MusicXML score into manifest and MIDI", async () =>
   }
 });
 
+test("install_free_soundfont_pack installs GeneralUser GS metadata and blocks bad downloads", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-install-soundfont-"));
+  let restoreFetch = () => {};
+  const oldSoundfontDir = process.env.MUSIC_SOUNDFONT_DIR;
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Install SoundFont", createdByClientId: "producer" });
+    const installer = getToolModule("install_free_soundfont_pack");
+    const packManager = getToolModule("manage_jazz_instrument_packs");
+    assert.ok(installer);
+    assert.ok(packManager);
+
+    restoreFetch = installMockFetch({
+      "GeneralUser-GS.sf2": fakeSoundfontBytes(),
+      "LICENSE.txt": "GeneralUser GS license fixture\n",
+      "README.md": "# GeneralUser GS fixture\n"
+    });
+    const result = await installer!.handler({ projectId: project.id, packId: "generaluser_gs" }, ctx);
+    assert.equal(result.ok, true);
+    const payload = result.structuredContent as { assetPaths: string[]; licenseTextPath: string; readmePath: string; computedSha256: string; sourceUrl: string; licenseType: string; commercialUseAllowed: boolean; productionUseApproved: boolean; qualityTier: string };
+    assert.deepEqual(payload.assetPaths, ["soundfonts/generaluser-gs/GeneralUser-GS.sf2"]);
+    assert.equal(payload.licenseTextPath, "soundfonts/generaluser-gs/LICENSE.txt");
+    assert.equal(payload.readmePath, "soundfonts/generaluser-gs/README.md");
+    assert.equal(payload.computedSha256, createHash("sha256").update(fakeSoundfontBytes()).digest("hex"));
+    assert.equal(payload.sourceUrl, "https://github.com/mrbumpy409/GeneralUser-GS");
+    assert.equal(payload.licenseType, "generaluser_gs_2_0");
+    assert.equal(payload.commercialUseAllowed, true);
+    assert.equal(payload.productionUseApproved, true);
+    assert.equal(payload.qualityTier, "production_candidate");
+
+    const packResult = await packManager!.handler({
+      projectId: project.id,
+      packs: [{
+        packId: "generaluser_gs",
+        displayName: "GeneralUser GS",
+        instrumentRole: "realistic_piano",
+        format: "soundfont",
+        assetPaths: payload.assetPaths,
+        declaredSha256: payload.computedSha256,
+        licenseType: "generaluser_gs_2_0",
+        source: payload.sourceUrl,
+        sourceUrl: payload.sourceUrl,
+        licenseTextPath: payload.licenseTextPath,
+        readmePath: payload.readmePath,
+        commercialUseAllowed: true,
+        redistributionAllowed: true,
+        productionUseApproved: true,
+        qualityTier: "production_candidate"
+      }]
+    }, ctx);
+    assert.equal(packResult.ok, true);
+    const packPayload = packResult.structuredContent as { readyPackIds: string[]; packs: Array<{ packId: string; licenseType: string; qualityTier: string; productionUseApproved: boolean }> };
+    assert.deepEqual(packPayload.readyPackIds, ["generaluser_gs"]);
+    assert.ok(packPayload.packs.some((pack) => pack.packId === "generaluser_gs" && pack.licenseType === "generaluser_gs_2_0" && pack.qualityTier === "production_candidate" && pack.productionUseApproved));
+
+    restoreFetch();
+    const bundledRoot = path.join(root, "bundled-soundfonts");
+    const bundledDir = path.join(bundledRoot, "generaluser-gs");
+    await mkdir(bundledDir, { recursive: true });
+    await writeFile(path.join(bundledDir, "GeneralUser-GS.sf2"), fakeSoundfontBytes());
+    await writeFile(path.join(bundledDir, "LICENSE.txt"), "Bundled GeneralUser GS license\n");
+    await writeFile(path.join(bundledDir, "README.md"), "# Bundled GeneralUser GS\n");
+    process.env.MUSIC_SOUNDFONT_DIR = bundledRoot;
+    restoreFetch = installMockFetch({}, ["GeneralUser-GS.sf2", "LICENSE.txt", "README.md"]);
+    const bundledResult = await installer!.handler({ projectId: project.id, packId: "generaluser_gs", outputDirectory: "soundfonts/bundled-generaluser" }, ctx);
+    assert.equal(bundledResult.ok, true);
+    const bundledPayload = bundledResult.structuredContent as { installSource: string; bundledDirectory: string; computedSha256: string; assetPaths: string[] };
+    assert.equal(bundledPayload.installSource, "bundled_runtime_soundfont");
+    assert.equal(bundledPayload.bundledDirectory, bundledDir);
+    assert.equal(bundledPayload.computedSha256, createHash("sha256").update(fakeSoundfontBytes()).digest("hex"));
+    assert.deepEqual(bundledPayload.assetPaths, ["soundfonts/bundled-generaluser/GeneralUser-GS.sf2"]);
+
+    delete process.env.MUSIC_SOUNDFONT_DIR;
+    restoreFetch();
+    restoreFetch = installMockFetch({
+      "GeneralUser-GS.sf2": fakeSoundfontBytes(),
+      "README.md": "# Missing license fixture\n"
+    }, ["LICENSE.txt"]);
+    const missingLicense = await installer!.handler({ projectId: project.id, packId: "generaluser_gs", outputDirectory: "soundfonts/missing-license" }, ctx);
+    assert.equal(missingLicense.ok, false);
+    assert.ok(missingLicense.errors.some((error) => error.includes("Download failed")));
+
+    restoreFetch();
+    restoreFetch = installMockFetch({
+      "GeneralUser-GS.sf2": "not-a-soundfont",
+      "LICENSE.txt": "license\n",
+      "README.md": "readme\n"
+    });
+    const badSoundfont = await installer!.handler({ projectId: project.id, packId: "generaluser_gs", outputDirectory: "soundfonts/bad-sf2" }, ctx);
+    assert.equal(badSoundfont.ok, false);
+    assert.ok(badSoundfont.errors.some((error) => error.includes("not a valid RIFF/sfbk")));
+  } finally {
+    restoreFetch();
+    if (oldSoundfontDir === undefined) delete process.env.MUSIC_SOUNDFONT_DIR;
+    else process.env.MUSIC_SOUNDFONT_DIR = oldSoundfontDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("discover_soundfont_packs reports ready, review_required, and blocked candidates", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-discover-soundfont-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Discover SoundFont", createdByClientId: "producer" });
+    const discover = getToolModule("discover_soundfont_packs");
+    const packManager = getToolModule("manage_jazz_instrument_packs");
+    assert.ok(discover);
+    assert.ok(packManager);
+
+    await writeProjectAsset(ctx.projectRoot, project.id, "soundfonts/GeneralUser-GS.sf2", fakeSoundfontBytes(), "audio/soundfont");
+    await writeProjectFile(ctx.projectRoot, project.id, "soundfonts/LICENSE.txt", "GeneralUser GS license fixture\n");
+    await writeProjectFile(ctx.projectRoot, project.id, "soundfonts/README.md", "# GeneralUser GS\n");
+    await writeProjectAsset(ctx.projectRoot, project.id, "instruments/review.sfz", Buffer.from("<region> sample=piano.wav key=60\n", "utf8"), "text/plain");
+    await writeProjectAsset(ctx.projectRoot, project.id, "music/bad.sfz", Buffer.from("no regions\n", "utf8"), "text/plain");
+
+    const result = await discover!.handler({ projectId: project.id, includeLocalMusicPacks: false, projectSearchDirectories: ["soundfonts", "instruments", "music"] }, ctx);
+    assert.equal(result.ok, false);
+    const payload = result.structuredContent as {
+      candidates: Array<{ path: string; format: string; sha256: string; status: string; reasons: string[]; licensePresent: boolean; readmePresent: boolean; inferredPackId?: string; suggestedRegistration?: Record<string, unknown> }>;
+      ready: unknown[];
+      reviewRequired: unknown[];
+      blocked: unknown[];
+      recommendations: string[];
+    };
+    const generalUser = payload.candidates.find((candidate) => candidate.path === "soundfonts/GeneralUser-GS.sf2");
+    assert.ok(generalUser);
+    assert.equal(generalUser!.format, "soundfont");
+    assert.equal(generalUser!.status, "ready");
+    assert.equal(generalUser!.inferredPackId, "generaluser_gs");
+    assert.equal(generalUser!.licensePresent, true);
+    assert.equal(generalUser!.readmePresent, true);
+    assert.match(generalUser!.sha256, /^[a-f0-9]{64}$/);
+    assert.equal(generalUser!.suggestedRegistration?.licenseType, "generaluser_gs_2_0");
+    assert.ok(payload.recommendations.some((item) => item.includes("GeneralUser GS")));
+    assert.ok(payload.reviewRequired.some((candidate) => (candidate as { path: string }).path === "instruments/review.sfz"));
+    assert.ok(payload.blocked.some((candidate) => (candidate as { path: string; reasons: string[] }).path === "music/bad.sfz" && (candidate as { reasons: string[] }).reasons.includes("sfz_missing_region")));
+
+    const incompleteRegistration = await packManager!.handler({
+      projectId: project.id,
+      packs: [{
+        packId: "incomplete_generaluser",
+        displayName: "Incomplete GeneralUser",
+        instrumentRole: "realistic_piano",
+        format: "soundfont",
+        assetPaths: ["soundfonts/GeneralUser-GS.sf2"],
+        licenseType: "generaluser_gs_2_0",
+        source: "fixture",
+        commercialUseAllowed: true,
+        redistributionAllowed: true,
+        productionUseApproved: true,
+        qualityTier: "production_candidate"
+      }]
+    }, ctx);
+    assert.equal(incompleteRegistration.ok, false);
+    const incompletePayload = incompleteRegistration.structuredContent as { blockedPackIds: string[]; packs: Array<{ packId: string; riskFlags: string[]; qualityTier: string }> };
+    assert.deepEqual(incompletePayload.blockedPackIds, ["incomplete_generaluser"]);
+    assert.ok(incompletePayload.packs.some((pack) => pack.packId === "incomplete_generaluser" && pack.riskFlags.includes("missing_license_text_path") && pack.qualityTier === "preview_only"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("MusicXML score can render through a commercial-safe CC BY piano SoundFont pack", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "musicxml-soundfont-"));
   const oldPath = process.env.PATH;
@@ -252,6 +450,8 @@ test("MusicXML score can render through a commercial-safe CC BY piano SoundFont 
       outputMidiPath: "music/score.mid"
     }, ctx);
     await writeProjectAsset(ctx.projectRoot, project.id, "instruments/salamander-cc-by.sf2", fakeSoundfontBytes(), "audio/soundfont");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/LICENSE.txt", "CC BY fixture license\n");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/README.md", "# Salamander fixture\n");
     const packResult = await packManager!.handler({
       projectId: project.id,
       intendedUse: "streaming_demo",
@@ -263,10 +463,15 @@ test("MusicXML score can render through a commercial-safe CC BY piano SoundFont 
         assetPaths: ["instruments/salamander-cc-by.sf2"],
         licenseType: "cc_by",
         source: "fixture",
+        sourceUrl: "https://example.test/salamander-fixture",
+        licenseTextPath: "instruments/LICENSE.txt",
+        readmePath: "instruments/README.md",
         attribution: "Salamander Grand Piano sample fixture, CC BY attribution captured.",
         commercialUseAllowed: true,
         redistributionAllowed: true,
-        modificationsAllowed: true
+        modificationsAllowed: true,
+        productionUseApproved: true,
+        qualityTier: "production_candidate"
       }]
     }, ctx);
     assert.equal(packResult.ok, true);
@@ -283,11 +488,17 @@ test("MusicXML score can render through a commercial-safe CC BY piano SoundFont 
       outputReportPath: "music/score-soundfont-report.json"
     }, ctx);
     assert.equal(renderResult.ok, true);
-    const renderPayload = renderResult.structuredContent as { qualityTier: string; productionReady: boolean; soundfont: { licenseType: string; attribution: string; commercialUseAllowed: boolean }; fullMixPath: string };
+    const renderPayload = renderResult.structuredContent as { qualityTier: string; productionReady: boolean; packSha256: string; packLicenseTextPath: string; packSourceUrl: string; productionUseApproved: boolean; soundfont: { licenseType: string; attribution: string; commercialUseAllowed: boolean; licenseTextPath: string; sourceUrl: string }; fullMixPath: string };
     assert.equal(renderPayload.qualityTier, "production_candidate");
     assert.equal(renderPayload.productionReady, true);
+    assert.match(renderPayload.packSha256, /^[a-f0-9]{64}$/);
+    assert.equal(renderPayload.packLicenseTextPath, "instruments/LICENSE.txt");
+    assert.equal(renderPayload.packSourceUrl, "https://example.test/salamander-fixture");
+    assert.equal(renderPayload.productionUseApproved, true);
     assert.equal(renderPayload.soundfont.licenseType, "cc_by");
     assert.equal(renderPayload.soundfont.commercialUseAllowed, true);
+    assert.equal(renderPayload.soundfont.licenseTextPath, "instruments/LICENSE.txt");
+    assert.equal(renderPayload.soundfont.sourceUrl, "https://example.test/salamander-fixture");
     assert.match(renderPayload.soundfont.attribution, /Salamander/);
     assert.equal(renderPayload.fullMixPath, "music/score-soundfont.wav");
     const wav = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/score-soundfont.wav"));
@@ -515,6 +726,10 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     await writeProjectAsset(ctx.projectRoot, project.id, "instruments/bass/upright-pack.sfz", Buffer.from(bassSfz, "utf8"), "text/plain");
     await writeProjectAsset(ctx.projectRoot, project.id, "instruments/brushes/soft-pack.sfz", Buffer.from(brushesSfz, "utf8"), "text/plain");
     await writeProjectAsset(ctx.projectRoot, project.id, "instruments/piano/warm-pack.sf2", pianoSf2, "audio/soundfont");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/piano/LICENSE.txt", "MIT/Apache fixture license\n");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/piano/README.md", "# Piano fixture\n");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/brushes/LICENSE.txt", "CC0 fixture license\n");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/brushes/README.md", "# Brushes fixture\n");
     await assert.rejects(
       writeProjectAsset(ctx.projectRoot, project.id, "instruments/piano/broken.sf2", Buffer.from("not-a-soundfont", "utf8"), "audio/soundfont"),
       /SoundFont asset has invalid magic bytes/
@@ -534,9 +749,14 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
           declaredSha256: createHash("sha256").update(pianoSfz).digest("hex"),
           licenseType: "mit",
           source: "project fixture",
+          sourceUrl: "https://example.test/warm-piano",
+          licenseTextPath: "instruments/piano/LICENSE.txt",
+          readmePath: "instruments/piano/README.md",
           commercialUseAllowed: true,
           redistributionAllowed: true,
-          modificationsAllowed: true
+          modificationsAllowed: true,
+          productionUseApproved: true,
+          qualityTier: "production_candidate"
         },
         {
           packId: "upright_bass_lgpl",
@@ -602,9 +822,14 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
           assetPaths: ["instruments/piano/warm-pack.sfz"],
           licenseType: "mit",
           source: "project fixture",
+          sourceUrl: "https://example.test/warm-piano",
+          licenseTextPath: "instruments/piano/LICENSE.txt",
+          readmePath: "instruments/piano/README.md",
           commercialUseAllowed: true,
           redistributionAllowed: true,
-          modificationsAllowed: true
+          modificationsAllowed: true,
+          productionUseApproved: true,
+          qualityTier: "production_candidate"
         },
         {
           packId: "upright_bass_apache",
@@ -614,9 +839,14 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
           assetPaths: ["instruments/piano/warm-pack.sf2"],
           licenseType: "apache_2",
           source: "project fixture",
+          sourceUrl: "https://example.test/upright-bass",
+          licenseTextPath: "instruments/piano/LICENSE.txt",
+          readmePath: "instruments/piano/README.md",
           commercialUseAllowed: true,
           redistributionAllowed: true,
-          modificationsAllowed: true
+          modificationsAllowed: true,
+          productionUseApproved: true,
+          qualityTier: "production_candidate"
         },
         {
           packId: "brushes_cc0",
@@ -626,9 +856,14 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
           assetPaths: ["instruments/brushes/soft-pack.sfz"],
           licenseType: "cc0",
           source: "project fixture",
+          sourceUrl: "https://example.test/brushes",
+          licenseTextPath: "instruments/brushes/LICENSE.txt",
+          readmePath: "instruments/brushes/README.md",
           commercialUseAllowed: true,
           redistributionAllowed: true,
-          modificationsAllowed: true
+          modificationsAllowed: true,
+          productionUseApproved: true,
+          qualityTier: "production_candidate"
         }
       ]
     }, ctx);
@@ -637,7 +872,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
       readyPackIds: string[];
       reviewRequiredPackIds: string[];
       blockedPackIds: string[];
-      packs: Array<{ packId: string; format: string; computedSha256?: string; eligibleRenderer?: string }>;
+      packs: Array<{ packId: string; format: string; computedSha256?: string; eligibleRenderer?: string; qualityTier: string; productionUseApproved: boolean; licenseTextPath?: string; sourceUrl?: string }>;
       instrumentMapCandidates: Record<string, { packId?: string; rendererUse: string }>;
       rendererIntegration: { rule: string; eligibleRenderer: string; eligibleRenderers: string[]; safeProceduralFallbackMap: Record<string, string> };
       licenseManifest: { commercialUseStatus: string; unsafeAssets: unknown[] };
@@ -647,6 +882,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     assert.deepEqual(safePackPayload.blockedPackIds, []);
     assert.ok(safePackPayload.packs.some((pack) => pack.packId === "warm_piano_mit" && pack.format === "sfz" && pack.eligibleRenderer === "sfizz" && pack.computedSha256 === createHash("sha256").update(pianoSfz).digest("hex")));
     assert.ok(safePackPayload.packs.some((pack) => pack.packId === "upright_bass_apache" && pack.format === "soundfont" && pack.eligibleRenderer === "fluidsynth" && pack.computedSha256 === createHash("sha256").update(pianoSf2).digest("hex")));
+    assert.ok(safePackPayload.packs.some((pack) => pack.packId === "upright_bass_apache" && pack.qualityTier === "production_candidate" && pack.productionUseApproved && pack.licenseTextPath === "instruments/piano/LICENSE.txt" && pack.sourceUrl === "https://example.test/upright-bass"));
     assert.equal(safePackPayload.instrumentMapCandidates.realistic_piano.packId, "warm_piano_mit");
     assert.equal(safePackPayload.instrumentMapCandidates.upright_bass.packId, "upright_bass_apache");
     assert.equal(safePackPayload.instrumentMapCandidates.brush_drums.packId, "brushes_cc0");
@@ -677,19 +913,28 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
         productionReady: boolean;
         fullMixPath: string;
         stemPaths: Record<string, string>;
-        soundfont: { packId: string; computedSha256: string };
+        packLicenseTextPath: string;
+        packSourceUrl: string;
+        productionUseApproved: boolean;
+        soundfont: { packId: string; computedSha256: string; licenseTextPath: string; sourceUrl: string; productionUseApproved: boolean };
         channelMapApplied: boolean;
         renderReport: { renderedFormats: string[]; peakLevel: number; rms: number; stemCount: number };
       };
       assert.equal(soundfontPayload.renderer, "fluidsynth");
       assert.equal(soundfontPayload.qualityTier, "production_candidate");
       assert.equal(soundfontPayload.productionReady, true);
+      assert.equal(soundfontPayload.packLicenseTextPath, "instruments/piano/LICENSE.txt");
+      assert.equal(soundfontPayload.packSourceUrl, "https://example.test/upright-bass");
+      assert.equal(soundfontPayload.productionUseApproved, true);
       assert.equal(soundfontPayload.fullMixPath, "music/rendered-soundfont.wav");
       assert.equal(soundfontPayload.channelMapApplied, false);
       assert.ok(Object.keys(soundfontPayload.stemPaths).length > 0);
       assert.equal(soundfontPayload.renderReport.stemCount, Object.keys(soundfontPayload.stemPaths).length);
       assert.equal(soundfontPayload.soundfont.packId, "upright_bass_apache");
       assert.equal(soundfontPayload.soundfont.computedSha256, createHash("sha256").update(pianoSf2).digest("hex"));
+      assert.equal(soundfontPayload.soundfont.licenseTextPath, "instruments/piano/LICENSE.txt");
+      assert.equal(soundfontPayload.soundfont.sourceUrl, "https://example.test/upright-bass");
+      assert.equal(soundfontPayload.soundfont.productionUseApproved, true);
       assert.deepEqual(soundfontPayload.renderReport.renderedFormats, ["wav"]);
       assert.ok(soundfontPayload.renderReport.peakLevel > 0);
       assert.ok(soundfontPayload.renderReport.rms > 0);
@@ -1285,6 +1530,131 @@ test("production music workflow publishes auditions, extends arrangements, assem
   }
 });
 
+test("free production render pipeline creates WAV, MP3, stems, licenses, and truthful UI", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-production-pipeline-"));
+  const oldPath = process.env.PATH;
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Production pipeline", createdByClientId: "producer" });
+    const compose = getToolModule("compose_music");
+    const packManager = getToolModule("manage_jazz_instrument_packs");
+    const environmentCheck = getToolModule("check_music_render_environment");
+    const productionRender = getToolModule("render_production_music");
+    assert.ok(compose);
+    assert.ok(packManager);
+    assert.ok(environmentCheck);
+    assert.ok(productionRender);
+
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${await installFakeFfmpeg(root)}:${oldPath}`;
+    const emptyEnvironment = await environmentCheck!.handler({ projectId: project.id, includeLocalMusicPacks: false }, ctx);
+    assert.equal(emptyEnvironment.ok, false);
+    const emptyEnvironmentPayload = emptyEnvironment.structuredContent as { productionSupport: { statusLabel: string; reasons: string[] }; tools: { fluidsynth: { ok: boolean }; ffmpeg: { ok: boolean }; sox: { ok: boolean } } };
+    assert.equal(emptyEnvironmentPayload.tools.fluidsynth.ok, true);
+    assert.equal(emptyEnvironmentPayload.tools.ffmpeg.ok, true);
+    assert.equal(typeof emptyEnvironmentPayload.tools.sox.ok, "boolean");
+    assert.equal(emptyEnvironmentPayload.productionSupport.statusLabel, "MIDI preview only. Not production audio.");
+    assert.ok(emptyEnvironmentPayload.productionSupport.reasons.some((reason) => reason.includes("No ready")));
+
+    await compose!.handler({
+      projectId: project.id,
+      title: "Free Production Cue",
+      style: "smooth_piano",
+      tempo: 84,
+      key: "C",
+      durationSeconds: 18,
+      instruments: ["piano", "upright_bass", "brushes", "pads"],
+      outputManifestPath: "music/free-production.json",
+      outputMidiPath: "music/free-production.mid"
+    }, ctx);
+    await writeProjectAsset(ctx.projectRoot, project.id, "instruments/free-piano.sf2", fakeSoundfontBytes(), "audio/soundfont");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/LICENSE.txt", "Public domain fixture license\n");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/README.md", "# Free piano fixture\n");
+    const packResult = await packManager!.handler({
+      projectId: project.id,
+      intendedUse: "client_delivery",
+      packs: [{
+        packId: "free_piano_public_domain",
+        displayName: "Free Piano Public Domain",
+        instrumentRole: "realistic_piano",
+        format: "soundfont",
+        assetPaths: ["instruments/free-piano.sf2"],
+        licenseType: "public_domain",
+        source: "fixture",
+        sourceUrl: "https://example.test/free-piano",
+        licenseTextPath: "instruments/LICENSE.txt",
+        readmePath: "instruments/README.md",
+        commercialUseAllowed: true,
+        redistributionAllowed: true,
+        productionUseApproved: true,
+        qualityTier: "production_candidate"
+      }]
+    }, ctx);
+    assert.equal(packResult.ok, true);
+
+    const renderResult = await productionRender!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/free-production.json",
+      soundfontPackId: "free_piano_public_domain",
+      sampleRate: 16000,
+      publish: true
+    }, ctx);
+    assert.equal(renderResult.ok, true);
+    const payload = renderResult.structuredContent as {
+      productionReady: boolean;
+      qualityTier: string;
+      statusLabel: string;
+      productionWavPath: string;
+      previewMp3Path: string;
+      stemPaths: Record<string, string>;
+      midiStemPaths: Record<string, string>;
+      licensesPath: string;
+      reportPath: string;
+      htmlPath: string;
+      publishedUrl: string;
+      mixMasterChain: string[];
+      noSpotifyLevelClaim: boolean;
+      environment: { tools: { fluidsynth: { ok: boolean }; ffmpeg: { ok: boolean }; sox: { ok: boolean } } };
+    };
+    assert.equal(payload.productionReady, true);
+    assert.equal(payload.qualityTier, "production_candidate");
+    assert.equal(payload.statusLabel, "Rendered with free license-cleared instruments. Suitable for production use with proper attribution.");
+    assert.equal(payload.productionWavPath, "music/production.wav");
+    assert.equal(payload.previewMp3Path, "music/preview.mp3");
+    assert.equal(payload.licensesPath, "LICENSES.md");
+    assert.ok(payload.stemPaths.piano);
+    assert.ok(payload.stemPaths.bass);
+    assert.ok(payload.stemPaths.drums);
+    assert.ok(payload.stemPaths["pad-ambience"]);
+    assert.ok(payload.midiStemPaths.piano);
+    assert.ok(payload.mixMasterChain.includes("master_limiter"));
+    assert.equal(payload.noSpotifyLevelClaim, true);
+    assert.equal(payload.environment.tools.fluidsynth.ok, true);
+    assert.equal(payload.environment.tools.ffmpeg.ok, true);
+    assert.equal(typeof payload.environment.tools.sox.ok, "boolean");
+    assert.match(payload.publishedUrl, /https:\/\/example\.test/);
+
+    const productionWav = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, payload.productionWavPath));
+    assert.equal(productionWav.subarray(0, 4).toString("ascii"), "RIFF");
+    const previewMp3 = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, payload.previewMp3Path));
+    assert.equal(previewMp3.subarray(0, 3).toString("ascii"), "ID3");
+    const licenses = await readProjectFile(ctx.projectRoot, project.id, payload.licensesPath);
+    assert.match(licenses, /# Music Rendering Licenses/);
+    assert.match(licenses, /Free Piano Public Domain/);
+    assert.match(licenses, /No Spotify-level mastering claim/);
+    const html = await readProjectFile(ctx.projectRoot, project.id, payload.htmlPath);
+    assert.match(html, /Play Preview/);
+    assert.match(html, /Download WAV/);
+    assert.match(html, /Download MP3/);
+    assert.match(html, /Rendered with free license-cleared instruments/);
+    const report = await readProjectFile(ctx.projectRoot, project.id, payload.reportPath);
+    assert.match(report, /production.wav/);
+    assert.match(report, /preview.mp3/);
+  } finally {
+    process.env.PATH = oldPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("export_music_project creates a music package with README, playlist, checks, and license warnings", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "music-export-package-"));
   try {
@@ -1370,6 +1740,8 @@ test("export_music_project creates a music package with README, playlist, checks
     assert.match(playlist, /music\/final\.wav/);
     const html = await readProjectFile(ctx.projectRoot, project.id, "music-project.html");
     assert.match(html, /Download package/);
+    assert.match(html, /<h2>Listen<\/h2>/);
+    assert.match(html, /<audio controls preload="metadata" src="music\/final\.wav"><\/audio>/);
     const report = await readProjectFile(ctx.projectRoot, project.id, payload.packageReportPath);
     assert.match(report, /missing-drums/);
   } finally {
@@ -1495,6 +1867,8 @@ test("render_midi_with_soundfont blocks missing renderer and unsafe packs", asyn
     }, ctx);
     const sf2 = fakeSoundfontBytes();
     await writeProjectAsset(ctx.projectRoot, project.id, "instruments/unsafe.sf2", sf2, "audio/soundfont");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/LICENSE.txt", "Public domain fixture\n");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/README.md", "# Ready PD fixture\n");
     await packManager!.handler({
       projectId: project.id,
       packs: [{
@@ -1538,8 +1912,13 @@ test("render_midi_with_soundfont blocks missing renderer and unsafe packs", asyn
         assetPaths: ["instruments/unsafe.sf2"],
         licenseType: "public_domain",
         source: "fixture",
+        sourceUrl: "https://example.test/ready-pd",
+        licenseTextPath: "instruments/LICENSE.txt",
+        readmePath: "instruments/README.md",
         commercialUseAllowed: true,
-        redistributionAllowed: true
+        redistributionAllowed: true,
+        productionUseApproved: true,
+        qualityTier: "production_candidate"
       }]
     }, ctx);
     await writeProjectAsset(ctx.projectRoot, project.id, "instruments/mismatch.sfz", Buffer.from("<region> sample=piano-C4.wav key=60\n", "utf8"), "text/plain");
@@ -1554,8 +1933,13 @@ test("render_midi_with_soundfont blocks missing renderer and unsafe packs", asyn
           assetPaths: ["instruments/unsafe.sf2"],
           licenseType: "public_domain",
           source: "fixture",
+          sourceUrl: "https://example.test/ready-pd",
+          licenseTextPath: "instruments/LICENSE.txt",
+          readmePath: "instruments/README.md",
           commercialUseAllowed: true,
-          redistributionAllowed: true
+          redistributionAllowed: true,
+          productionUseApproved: true,
+          qualityTier: "production_candidate"
         },
         {
           packId: "mixed_soundfont",
@@ -1565,8 +1949,13 @@ test("render_midi_with_soundfont blocks missing renderer and unsafe packs", asyn
           assetPaths: ["instruments/unsafe.sf2", "instruments/mismatch.sfz"],
           licenseType: "public_domain",
           source: "fixture",
+          sourceUrl: "https://example.test/mixed",
+          licenseTextPath: "instruments/LICENSE.txt",
+          readmePath: "instruments/README.md",
           commercialUseAllowed: true,
-          redistributionAllowed: true
+          redistributionAllowed: true,
+          productionUseApproved: true,
+          qualityTier: "production_candidate"
         }
       ]
     }, ctx);
@@ -1940,6 +2329,10 @@ test("music-workflow skill exposes music tools through dedicated, coding, and de
     "compose_music",
     "edit_midi",
     "render_midi_to_audio",
+    "check_music_render_environment",
+    "render_production_music",
+    "install_free_soundfont_pack",
+    "discover_soundfont_packs",
     "render_midi_with_soundfont",
     "generate_jazz_harmony",
     "generate_drum_groove",

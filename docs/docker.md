@@ -50,7 +50,13 @@ Back up `.docker-data/` if you need to preserve projects, shared pages, artifact
 
 ## Music Renderers
 
-The Docker image installs `fluidsynth` and `ffmpeg` automatically in both the build and runtime stages. After rebuilding the image, registered `.sf2` and `.sf3` SoundFont piano packs can render through `render_midi_with_soundfont` without manual host setup.
+The Docker image installs `fluidsynth` and `ffmpeg` automatically in both the build and runtime stages. It also downloads and validates the free commercial-friendly GeneralUser GS SoundFont during image build, storing it under `/app/soundfonts/generaluser-gs/` with `GeneralUser-GS.sf2`, `LICENSE.txt`, and `README.md`.
+
+At runtime, `install_free_soundfont_pack` first copies this bundled SoundFont into the target project assets and records SHA-256, source URL, license path, README path, `productionUseApproved`, and `qualityTier=production_candidate`. It only downloads from upstream if the bundled cache is missing. This keeps normal ChatGPT tool usage offline from the SoundFont source after the Docker image is built.
+
+GeneralUser GS is not MIT. Treat it as the built-in free/commercial-friendly production-candidate SoundFont after the license/hash/QA gates pass.
+
+After rebuilding the image, registered `.sf2` and `.sf3` SoundFont piano packs can render through `render_midi_with_soundfont` without manual host setup.
 
 SFZ packs require the `sfizz_render` executable. The current Playwright Ubuntu Noble base image does not expose an installable `sfizz`/`sfizz-tools` package through its default apt sources, so the stock Docker image does not claim automatic SFZ rendering. If a custom image adds `sfizz_render` to `PATH`, `.sfz` packs are eligible for the same production render path; otherwise the tool returns a preview-only renderer-missing report instead of silently falling back to procedural audio.
 

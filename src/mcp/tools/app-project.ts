@@ -1,14 +1,14 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import {
   appendProjectTaskHistory,
-  clearProjectFiles,
   createProject,
   getProject,
   getProjectManifest,
+  getProjectStoredFilePath,
   getProjectWorkspaceDirectory,
   publishProject,
   validateProject,
@@ -26,7 +26,7 @@ const defaultNpmTimeoutMs = 300000;
 const defaultDevPort = 5173;
 const allowedWorkspaceExtensions = new Set([".html", ".css", ".js", ".jsx", ".ts", ".tsx", ".json", ".webmanifest", ".md", ".txt", ".svg", ".vue"]);
 const textDistExtensions = new Set([".html", ".css", ".js", ".json", ".webmanifest", ".txt", ".md", ".svg"]);
-const assetDistExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+const assetDistExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".glb", ".gltf", ".mp4", ".webm"]);
 
 type AppTemplate = "vite-react" | "vite-vue" | "vite-vanilla";
 
@@ -189,6 +189,28 @@ async function listDistFiles(root: string): Promise<string[]> {
   }
   await walk(root);
   return output.sort();
+}
+
+function lastPublishedDistPaths(manifest: Awaited<ReturnType<typeof getProjectManifest>>): string[] {
+  for (const item of manifest.taskHistory.slice().reverse()) {
+    if (item.toolName !== "publish_project_dist" || !item.ok || !item.details || typeof item.details !== "object") continue;
+    const files = (item.details as { files?: unknown }).files;
+    if (!Array.isArray(files)) continue;
+    return files
+      .map((file) => (file && typeof file === "object" && "path" in file ? (file as { path?: unknown }).path : undefined))
+      .filter((filePath): filePath is string => typeof filePath === "string" && filePath.length > 0);
+  }
+  return [];
+}
+
+async function removePreviousPublishedDistFiles(projectRoot: string, projectId: string, paths: string[]): Promise<string[]> {
+  const removed: string[] = [];
+  for (const filePath of paths) {
+    const absolutePath = await getProjectStoredFilePath(projectRoot, projectId, filePath);
+    await rm(absolutePath, { force: true });
+    removed.push(filePath);
+  }
+  return removed;
 }
 
 function appendDevLog(session: DevSession, chunk: Buffer, stream: "stdout" | "stderr"): void {
@@ -370,7 +392,8 @@ export const appProjectTools: ToolModule[] = [
       if (!distStat.isDirectory()) throw new Error(`Build output is not a directory: ${safeOutputDir}`);
       const files = await listDistFiles(distRoot);
       if (!files.includes(parsed.entryFile)) throw new Error(`Entry file not found in ${safeOutputDir}: ${parsed.entryFile}`);
-      await clearProjectFiles(ctx.projectRoot, parsed.projectId);
+      const manifestBeforePublish = await getProjectManifest(ctx.projectRoot, parsed.projectId);
+      const removedFiles = await removePreviousPublishedDistFiles(ctx.projectRoot, parsed.projectId, lastPublishedDistPaths(manifestBeforePublish));
       const publishedFiles = [];
       for (const file of files) {
         const extension = path.extname(file).toLowerCase();
@@ -387,8 +410,8 @@ export const appProjectTools: ToolModule[] = [
       if (!validation.ok) throw new Error(`Published dist validation failed: ${validation.errors.join("; ")}`);
       const publishPolicy = buildProjectPublishOptions(ctx);
       const project = await publishProject(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, parsed.entryFile, publishPolicy.options);
-      await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "publish_project_dist", ok: true, summary: `Published ${safeOutputDir} to ${project.publishedUrl}.`, details: { outputDir: safeOutputDir, entryFile: parsed.entryFile, files: publishedFiles } });
-      return { ok: true, summary: `Published app dist at ${project.publishedUrl}.`, jobId: parsed.projectId, previewUrl: project.publishedUrl, shareUrl: project.publishedUrl, artifacts: [project.publishedUrl!, ...publishedFiles.map((file) => file.path)], structuredContent: { projectId: parsed.projectId, outputDir: safeOutputDir, entryFile: parsed.entryFile, publishedUrl: project.publishedUrl, files: publishedFiles, validation }, logs: [JSON.stringify({ publishedUrl: project.publishedUrl, files: publishedFiles, validation }, null, 2)], errors: [] };
+      await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "publish_project_dist", ok: true, summary: `Published ${safeOutputDir} to ${project.publishedUrl}.`, details: { outputDir: safeOutputDir, entryFile: parsed.entryFile, files: publishedFiles, removedFiles } });
+      return { ok: true, summary: `Published app dist at ${project.publishedUrl}.`, jobId: parsed.projectId, previewUrl: project.publishedUrl, shareUrl: project.publishedUrl, artifacts: [project.publishedUrl!, ...publishedFiles.map((file) => file.path)], structuredContent: { projectId: parsed.projectId, outputDir: safeOutputDir, entryFile: parsed.entryFile, publishedUrl: project.publishedUrl, files: publishedFiles, removedFiles, validation }, logs: [JSON.stringify({ publishedUrl: project.publishedUrl, files: publishedFiles, removedFiles, validation }, null, 2)], errors: [] };
     }
   },
   {
