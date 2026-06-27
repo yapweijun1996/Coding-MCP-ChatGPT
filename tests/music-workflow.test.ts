@@ -560,6 +560,151 @@ test("compose_edit_midi fails closed when an ensembleRequirement instrument has 
   }
 });
 
+test("compose_music generates a real cello voice for a cello + piano ensemble and fails closed when cello is absent", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-compose-cello-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Compose cello", createdByClientId: "composer" });
+    const compose = getToolModule("compose_music");
+    assert.ok(compose);
+
+    // cello + piano with an ensemble requirement -> cello track generated, overlapping piano, ok.
+    const ensembleResult = await compose!.handler({
+      projectId: project.id,
+      instruments: ["piano", "cello"],
+      durationSeconds: 16,
+      ensembleRequirement: { requiredInstruments: ["piano", "cello"] },
+      outputManifestPath: "music/cello-cue.json",
+      outputMidiPath: "music/cello-cue.mid"
+    }, ctx);
+    assert.equal(ensembleResult.ok, true);
+    const payload = ensembleResult.structuredContent as { tracks: Record<string, unknown[]>; ensembleReport: { ok: boolean; overlap: { durationSeconds: number } | null } };
+    assert.ok(payload.tracks.cello && payload.tracks.cello.length > 0, "cello voice must be generated, not just requested");
+    assert.ok(payload.tracks.piano && payload.tracks.piano.length > 0);
+    assert.ok(payload.ensembleReport.overlap && payload.ensembleReport.overlap.durationSeconds > 0, "cello must overlap piano in time");
+    // cello = channel 5 / GM program 43 -> Program Change 0xC5 0x2A in the MIDI.
+    const midi = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/cello-cue.mid"));
+    let hasCelloPc = false;
+    for (let i = 0; i + 1 < midi.length; i += 1) if (midi[i] === 0xc5 && midi[i + 1] === 0x2a) hasCelloPc = true;
+    assert.ok(hasCelloPc, "cello program change must be present in the MIDI");
+
+    // Requesting a cello ensemble but only composing piano -> fail closed.
+    const missing = await compose!.handler({
+      projectId: project.id,
+      instruments: ["piano"],
+      durationSeconds: 16,
+      ensembleRequirement: { requiredInstruments: ["piano", "cello"] },
+      outputManifestPath: "music/piano-only.json",
+      outputMidiPath: "music/piano-only.mid"
+    }, ctx);
+    assert.equal(missing.ok, false);
+    assert.ok((missing.structuredContent as { ensembleReport: { failures: string[] } }).ensembleReport.failures.some((reason) => /cello/i.test(reason)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("render_midi_to_audio refuses procedural fallback by default and points to the real render path", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-no-procedural-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "No procedural", createdByClientId: "composer" });
+    const compose = getToolModule("compose_music");
+    const render = getToolModule("render_midi_to_audio");
+    assert.ok(compose && render);
+    await compose!.handler({ projectId: project.id, instruments: ["piano"], durationSeconds: 12, outputManifestPath: "music/p.json", outputMidiPath: "music/p.mid" }, ctx);
+
+    // Default (no acknowledgement): fail closed, no fake preview written.
+    const refused = await render!.handler({ acknowledgePreviewOnly: false, projectId: project.id, compositionManifestPath: "music/p.json", outputAudioPath: "music/refused.wav" }, ctx);
+    assert.equal(refused.ok, false);
+    const refusedPayload = refused.structuredContent as { recommendedNextTools: string[]; productionReady: boolean };
+    assert.equal(refusedPayload.productionReady, false);
+    assert.ok(refusedPayload.recommendedNextTools.includes("install_free_soundfont_pack"));
+    assert.deepEqual(refused.artifacts, [], "no procedural preview file should be written");
+    await assert.rejects(async () => readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/refused.wav")), "refused preview file must not exist");
+
+    // Explicit acknowledgement: the throwaway preview is written (still preview_only, so ok stays
+    // false — but the audio is produced, unlike the refused case where nothing is written).
+    const acknowledged = await render!.handler({ acknowledgePreviewOnly: true, projectId: project.id, compositionManifestPath: "music/p.json", outputAudioPath: "music/scratch.wav" }, ctx);
+    assert.ok(acknowledged.artifacts.some((artifact) => artifact.includes("scratch.wav")), "acknowledged preview must be written");
+    const scratch = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/scratch.wav"));
+    assert.equal(scratch.subarray(0, 4).toString("ascii"), "RIFF");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("end-to-end: install GeneralUser GS -> compose cello+piano -> render covers both roles from one GM pack", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-e2e-ensemble-"));
+  const oldPath = process.env.PATH;
+  let restoreFetch = () => {};
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "E2E ensemble", createdByClientId: "producer" });
+    const installer = getToolModule("install_free_soundfont_pack");
+    const compose = getToolModule("compose_music");
+    const productionRender = getToolModule("render_production_music");
+    assert.ok(installer && compose && productionRender);
+
+    // 1) Install the only free pack — it must auto-register so render can use the id (issue_0145).
+    restoreFetch = installMockFetch({ "GeneralUser-GS.sf2": fakeSoundfontBytes(), "LICENSE.txt": "GeneralUser GS license fixture\n", "README.md": "# GeneralUser GS fixture\n" });
+    const install = await installer!.handler({ projectId: project.id, packId: "generaluser_gs" }, ctx);
+    assert.equal(install.ok, true);
+    const installPayload = install.structuredContent as { autoRegistered: boolean; readyPackIds: string[] };
+    assert.equal(installPayload.autoRegistered, true, "installed pack must auto-register");
+    assert.ok(installPayload.readyPackIds.includes("generaluser_gs"));
+
+    // 2) Compose a real cello + piano ensemble (issue_0144).
+    await compose!.handler({
+      projectId: project.id,
+      instruments: ["piano", "cello"],
+      durationSeconds: 16,
+      ensembleRequirement: { requiredInstruments: ["piano", "cello"] },
+      outputManifestPath: "music/e2e-cue.json",
+      outputMidiPath: "music/e2e-cue.mid"
+    }, ctx);
+
+    // 3) Render: one general_midi pack must cover BOTH the piano and cello roles (keystone).
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${await installFakeFfmpeg(root)}:${oldPath}`;
+    const render = await productionRender!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/e2e-cue.json",
+      soundfontPackId: "generaluser_gs",
+      sampleRate: 16000,
+      publish: false
+    }, ctx);
+    assert.equal(render.ok, true, `render should succeed using the GM pack for both roles: ${JSON.stringify(render.errors)}`);
+    const payload = render.structuredContent as { stemPaths: Record<string, string>; stemRenderers: Record<string, { role: string; packId: string }>; instrumentCoverage: Array<{ covered: boolean }> };
+    assert.ok(payload.stemPaths.piano, "piano stem rendered");
+    assert.ok(payload.stemPaths.cello, "cello stem rendered from the same GM pack");
+    assert.equal(payload.stemRenderers.cello.packId, "generaluser_gs");
+    assert.equal(payload.stemRenderers.piano.packId, "generaluser_gs");
+    assert.ok(payload.instrumentCoverage.every((entry) => entry.covered), "all roles covered by the one GM pack");
+
+    // 4) The natural flow: render again with NO soundfontPackId and NO instrumentPackMap — the
+    // auto-registered general_midi pack must be discovered as the fallback and still cover both roles.
+    const renderNoId = await productionRender!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/e2e-cue.json",
+      sampleRate: 16000,
+      publish: false,
+      outputReportPath: "music/e2e-noid-report.json"
+    }, ctx);
+    assert.equal(renderNoId.ok, true, `render without a pack id should fall back to the registered GM pack: ${JSON.stringify(renderNoId.errors)}`);
+    const noIdPayload = renderNoId.structuredContent as { stemPaths: Record<string, string>; stemRenderers: Record<string, { packId: string }> };
+    assert.ok(noIdPayload.stemPaths.cello && noIdPayload.stemPaths.piano, "both stems render via the GM fallback");
+    assert.equal(noIdPayload.stemRenderers.cello.packId, "generaluser_gs");
+
+    // NOTE: routing/identity is verified at the MIDI level (piano PC 0xC0 0x00, cello PC 0xC5 0x2A,
+    // GeneralUser GS is GM-compliant so program 43 = cello). The fake FluidSynth emits a fixed tone
+    // regardless of program, so timbre is assumed from GM compliance, not rendered with real FluidSynth.
+  } finally {
+    process.env.PATH = oldPath;
+    restoreFetch();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("install_free_soundfont_pack installs GeneralUser GS metadata and blocks bad downloads", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "music-install-soundfont-"));
   let restoreFetch = () => {};
@@ -934,7 +1079,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     assert.equal(editResult.ok, true);
     assert.ok(editResult.artifacts.includes("music/edited-composition.mid"));
 
-    const renderResult = await render!.handler({
+    const renderResult = await render!.handler({ acknowledgePreviewOnly: true,
       projectId: project.id,
       compositionManifestPath: "music/edited-composition-manifest.json",
       sampleRate: 16000,
@@ -1580,7 +1725,7 @@ test("compose_music creates a shaped piano sketch instead of block-chord placeho
     const finalNoteSeconds = Math.max(...pianoNotes.map((note) => (note.startBeat + note.durationBeats) * 60 / composition.tempo));
     assert.ok(finalNoteSeconds <= composition.durationSeconds + 0.01, "generated notes should not run past the declared duration");
 
-    const renderResult = await render!.handler({
+    const renderResult = await render!.handler({ acknowledgePreviewOnly: true,
       projectId: project.id,
       compositionManifestPath: "music/piano-quality.json",
       sampleRate: 16000,
@@ -1619,7 +1764,7 @@ test("compose_music creates a shaped piano sketch instead of block-chord placeho
       ]))
     };
     await writeProjectFile(ctx.projectRoot, project.id, "music/robotic-quality.json", `${JSON.stringify(roboticComposition, null, 2)}\n`);
-    const roboticRenderResult = await render!.handler({
+    const roboticRenderResult = await render!.handler({ acknowledgePreviewOnly: true,
       projectId: project.id,
       compositionManifestPath: "music/robotic-quality.json",
       sampleRate: 16000,
@@ -1775,7 +1920,7 @@ test("production music workflow publishes auditions, extends arrangements, assem
     assert.match(sessionHtml, /Music Session Assembly/);
     assert.match(sessionHtml, /Transition Map/);
 
-    const scratchRender = await render!.handler({
+    const scratchRender = await render!.handler({ acknowledgePreviewOnly: true,
       projectId: project.id,
       compositionManifestPath: variationsPayload.variations[0].manifestPath,
       outputAudioPath: "music/production-scratch.wav",
@@ -2185,7 +2330,7 @@ test("export_music_project creates a music package with README, playlist, checks
       outputManifestPath: "music/project.manifest.json",
       outputMidiPath: "music/final.mid"
     }, ctx);
-    await render!.handler({
+    await render!.handler({ acknowledgePreviewOnly: true,
       projectId: project.id,
       compositionManifestPath: "music/project.manifest.json",
       outputAudioPath: "music/final.wav",
@@ -2320,13 +2465,13 @@ test("export_music_project fails when requested encoded formats are missing", as
       outputManifestPath: "music/format-gate.json",
       outputMidiPath: "music/format-gate.mid"
     }, ctx);
-    await render!.handler({
+    await render!.handler({ acknowledgePreviewOnly: true,
       projectId: project.id,
       compositionManifestPath: "music/format-gate.json",
       outputAudioPath: "music/format-gate.wav",
       sampleRate: 12000
     }, ctx);
-    const encodedOnlyResult = await render!.handler({
+    const encodedOnlyResult = await render!.handler({ acknowledgePreviewOnly: true,
       projectId: project.id,
       compositionManifestPath: "music/format-gate.json",
       outputFormats: ["mp3"],
@@ -2700,7 +2845,7 @@ test("music audition publisher accepts direct version metadata and returns conti
       outputManifestPath: "music/direct-a.json",
       outputMidiPath: "music/direct-a.mid"
     }, ctx);
-    await render!.handler({
+    await render!.handler({ acknowledgePreviewOnly: true,
       projectId: project.id,
       compositionManifestPath: "music/direct-a.json",
       outputAudioPath: "music/direct-a.wav",
@@ -2714,7 +2859,7 @@ test("music audition publisher accepts direct version metadata and returns conti
       outputManifestPath: "music/direct-b.json",
       outputMidiPath: "music/direct-b.mid"
     }, ctx);
-    await render!.handler({
+    await render!.handler({ acknowledgePreviewOnly: true,
       projectId: project.id,
       compositionManifestPath: "music/direct-b.json",
       outputAudioPath: "music/direct-b.wav",
