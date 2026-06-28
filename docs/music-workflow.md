@@ -290,3 +290,80 @@ not the CI fake's fixed tone.
   has both at `/app/soundfonts/generaluser-gs/GeneralUser-GS.sf2`; render there and compare
   stem WAVs if you need to confirm audio truth.
 - Run `npm test` (typecheck + all tests) before shipping music changes.
+
+---
+
+## 13. The 0146 / 0147 fix map + FluidSynth 2.x + MusicXML import (PR #9)
+
+A second wave of fixes, found while taking a score all the way to commercial-usable audio.
+
+| Issue | Symptom | Fix | Where |
+|---|---|---|---|
+| 0146 | render rejects a *ready* SoundFont: "No registered ready instrument pack" | read side discovers any `music/*instrument-packs*.json` (was hardcoded to the default name); self-heal discovery also scans `assets/soundfonts` + `assets`; failure message now names what it searched | `readJazzPackRegistry`, `pickJazzPackRegistryCandidatePaths`, `resolveProductionSoundfont`, `discoverSoundfontPacksInputSchema` |
+| 0147 | a missing/late voice only inferable from an absent stem | always-on `buildEnsembleQa` in `compose_music` + both render reports (instrumentsRequested/Found, missing warnings, per-voice channel/program/firstBeat, overlapFromBeat0) | `buildEnsembleQa`, `compose_music`/render handlers |
+| FluidSynth 2.x | render produces **no WAV** ("illegal option at this place") | options must precede positional sf2/midi; pure `fluidSynthArgs()` puts them first | `fluidSynthArgs`, `fluidSynthRender` |
+| quiet render | single-pack render is very quiet (FluidSynth default gain) | opt-in `normalize` (ffmpeg loudnorm) on `render_midi_with_soundfont`; silence gate validates the **raw** stem so loudnorm can't mask a missing voice | `normalizeWavWithFfmpeg`, render handler |
+| MusicXML import | `musicXmlPath` unusable: project file allowlist rejected `.xml`/`.musicxml` | added both to `allowedTextExtensions` | `src/projects/store.ts` |
+| minor key | `<mode>minor</mode>` imported as relative major (fifths=-1 → "F major") | relative-minor table + read `<mode>` | `keyNamesByFifthsMinor`, `keyNameFromFifths`, importer |
+
+Tests: `pickJazzPackRegistryCandidatePaths`, `buildEnsembleQa` (duet + empty voice), `fluidSynthArgs`
+ordering, minor-key import, `.xml`-path import — all in `tests/music-workflow.test.ts`. The fake
+FluidSynth now **rejects options-after-files** (mimics 2.x), so the e2e renders fail closed on a
+regression. Verified end-to-end against real FluidSynth 2.5.5.
+
+> Note: `render_production_music`'s built-in master chain is a safe-PCM proxy and leaves output
+> quiet (~-35 LUFS proxy). For broadcast level, run a real `ffmpeg loudnorm` pass after it, or use
+> `render_midi_with_soundfont` with `normalize: true`. (Open improvement: make the production master
+> use real ffmpeg loudnorm.)
+
+## 14. SoundFont quality tiers — the "pro sound" levers
+
+Timbre realism is dominated by the sample source, then by performance expression, then by space.
+
+| SoundFont | Size | Covers | Velocity layers | Use |
+|---|---|---|---|---|
+| GeneralUser-GS | 32 MB | all 128 GM instruments | few | default / sketches; `install_free_soundfont_pack` |
+| YDP Grand (FreePats) | 118 MB | piano only | several | real sampled Yamaha Disklavier grand, CC-BY 3.0 — best size/quality |
+| Salamander Grand V3 (FreePats) | 1.27 GB | piano only | 16 | top-tier Yamaha C5, CC-BY 3.0 (FreePats SF2 build drops pedal/release/resonance noise) |
+
+YDP/Salamander SF2 sources: <https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html>.
+Register a downloaded pack with `manage_jazz_instrument_packs` (needs SHA-256, license sidecar,
+`instrumentRole: realistic_piano`, CC-BY → attribution required), then render by `soundfontPackId`.
+
+**Why bytes ≈ realism:** a real piano changes *timbre* (not just volume) from soft→hard; only
+multi-velocity sampling captures that. GM stretches a few samples; YDP/Salamander are real
+per-note, per-dynamic recordings.
+
+**Levers to push past "good piano" (layered by where they live in the pipeline):**
+- *Performance layer (edit MIDI/manifest):* real sustain pedal (CC64 — note `midiBuffer` only emits
+  pedal for the `piano` track today), rubato/timing humanization, velocity jitter, legato overlap.
+- *Composition layer:* longer form (intro→climax→outro), modulation, inner voices, a strings pad
+  layer for late-Yiruma style.
+- *Post/space layer:* convolution reverb with a real piano-hall impulse response (ffmpeg `afir`),
+  2-pass loudnorm, gentle EQ/compression.
+- *Engine layer:* install `sfizz_render` to unlock SFZ libraries with pedal/release/resonance noise
+  (the SF2 builds drop these).
+
+Trick used for a pedaled feel without CC64 support on import: a third held-chord "pad" part
+(whole notes) under the arpeggio simulates sustain; render with a `channelMap` that splits the
+piano layers onto separate channels so a re-struck note doesn't cut the held pad.
+
+## 15. Running Code-MCP locally as an MCP client target (dev)
+
+To let an MCP client (Claude Code, etc.) call these tools natively against local code:
+
+1. Start a **non-production** instance with a 32+ char dev token (bypasses OAuth; disabled when
+   `NODE_ENV=production`):
+   ```sh
+   env -u NODE_ENV PORT=6860 PUBLIC_BASE_URL=http://127.0.0.1:6860 \
+     MCP_DEV_TOKEN=<32+ char secret> MUSIC_SOUNDFONT_DIR=<dir with generaluser-gs/> \
+     COMMAND_TIMEOUT_MS=600000 npx tsx src/server.ts
+   ```
+   (No `DATABASE_URL` → file-mode; big sf2 renders need a high `COMMAND_TIMEOUT_MS`.)
+2. Register it: `claude mcp add --transport http code-mcp http://127.0.0.1:6860/mcp --header "Authorization: Bearer <token>"`. The client must reconnect/restart to pick up the ~548 tools.
+3. The deployed Docker container (`:6859`, serves `gmb01.xyz`) is `NODE_ENV=production` → dev-token
+   bypass is **off**; connecting to it needs the real OAuth flow.
+
+**Publish caveat:** project publish validation enforces a max per-file size, so a large sf2
+(118 MB / 1.27 GB) is rejected. The sf2 is only the render *source* — delete it from the project
+after rendering (`delete_project_file`) and publish referencing the produced WAV/MP3.
