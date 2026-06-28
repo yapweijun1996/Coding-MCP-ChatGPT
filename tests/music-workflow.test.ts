@@ -5,6 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getToolModule } from "../src/mcp/registry.js";
+import { pickJazzPackRegistryCandidatePaths, buildEnsembleQa } from "../src/mcp/tools/music-workflow.js";
 import { createProject, getProjectStoredFilePath, readProjectFile, writeProjectAsset, writeProjectFile } from "../src/projects/store.js";
 import { skillRegistry } from "../src/skills/registry.js";
 import type { ToolContext } from "../src/mcp/types.js";
@@ -3136,5 +3137,148 @@ test("music-workflow skill exposes music tools through dedicated, coding, and de
     assert.ok(music!.toolNames.includes(toolName), `${toolName} exposed in music-workflow`);
     assert.ok(coding?.toolNames.includes(toolName), `${toolName} exposed in coding`);
     assert.ok(debug?.toolNames.includes(toolName), `${toolName} exposed in debug`);
+  }
+});
+
+// issue_0146: read-side registry discovery. manage_jazz_instrument_packs' outputPath is a free
+// parameter; the render read path used to be a hardcoded constant. pickJazzPackRegistryCandidatePaths
+// is the pure bridge — default first, then any other *instrument-packs*.json the agent wrote.
+test("pickJazzPackRegistryCandidatePaths: default first, finds non-default name, excludes license", () => {
+  const out = pickJazzPackRegistryCandidatePaths([
+    "music/instrument-packs.json",
+    "music/jazz-instrument-license-manifest.json",
+    "music/jazz-instrument-packs.json",
+    "music/cue.json"
+  ]);
+  assert.equal(out[0], "music/jazz-instrument-packs.json", "default path is always tried first");
+  assert.ok(out.includes("music/instrument-packs.json"), "non-default registry name is discovered");
+  assert.ok(!out.some((p) => /license/i.test(p)), "license manifests are never registry candidates");
+  assert.ok(!out.includes("music/cue.json"), "unrelated json is not a candidate");
+  // Default is always present even when the listing is empty (it may exist without being listed).
+  assert.deepEqual(pickJazzPackRegistryCandidatePaths([]), ["music/jazz-instrument-packs.json"]);
+  // No duplicates when the default is also in the listing.
+  assert.equal(out.filter((p) => p === "music/jazz-instrument-packs.json").length, 1);
+});
+
+// issue_0146 end-to-end: a registry written to a NON-default filename must still be read by the
+// render tool. Before the fix this rendered as a misleading "No registered ready instrument pack".
+test("issue_0146: render_midi_with_soundfont reads a registry written under a non-default name", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-registry-discovery-"));
+  const oldPath = process.env.PATH;
+  let restoreFetch = () => {};
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Registry discovery", createdByClientId: "producer" });
+    const installer = getToolModule("install_free_soundfont_pack");
+    const compose = getToolModule("compose_music");
+    const render = getToolModule("render_midi_with_soundfont");
+    assert.ok(installer && compose && render);
+
+    restoreFetch = installMockFetch({ "GeneralUser-GS.sf2": fakeSoundfontBytes(), "LICENSE.txt": "GeneralUser GS license fixture\n", "README.md": "# GeneralUser GS fixture\n" });
+    const install = await installer!.handler({ projectId: project.id, packId: "generaluser_gs" }, ctx);
+    assert.equal(install.ok, true);
+
+    // Relocate the auto-registered registry to a non-default name and delete the default, simulating
+    // an agent that called manage_jazz_instrument_packs with a custom outputPath (the real 0146 case).
+    const registryJson = await readProjectFile(ctx.projectRoot, project.id, "music/jazz-instrument-packs.json", 1024 * 1024);
+    await writeProjectFile(ctx.projectRoot, project.id, "music/instrument-packs.json", registryJson);
+    await rm(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/jazz-instrument-packs.json"), { force: true });
+
+    await compose!.handler({
+      projectId: project.id,
+      instruments: ["piano", "cello"],
+      durationSeconds: 12,
+      outputManifestPath: "music/cue.json",
+      outputMidiPath: "music/cue.mid"
+    }, ctx);
+
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${await installFakeFfmpeg(root)}:${oldPath}`;
+    const result = await render!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/cue.json",
+      soundfontPackId: "generaluser_gs",
+      sampleRate: 16000,
+      outputReportPath: "music/render-report.json"
+    }, ctx);
+
+    const errorText = JSON.stringify(result.errors ?? []);
+    assert.ok(!/No registered ready instrument pack|No instrument-pack registry/i.test(errorText), `registry must resolve from the non-default path, got: ${errorText}`);
+    assert.equal(result.ok, true, `render should succeed once the non-default registry is read: ${errorText}`);
+    // Isolate the read-path fix from self-heal: if resolution had relied on re-discovering and
+    // re-registering the sf2, it would have rewritten the default registry path. It must stay absent,
+    // proving the render read the agent's non-default registry file directly.
+    await assert.rejects(
+      readProjectFile(ctx.projectRoot, project.id, "music/jazz-instrument-packs.json", 1024 * 1024),
+      "default registry must not be recreated — resolution came from reading the non-default path"
+    );
+  } finally {
+    process.env.PATH = oldPath;
+    restoreFetch();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// issue_0147: always-on ensemble QA. buildEnsembleQa is the pure transparency report (non-blocking)
+// that lets compose/render outputs prove which requested instruments carry notes, their
+// channel/program, first-note time, and whether they truly overlap.
+type EnsembleQaComposition = Parameters<typeof buildEnsembleQa>[0];
+function qaComposition(tracks: Record<string, Array<{ startBeat: number; durationBeats: number; midi: number; velocity: number }>>): EnsembleQaComposition {
+  return { tempo: 90, durationSeconds: 8, instruments: Object.keys(tracks), tracks } as unknown as EnsembleQaComposition;
+}
+
+test("buildEnsembleQa: real duet reports both voices, channel/program, and overlap from the top", () => {
+  const qa = buildEnsembleQa(qaComposition({
+    piano: [{ startBeat: 0, durationBeats: 4, midi: 60, velocity: 80 }],
+    cello: [{ startBeat: 0, durationBeats: 4, midi: 48, velocity: 70 }]
+  }), ["piano", "cello"]);
+  assert.deepEqual(qa.instrumentsRequested.sort(), ["cello", "piano"]);
+  assert.deepEqual(qa.instrumentsFound.sort(), ["cello", "piano"]);
+  assert.deepEqual(qa.missingInstruments, []);
+  assert.deepEqual(qa.missingInstrumentWarnings, []);
+  assert.equal(qa.overlapFromBeat0, true, "both voices sound together from the downbeat");
+  const cello = qa.tracks.find((t) => t.instrument === "cello");
+  assert.equal(cello?.gmProgram, 43, "cello maps to GM program 43");
+  assert.equal(cello?.channel, 5);
+  assert.equal(cello?.noteCount, 1);
+  assert.equal(cello?.firstBeat, 0);
+});
+
+test("buildEnsembleQa: a requested-but-empty voice is reported missing with a warning (no silent fake duet)", () => {
+  const qa = buildEnsembleQa(qaComposition({
+    piano: [{ startBeat: 0, durationBeats: 4, midi: 60, velocity: 80 }],
+    cello: []
+  }), ["piano", "cello"]);
+  assert.deepEqual(qa.instrumentsFound, ["piano"]);
+  assert.deepEqual(qa.missingInstruments, ["cello"]);
+  assert.equal(qa.missingInstrumentWarnings.length, 1);
+  assert.match(qa.missingInstrumentWarnings[0], /cello.*no notes/i);
+  assert.equal(qa.overlapFromBeat0, false, "a single sounding voice is not an overlap");
+});
+
+test("issue_0147: compose_music always surfaces ensembleQa proving both requested voices", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-ensemble-qa-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Ensemble QA", createdByClientId: "composer" });
+    const compose = getToolModule("compose_music");
+    assert.ok(compose);
+    // No ensembleRequirement passed — QA must appear by default, not only under the opt-in gate.
+    const result = await compose!.handler({
+      projectId: project.id,
+      instruments: ["piano", "cello"],
+      durationSeconds: 16,
+      outputManifestPath: "music/qa-cue.json",
+      outputMidiPath: "music/qa-cue.mid"
+    }, ctx);
+    assert.equal(result.ok, true);
+    const payload = result.structuredContent as { ensembleQa?: { instrumentsRequested: string[]; instrumentsFound: string[]; missingInstruments: string[]; overlapFromBeat0: boolean; tracks: Array<{ instrument: string; gmProgram: number | null; noteCount: number }> } };
+    assert.ok(payload.ensembleQa, "ensembleQa present without opting into ensembleRequirement");
+    assert.ok(payload.ensembleQa!.instrumentsRequested.includes("cello"));
+    assert.ok(payload.ensembleQa!.instrumentsFound.includes("cello"), "cello has notes (issue_0144 fix) and is reported found");
+    assert.ok(payload.ensembleQa!.instrumentsFound.includes("piano"));
+    assert.deepEqual(payload.ensembleQa!.missingInstruments, []);
+    assert.equal(payload.ensembleQa!.overlapFromBeat0, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

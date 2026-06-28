@@ -200,7 +200,7 @@ const renderMidiWithSoundfontInputSchema = z.object({
 const checkMusicRenderEnvironmentInputSchema = z.object({
   projectId: z.string().min(8).max(80).optional(),
   includeLocalMusicPacks: z.boolean().optional().default(true),
-  projectSearchDirectories: z.array(z.string().min(1).max(200)).max(20).optional().default(["soundfonts", "instruments", "music"])
+  projectSearchDirectories: z.array(z.string().min(1).max(200)).max(20).optional().default(["soundfonts", "instruments", "music", "assets/soundfonts", "assets"])
 });
 
 const renderProductionMusicInputSchema = z.object({
@@ -248,7 +248,10 @@ const installFreeSoundfontPackInputSchema = z.object({
 const discoverSoundfontPacksInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   includeLocalMusicPacks: z.boolean().optional().default(true),
-  projectSearchDirectories: z.array(z.string().min(1).max(200)).max(20).optional().default(["soundfonts", "instruments", "music"])
+  // issue_0146: include assets/soundfonts so a SoundFont installed under the project's assets tree
+  // (install_free_soundfont_pack is frequently pointed there) is discoverable for self-heal
+  // auto-registration, not just the bare soundfonts/ root.
+  projectSearchDirectories: z.array(z.string().min(1).max(200)).max(20).optional().default(["soundfonts", "instruments", "music", "assets/soundfonts", "assets"])
 });
 
 const generateJazzHarmonyInputSchema = z.object({
@@ -1553,6 +1556,64 @@ function analyzeEnsemble(
     longestSingleInstrumentSpan: longest,
     failures,
     warnings
+  };
+}
+
+export type EnsembleQaTrack = {
+  instrument: string;
+  matchedTracks: string[];
+  channel: number | null;
+  gmProgram: number | null;
+  noteCount: number;
+  firstBeat: number | null;
+  firstSeconds: number | null;
+  lastBeat: number | null;
+};
+
+export type EnsembleQa = {
+  instrumentsRequested: string[];
+  instrumentsFound: string[];
+  missingInstruments: string[];
+  missingInstrumentWarnings: string[];
+  overlap: EnsembleReport["overlap"];
+  overlapFromBeat0: boolean;
+  tracks: EnsembleQaTrack[];
+};
+
+// issue_0147: always-on ensemble QA. Unlike analyzeEnsemble (the opt-in fail-closed GATE), this is a
+// non-blocking transparency report so compose/render outputs can ALWAYS prove which requested
+// instruments carry notes, their channel/program mapping, first-note time, and whether they actually
+// overlap — instead of the user having to infer a "fake duet" from a missing stem. Reuses
+// analyzeEnsemble for the note-level math; adds the channel/program mapping the renderer emits.
+export function buildEnsembleQa(composition: Composition, requestedInstruments: string[]): EnsembleQa {
+  const requested = (requestedInstruments.length ? requestedInstruments : composition.instruments).filter(Boolean);
+  const report = analyzeEnsemble(composition, { requiredInstruments: requested });
+  const tracks: EnsembleQaTrack[] = report.tracks.map((stat) => {
+    const canon = canonicalInstrumentFromName(stat.instrument) ?? canonicalInstrumentFromTrackKey(stat.instrument);
+    const catalog = canon ? instrumentCatalog[canon] : undefined;
+    return {
+      instrument: stat.instrument,
+      matchedTracks: stat.matchedTracks,
+      channel: catalog?.channel ?? null,
+      gmProgram: catalog?.gmProgram ?? null,
+      noteCount: stat.noteCount,
+      firstBeat: stat.firstNoteBeat,
+      firstSeconds: stat.firstNoteSeconds,
+      lastBeat: stat.lastNoteEndBeat
+    };
+  });
+  const instrumentsFound = report.tracks.filter((stat) => stat.noteCount > 0).map((stat) => stat.instrument);
+  const missingInstruments = report.tracks.filter((stat) => stat.noteCount === 0).map((stat) => stat.instrument);
+  return {
+    instrumentsRequested: requested,
+    instrumentsFound,
+    missingInstruments,
+    missingInstrumentWarnings: missingInstruments.map((instrument) => `Requested instrument "${instrument}" has no notes in the composition; it will be silent/absent in the render.`),
+    overlap: report.overlap,
+    // "Both voices sound together from the top": a simultaneity window exists and opens within the
+    // first half-second (≈ downbeat), not a late sequential entry.
+    overlapFromBeat0: report.overlap !== null && report.overlap.startSeconds < 0.5,
+    tracks
   };
 }
 
@@ -3065,12 +3126,54 @@ export function selectAutoRegistrablePacks(
   return selected;
 }
 
-async function readJazzPackRegistry(ctx: ToolContext, projectId: string): Promise<{ packs?: JazzPackRecord[]; readyPackIds?: string[] } | undefined> {
+// SSOT for the instrument-pack registry filename. manage_jazz_instrument_packs writes here by
+// default and render tools read here first.
+const DEFAULT_JAZZ_PACK_REGISTRY_PATH = "music/jazz-instrument-packs.json";
+
+// Pure: from the relative file paths under the project, return the ordered registry files to try.
+// The default path is always tried first; then any other *instrument-packs*.json the agent may have
+// written under a non-default name. This is the read-side fix for issue_0146: manage_*'s outputPath
+// was a free parameter while the render read path was a hardcoded constant, so an agent that wrote
+// the registry as music/instrument-packs.json got a misleading "no registered pack". License
+// manifests (…license…json) are never registry files.
+export function pickJazzPackRegistryCandidatePaths(relativePaths: string[]): string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const push = (candidate: string) => {
+    if (candidate && !seen.has(candidate)) { seen.add(candidate); ordered.push(candidate); }
+  };
+  push(DEFAULT_JAZZ_PACK_REGISTRY_PATH);
+  const isRegistryName = (candidate: string) =>
+    /(^|\/)[a-z0-9._-]*instrument-packs[a-z0-9._-]*\.json$/i.test(candidate) && !/license/i.test(candidate);
+  for (const candidate of relativePaths.filter(isRegistryName).sort()) push(candidate);
+  return ordered;
+}
+
+type JazzPackRegistry = { packs?: JazzPackRecord[]; readyPackIds?: string[]; registryPath?: string; searchedPaths: string[] };
+
+async function readJazzPackRegistry(ctx: ToolContext, projectId: string): Promise<JazzPackRegistry> {
+  const projectFilesRoot = getProjectFilesDirectory(ctx.projectRoot, projectId);
+  let relativePaths: string[] = [];
   try {
-    return JSON.parse(await readProjectFile(ctx.projectRoot, projectId, "music/jazz-instrument-packs.json", 2 * 1024 * 1024));
+    const files = await listFilesRecursive(projectFilesRoot);
+    relativePaths = files
+      .map((file) => relativeProjectAssetPath(projectFilesRoot, file))
+      .filter((relativePath): relativePath is string => Boolean(relativePath) && /\.json$/i.test(relativePath!));
   } catch {
-    return undefined;
+    // fall back to the default path only
   }
+  const candidates = pickJazzPackRegistryCandidatePaths(relativePaths);
+  const searchedPaths: string[] = [];
+  for (const candidate of candidates) {
+    searchedPaths.push(candidate);
+    try {
+      const parsed = JSON.parse(await readProjectFile(ctx.projectRoot, projectId, candidate, 2 * 1024 * 1024));
+      if (parsed && Array.isArray(parsed.packs)) return { ...parsed, registryPath: candidate, searchedPaths };
+    } catch {
+      // try the next candidate registry file
+    }
+  }
+  return { searchedPaths };
 }
 
 function findRegisteredPack(registry: { packs?: JazzPackRecord[] } | undefined, parsed: z.infer<typeof renderMidiWithSoundfontInputSchema>): JazzPackRecord | undefined {
@@ -3125,7 +3228,7 @@ async function resolveProductionSoundfont(ctx: ToolContext, parsed: z.infer<type
 
   // Only self-heal when no registry exists yet — never clobber a populated registry, where a
   // miss means "no pack matches this request" and the right answer is remediation, not rewrite.
-  if (!registry?.packs?.length) {
+  if (!registry.packs?.length) {
     const auto = await autoRegisterDiscoveredProductionPacks(ctx, parsed);
     if (auto.registered) {
       const refreshed = await readJazzPackRegistry(ctx, parsed.projectId);
@@ -3133,7 +3236,19 @@ async function resolveProductionSoundfont(ctx: ToolContext, parsed: z.infer<type
       blockers = productionRenderBlockersForPack(pack, parsed.soundfontPath);
       if (!blockers.length && pack) return buildResolvedSoundfont(ctx, parsed, pack);
     }
-    return { ok: false as const, blockers: [...blockers, ...auto.remediation], pack };
+    // issue_0146: the old failure was a bare "No registered ready instrument pack matches…", which
+    // hid the real cause (registry written under a name/dir the reader never checked). State exactly
+    // which registry files and which directories were searched so the agent can self-correct.
+    const searchDirs = discoverSoundfontPacksInputSchema.parse({ projectId: parsed.projectId }).projectSearchDirectories;
+    const checked = registry.searchedPaths.length ? registry.searchedPaths.join(", ") : DEFAULT_JAZZ_PACK_REGISTRY_PATH;
+    const diagnostic = `No instrument-pack registry with ready packs was found. Registry files checked: ${checked}. Directories scanned for an installable .sf2/.sfz: ${searchDirs.join(", ")}. Fix: register the pack with manage_jazz_instrument_packs (any music/*instrument-packs*.json is now read back automatically), or place the SoundFont under one of the scanned directories, then re-run.`;
+    return { ok: false as const, blockers: [diagnostic, ...auto.remediation], pack };
+  }
+  // Registry exists but the requested pack id/path did not resolve to a ready pack. Surface the
+  // registry path and what it actually contains instead of a generic "not registered".
+  if (!pack) {
+    const available = registry.packs.map((candidate) => `${candidate.packId} (${candidate.status})`).join(", ") || "none";
+    return { ok: false as const, blockers: [`No registered ready instrument pack matches soundfontPackId=${parsed.soundfontPackId ?? "—"} / soundfontPath=${parsed.soundfontPath ?? "—"}. Registry ${registry.registryPath ?? DEFAULT_JAZZ_PACK_REGISTRY_PATH} contains: ${available}. Pass soundfontPackId for one of these (a general_midi pack covers every role), or register the intended pack.`], pack };
   }
   return { ok: false as const, blockers, pack };
 }
@@ -4729,6 +4844,9 @@ export const musicWorkflowTools: ToolModule[] = [
       // issue_0144: when the caller declares an ensemble, verify the requested instruments actually
       // play together (cello track present, with notes, overlapping piano) before reporting success.
       const ensembleReport = parsed.ensembleRequirement ? analyzeEnsemble(composition, parsed.ensembleRequirement) : undefined;
+      // issue_0147: always expose ensemble QA (per-instrument noteCount, channel/program, first-note
+      // time, overlap) so a missing/late voice is visible without opting into the fail-closed gate.
+      const ensembleQa = buildEnsembleQa(composition, parsed.instruments);
       const [manifestFile, midiFile] = await Promise.all([
         writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(composition, null, 2)}\n`),
         writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(composition), "audio/midi")
@@ -4737,12 +4855,12 @@ export const musicWorkflowTools: ToolModule[] = [
       return {
         ok: ensembleOk,
         summary: ensembleOk
-          ? `Composed ${composition.style} cue with ${Object.keys(composition.tracks).length} track(s).`
+          ? `Composed ${composition.style} cue with ${Object.keys(composition.tracks).length} track(s); requested ${ensembleQa.instrumentsRequested.length}, found ${ensembleQa.instrumentsFound.length} with notes.`
           : `Ensemble requirement not met: ${ensembleReport!.failures.length} blocking issue(s). MIDI written for inspection but not a deliverable ensemble.`,
         jobId: parsed.projectId,
         artifacts: [manifestFile.path, midiFile.path],
-        structuredContent: { ...composition, manifestPath: manifestFile.path, midiPath: midiFile.path, ensembleReport },
-        logs: [JSON.stringify({ ...composition, ensembleReport }, null, 2)],
+        structuredContent: { ...composition, manifestPath: manifestFile.path, midiPath: midiFile.path, ensembleReport, ensembleQa },
+        logs: [JSON.stringify({ ...composition, ensembleReport, ensembleQa }, null, 2)],
         errors: ensembleOk ? [] : ensembleReport!.failures
       };
     }
@@ -4898,6 +5016,7 @@ export const musicWorkflowTools: ToolModule[] = [
 	          missingStemGroups,
 	          requiredRoles: packResolution.requiredRoles,
 	          instrumentCoverage: packResolution.instrumentCoverage,
+	          ensembleQa: buildEnsembleQa(composition, composition.instruments),
 	          roleMap: Object.fromEntries(packResolution.instrumentCoverage.map((entry) => [entry.track, entry.requiredRole])),
 	          channelMap: parsed.channelMap,
 	          mixMasterChain: ["gain_staging", "eq_cleanup", "light_compression", "room_reverb", "master_limiter", "loudness_normalize"],
@@ -5143,6 +5262,7 @@ export const musicWorkflowTools: ToolModule[] = [
             version: soundfont.pack.version
 	          },
 	          instrumentCoverage,
+	          ensembleQa: composition ? buildEnsembleQa(composition, composition.instruments) : undefined,
 	          channelMap: parsed.channelMap,
           channelMapApplied: hasChannelMap,
           renderReport: {
@@ -5159,7 +5279,11 @@ export const musicWorkflowTools: ToolModule[] = [
               return [artifact, bytes.length];
             })))
           },
-          warnings: ffmpegCapability.ok ? [] : ["FFmpeg is not available; downstream master/export encoding capability may be limited."]
+          warnings: [
+            ...(composition ? buildEnsembleQa(composition, composition.instruments).missingInstrumentWarnings : []),
+            ...(parsed.stems ? [] : ["Rendered full mix only (stems=false); per-instrument audio presence is not verified. Pass stems=true to validate each voice is audible."]),
+            ...(ffmpegCapability.ok ? [] : ["FFmpeg is not available; downstream master/export encoding capability may be limited."])
+          ]
         };
         const reportFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputReportPath, `${JSON.stringify(report, null, 2)}\n`);
         artifacts.push(reportFile.path);
