@@ -187,6 +187,9 @@ const renderMidiWithSoundfontInputSchema = z.object({
   channelMap: z.record(z.number().int().min(0).max(15)).optional().default({}),
   programMap: z.record(z.number().int().min(1).max(128)).optional().default({}),
   stems: z.boolean().optional().default(false),
+  // Opt-in loudness normalization (ffmpeg loudnorm). FluidSynth's default gain renders quiet; enable
+  // for review-ready levels without using the full render_production_music mastering chain.
+  normalize: z.boolean().optional().default(false),
   sampleRate: z.number().int().min(8000).max(96000).optional().default(44100),
   outputAudioPath: z.string().min(1).max(240).optional().default("music/rendered-soundfont.wav"),
   outputStemDirectory: z.string().min(1).max(200).optional().default("music/soundfont-stems"),
@@ -3342,10 +3345,28 @@ async function writeSoundfontRenderFailure(ctx: ToolContext, parsed: z.infer<typ
   };
 }
 
+// FluidSynth 2.x parses every argument after the first positional (SoundFont) file as another input
+// file, so trailing -F/-r options raise "illegal option at this place" and no WAV is written. Options
+// MUST precede the positional SoundFont + MIDI paths. Kept pure + exported so a regression test can
+// assert the ordering without a fluidsynth binary.
+export function fluidSynthArgs(soundfontPath: string, midiPath: string, outputPath: string, sampleRate: number): string[] {
+  return ["-ni", "-F", outputPath, "-r", String(sampleRate), soundfontPath, midiPath];
+}
+
 async function fluidSynthRender(soundfontPath: string, midiPath: string, outputPath: string, sampleRate: number, timeout: number) {
-  await execFileAsync("fluidsynth", ["-ni", soundfontPath, midiPath, "-F", outputPath, "-r", String(sampleRate)], { timeout, maxBuffer: 1024 * 1024 });
+  await execFileAsync("fluidsynth", fluidSynthArgs(soundfontPath, midiPath, outputPath, sampleRate), { timeout, maxBuffer: 1024 * 1024 });
   const output = await readFile(outputPath);
   assertPcmWav(output, "FluidSynth output");
+  return output;
+}
+
+// Opt-in loudness normalization for review-friendly levels. FluidSynth's default gain renders well
+// below 0 dBFS, so a raw render can sound very quiet; render_production_music masters, but the
+// single-pack render path does not. ffmpeg loudnorm targets a consistent level without clipping.
+async function normalizeWavWithFfmpeg(inputWavPath: string, outputWavPath: string, sampleRate: number, timeout: number) {
+  await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", inputWavPath, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", String(sampleRate), outputWavPath], { timeout, maxBuffer: 1024 * 1024 });
+  const output = await readFile(outputWavPath);
+  assertPcmWav(output, "Normalized output");
   return output;
 }
 
@@ -5132,7 +5153,7 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "render_midi_with_soundfont", description: "Render a MIDI/composition manifest through a registered ready .sf2/.sf3 SoundFont or .sfz instrument pack, producing production_candidate WAV, optional stems, and a renderer/license report. .sf2/.sf3 uses FluidSynth; .sfz uses sfizz_render when installed.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, stems: { type: "boolean" }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "render_midi_with_soundfont", description: "Render a MIDI/composition manifest through a registered ready .sf2/.sf3 SoundFont or .sfz instrument pack, producing production_candidate WAV, optional stems, and a renderer/license report. .sf2/.sf3 uses FluidSynth; .sfz uses sfizz_render when installed.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, stems: { type: "boolean" }, normalize: { type: "boolean" }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: renderMidiWithSoundfontInputSchema,
     handler: async (input, ctx) => {
@@ -5195,8 +5216,13 @@ export const musicWorkflowTools: ToolModule[] = [
         const tempDir = temporaryFiles[0] ?? path.join(ctx.artifactRoot, `music-render-${parsed.projectId}-${Date.now()}`);
         await mkdir(tempDir, { recursive: true });
         if (!temporaryFiles.includes(tempDir)) temporaryFiles.push(tempDir);
+        // Normalize only when explicitly requested AND ffmpeg is present; otherwise keep the raw render.
+        const normalizeActive = parsed.normalize && ffmpegCapability.ok;
         const fullMixTemp = path.join(tempDir, "full.wav");
-        const fullMix = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, midiAbsolutePath, fullMixTemp, parsed.sampleRate, ctx.commandTimeoutMs);
+        const rawFullMix = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, midiAbsolutePath, fullMixTemp, parsed.sampleRate, ctx.commandTimeoutMs);
+        const fullMix = normalizeActive
+          ? await normalizeWavWithFfmpeg(fullMixTemp, path.join(tempDir, "full.norm.wav"), parsed.sampleRate, ctx.commandTimeoutMs)
+          : rawFullMix;
         const fullMixFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputAudioPath, fullMix, "audio/wav");
         const stemPaths: Record<string, string> = {};
         const stemValidations: Record<string, { rms: number; peak: number; ok: boolean }> = {};
@@ -5205,12 +5231,16 @@ export const musicWorkflowTools: ToolModule[] = [
             const stemMidiPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.mid`);
             const stemWavPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.wav`);
             await writeFile(stemMidiPath, midiBuffer(compositionWithSingleTrack(composition!, track), { channelMap: parsed.channelMap, programMap: parsed.programMap }));
-            const stemWav = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, stemMidiPath, stemWavPath, parsed.sampleRate, ctx.commandTimeoutMs);
+            const rawStemWav = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, stemMidiPath, stemWavPath, parsed.sampleRate, ctx.commandTimeoutMs);
+            // Validate the RAW stem (pre-normalize): loudnorm would otherwise amplify a near-silent
+            // stem's noise floor and let a missing instrument pass the silence guard.
+            const stemStats = audioStats(rawStemWav);
+            stemValidations[track] = { rms: stemStats.rms, peak: stemStats.peak, ok: stemStats.rms >= 0.0005 };
+            const stemWav = normalizeActive
+              ? await normalizeWavWithFfmpeg(stemWavPath, path.join(tempDir, `${slugifyMusicExportPart(track)}.norm.wav`), parsed.sampleRate, ctx.commandTimeoutMs)
+              : rawStemWav;
             const stemFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, `${parsed.outputStemDirectory}/${slugifyMusicExportPart(track)}.wav`, stemWav, "audio/wav");
             stemPaths[track] = stemFile.path;
-            // Per-stem validation so a silent/empty instrument stem is visible before publishing.
-            const stemStats = audioStats(stemWav);
-            stemValidations[track] = { rms: stemStats.rms, peak: stemStats.peak, ok: stemStats.rms >= 0.0005 };
           }
           // Fail closed (same contract as render_production_music): a production_candidate render
           // must not ship a silent/missing-instrument stem as a success. The surrounding catch turns
@@ -5232,6 +5262,7 @@ export const musicWorkflowTools: ToolModule[] = [
           },
           qualityTier: "production_candidate",
           productionReady: true,
+          normalized: normalizeActive,
           packSha256: soundfont.pack.computedSha256,
           packLicenseTextPath: soundfont.pack.licenseTextPath,
           packSourceUrl: soundfont.pack.sourceUrl,
@@ -5282,6 +5313,7 @@ export const musicWorkflowTools: ToolModule[] = [
           warnings: [
             ...(composition ? buildEnsembleQa(composition, composition.instruments).missingInstrumentWarnings : []),
             ...(parsed.stems ? [] : ["Rendered full mix only (stems=false); per-instrument audio presence is not verified. Pass stems=true to validate each voice is audible."]),
+            ...(parsed.normalize && !ffmpegCapability.ok ? ["normalize=true was requested but FFmpeg is unavailable; shipped the raw (un-normalized, likely quiet) render instead."] : []),
             ...(ffmpegCapability.ok ? [] : ["FFmpeg is not available; downstream master/export encoding capability may be limited."])
           ]
         };

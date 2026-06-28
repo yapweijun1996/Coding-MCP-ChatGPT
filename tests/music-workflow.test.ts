@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getToolModule } from "../src/mcp/registry.js";
-import { pickJazzPackRegistryCandidatePaths, buildEnsembleQa } from "../src/mcp/tools/music-workflow.js";
+import { pickJazzPackRegistryCandidatePaths, buildEnsembleQa, fluidSynthArgs } from "../src/mcp/tools/music-workflow.js";
 import { createProject, getProjectStoredFilePath, readProjectFile, writeProjectAsset, writeProjectFile } from "../src/projects/store.js";
 import { skillRegistry } from "../src/skills/registry.js";
 import type { ToolContext } from "../src/mcp/types.js";
@@ -165,6 +165,17 @@ const fs = require("fs");
 if (process.argv.includes("--version")) {
   console.log("FluidSynth fake 2.3.0");
   process.exit(0);
+}
+// Mimic FluidSynth 2.x: options after the first positional (SoundFont) file are illegal. This makes
+// the e2e suite fail closed if fluidSynthRender ever regresses to trailing -F/-r (issue: no WAV written).
+const fakeArgs = process.argv.slice(2);
+const sfIndex = fakeArgs.findIndex((a) => a.endsWith(".sf2") || a.endsWith(".sf3"));
+for (const opt of ["-F", "-r"]) {
+  const oi = fakeArgs.indexOf(opt);
+  if (oi !== -1 && sfIndex !== -1 && oi > sfIndex) {
+    console.error("error: '" + opt + "' is an illegal option at this place, only -b option is allowed here.");
+    process.exit(1);
+  }
 }
 const out = process.argv[process.argv.indexOf("-F") + 1];
 const midi = process.argv.find((arg) => arg.endsWith(".mid"));
@@ -3281,4 +3292,23 @@ test("issue_0147: compose_music always surfaces ensembleQa proving both requeste
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// FluidSynth 2.x rejects -F/-r placed AFTER the SoundFont/MIDI positional args ("illegal option at
+// this place"), so the old `-ni <sf2> <midi> -F <out> -r <rate>` wrote no WAV on modern fluidsynth.
+// Options must precede the positional files. (The fake fluidsynth in installFakeFluidSynth enforces
+// this too, so the e2e renders double as a guard.)
+test("fluidSynthArgs: render options precede the SoundFont and MIDI positional args", () => {
+  const args = fluidSynthArgs("/packs/gm.sf2", "/tmp/song.mid", "/tmp/out.wav", 44100);
+  const sfIdx = args.indexOf("/packs/gm.sf2");
+  const midIdx = args.indexOf("/tmp/song.mid");
+  const fIdx = args.indexOf("-F");
+  const rIdx = args.indexOf("-r");
+  assert.ok(fIdx !== -1 && rIdx !== -1, "-F and -r are present");
+  assert.ok(fIdx < sfIdx && fIdx < midIdx, "-F precedes the positional files");
+  assert.ok(rIdx < sfIdx && rIdx < midIdx, "-r precedes the positional files");
+  assert.equal(args[fIdx + 1], "/tmp/out.wav", "-F is immediately followed by the output path");
+  assert.equal(args[rIdx + 1], "44100", "-r is immediately followed by the sample rate");
+  // SoundFont before MIDI (FluidSynth positional order).
+  assert.ok(sfIdx < midIdx, "SoundFont positional precedes the MIDI positional");
 });
