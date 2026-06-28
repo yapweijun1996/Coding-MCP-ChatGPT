@@ -3542,6 +3542,17 @@ test("midiBuffer leaves a POLYPHONIC bowed-string track flat (monophony guard â€
   assert.equal(countController(buf, 5, 1), 0, "polyphonic cello must stay flat (no CC1)");
 });
 
+test("midiBuffer keeps shared-channel string parts flat (two monophonic lines on one channel)", () => {
+  // violin + violin_2 both resolve to channel 4. Each line is individually monophonic, but they
+  // share a channel, so per-track curves would pump each other. Must stay flat.
+  const buf = midiBuffer(makeComposition({
+    violin:   [{ track: "violin",   midi: 67, startBeat: 0, durationBeats: 4, velocity: 64 }],
+    violin_2: [{ track: "violin_2", midi: 62, startBeat: 0, durationBeats: 4, velocity: 60 }]
+  }));
+  assert.equal(countController(buf, 4, 11), 0, "shared-channel string parts must stay flat (no CC11)");
+  assert.equal(countController(buf, 4, 1), 0, "shared-channel string parts must stay flat (no CC1)");
+});
+
 test("midiBuffer does not author bow expression on a piano line", () => {
   const buf = midiBuffer(makeComposition({ piano: [
     { track: "piano", midi: 60, startBeat: 0, durationBeats: 4, velocity: 70 },

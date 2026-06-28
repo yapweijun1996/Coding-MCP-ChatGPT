@@ -1394,12 +1394,31 @@ export function midiBuffer(composition: Composition, options: { channelMap?: Rec
       events.push({ tick: start, bytes: [0x90 + channel, note.midi, note.velocity] });
       events.push({ tick: end, bytes: [0x80 + channel, note.midi, 0] });
     }
-    // Auto-author bow expression for monophonic bowed-string lines (cello/violin/strings melodies)
-    // so sustained notes breathe instead of sitting flat. Skipped for percussion, non-string
-    // instruments, and polyphonic string tracks (see bowedStringExpressionEvents).
-    const instrument = resolvedInstrumentFor(track);
-    if (expressiveStrings && instrument && bowedStringInstruments.has(instrument) && !isPercussionChannel(track)) {
-      for (const event of bowedStringExpressionEvents(channelFor(track), notes, ppq)) events.push(event);
+  }
+  // Auto-author bow expression for monophonic bowed-string lines so sustained notes breathe.
+  // This is done at CHANNEL granularity, not per-track, because CC11/CC1 are per-channel and the
+  // catalog routes several string parts onto one shared channel (violin+viola -> ch4, cello+cello_2
+  // -> ch5, a quartet -> two channels). Authoring per-track would let two individually-monophonic
+  // lines on the same channel interleave their curves and pump each other's level — worse than flat.
+  // So we merge every track's notes by resolved channel and only author when (a) every track on that
+  // channel is a bowed string and (b) the merged line is monophonic (the guard inside
+  // bowedStringExpressionEvents). A string section/quartet (overlapping merge) stays flat = no
+  // regression.
+  if (expressiveStrings) {
+    const byChannel = new Map<number, { notes: Array<z.infer<typeof noteSchema>>; allBowed: boolean }>();
+    for (const [track, notes] of Object.entries(composition.tracks)) {
+      const channel = channelFor(track);
+      if (channel === 9) continue; // percussion
+      const instrument = resolvedInstrumentFor(track);
+      const bowed = Boolean(instrument && bowedStringInstruments.has(instrument));
+      const entry = byChannel.get(channel) ?? { notes: [], allBowed: true };
+      entry.notes.push(...notes);
+      entry.allBowed = entry.allBowed && bowed;
+      byChannel.set(channel, entry);
+    }
+    for (const [channel, entry] of byChannel) {
+      if (!entry.allBowed || entry.notes.length === 0) continue;
+      for (const event of bowedStringExpressionEvents(channel, entry.notes, ppq)) events.push(event);
     }
   }
   events.sort((a, b) => a.tick - b.tick);
