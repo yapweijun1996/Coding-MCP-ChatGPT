@@ -3477,12 +3477,13 @@ test("install_free_soundfont_pack fails closed for a sampled grand that is not b
 });
 
 // ---- auto bow-expression for bowed-string lines (CC11 swell + CC1 vibrato) ----
-function makeComposition(tracks: Record<string, Array<{ track: string; midi: number; startBeat: number; durationBeats: number; velocity: number }>>): any {
+type MidiBufferComposition = Parameters<typeof midiBuffer>[0];
+function makeComposition(tracks: Record<string, Array<{ track: string; midi: number; startBeat: number; durationBeats: number; velocity: number }>>): MidiBufferComposition {
   return {
     title: "exp", style: "cinematic_background", mood: "calm", tempo: 66, key: "D minor",
     durationSeconds: 16, loopable: false, instruments: Object.keys(tracks), sections: [],
     chordProgression: [], tracks, license: { output: "generated_original", dependencies: [] }
-  };
+  } as unknown as MidiBufferComposition;
 }
 // Count control-change events for (channel, controller) by walking the single MTrk. midiBuffer emits
 // a full status byte per event (no running status), but we still parse delta/status/data lengths so
