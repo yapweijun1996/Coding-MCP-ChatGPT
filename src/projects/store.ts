@@ -1478,6 +1478,27 @@ function extractLocalHtmlReferences(entryFile: string, html: string): string[] {
   return [...references].sort();
 }
 
+// Published pages on the same-origin /share route run under a sandbox CSP WITHOUT allow-same-origin
+// (strictProjectContentCsp), which makes the page an opaque origin — so fetch()/XHR to its OWN
+// relative URLs fail with "Failed to fetch", even though <img>/<audio>/<script> (no-cors loads) work.
+// The dedicated content host serves with allow-same-origin where these succeed, so this is a
+// portability warning, not a hard error. The robust fix is to inline the data (e.g. a
+// <script type="application/json">…</script> block the script reads via textContent) so the page
+// works on every host. Absolute URLs (https://cdn…) and data:/blob: are unaffected and ignored.
+export function detectSandboxIncompatibleFetches(html: string): string[] {
+  const found = new Set<string>();
+  const isRelative = (url: string) => !/^[a-z][a-z0-9+.-]*:/i.test(url) && !url.startsWith("//");
+  const scan = (pattern: RegExp) => {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(html)) !== null) {
+      if (match[1] && isRelative(match[1])) found.add(match[1]);
+    }
+  };
+  scan(/\bfetch\s*\(\s*["'`]([^"'`]+)["'`]/gi);
+  scan(/\.open\s*\(\s*["'][^"']*["']\s*,\s*["'`]([^"'`]+)["'`]/gi);
+  return [...found].sort();
+}
+
 function stripHtmlTags(value: string): string {
   return value
     .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
@@ -1627,6 +1648,10 @@ export async function validateProject(projectRoot: string, projectId: string, en
         } catch (error) {
           errors.push(`Invalid local resource reference ${reference}: ${error instanceof Error ? error.message : "invalid reference"}`);
         }
+      }
+      const sandboxFetches = detectSandboxIncompatibleFetches(html);
+      if (sandboxFetches.length) {
+        warnings.push(`Entry HTML calls fetch()/XHR on same-origin resource(s) [${sandboxFetches.join(", ")}]; published pages on the /share route run under a sandbox CSP (opaque origin) where these fail silently ("Failed to fetch"). Inline the data into the HTML (e.g. a <script type="application/json">…</script> block read via textContent) so the page renders on every host. <img>/<audio>/<script src> and absolute/CDN URLs are unaffected.`);
       }
       landingPageIntent = shouldCheckLandingPageIntent(html) ? validateLandingPageIntent(html) : undefined;
       if (landingPageIntent && !landingPageIntent.ok) {
