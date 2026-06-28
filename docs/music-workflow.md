@@ -324,7 +324,15 @@ Timbre realism is dominated by the sample source, then by performance expression
 |---|---|---|---|---|
 | GeneralUser-GS | 32 MB | all 128 GM instruments | few | default / sketches; `install_free_soundfont_pack` |
 | YDP Grand (FreePats) | 118 MB | piano only | several | real sampled Yamaha Disklavier grand, CC-BY 3.0 — best size/quality |
-| Salamander Grand V3 (FreePats) | 1.27 GB | piano only | 16 | top-tier Yamaha C5, CC-BY 3.0 (FreePats SF2 build drops pedal/release/resonance noise) |
+| **Salamander Grand V3 (FreePats)** | 1.27 GB | piano only | 16 | **★ the free-tier ceiling we target** — top-tier Yamaha C5, CC-BY 3.0 (FreePats SF2 build drops pedal/release/resonance noise) |
+| VSCO2 CE String Ensemble (lite) | 2.3 MB | strings only | 1 | real-recorded string ensemble (Versilian, CC0); presets at **bank 0 prog 0/1/2** (`String Ensemble`/`Marcato`/`Velocity`) — **not** GM program 49 |
+
+> **Decision (verified by listening, this is the bar):** **Salamander is the level we need.** Among
+> free `.sf2` that FluidSynth can load it is the ceiling; going higher means leaving samples for
+> physical modelling (Pianoteq, paid, not `.sf2`) or commercial multi-GB libraries. So further gains
+> come from *performance + space* (next section), not a bigger SoundFont. Current instrument inventory:
+> **4 SoundFonts** = 3 real-recorded voices (Salamander grand, YDP grand, VSCO2 strings) + GeneralUser-GS
+> (287 GM presets, synth-grade, the "any standard instrument" fallback).
 
 YDP/Salamander SF2 sources: <https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html>.
 Register a downloaded pack with `manage_jazz_instrument_packs` (needs SHA-256, license sidecar,
@@ -333,6 +341,28 @@ Register a downloaded pack with `manage_jazz_instrument_packs` (needs SHA-256, l
 **Why bytes ≈ realism:** a real piano changes *timbre* (not just volume) from soft→hard; only
 multi-velocity sampling captures that. GM stretches a few samples; YDP/Salamander are real
 per-note, per-dynamic recordings.
+
+### Free string/orchestral SoundFonts — the upgrade map
+
+Strings have a **far lower free ceiling than piano**: no free string library reaches Salamander's
+16 velocity layers. Evaluate a candidate on four orthogonal axes — and **format is the first filter**,
+because a real-recorded library in the wrong format plays **nothing** in this pipeline.
+
+| Source | Solo / Ensemble | Real rec. | Vel layers | Format | Size | Usable in FluidSynth (.sf2) now? |
+|---|---|---|---|---|---|---|
+| **VSCO2 String Ensemble Lite** (current) | ensemble pad | ✅ | ~1 | **sf2** | 2.3 MB (verified) | ✅ direct |
+| VSCO2 CE (full) | **solo** vln/vla/**cello**/bass + ens. | ✅ | 1–2 | SFZ (+ some sf2) | ~3 GB | △ sf2 parts only; full needs sfizz |
+| Sonatina Symphonic Orchestra (SSO) | sections (no true solo) | ✅ | ~1 | **sf2** + SFZ | 512 MB (verified, archive.org) | ✅ direct |
+| Virtual Playing Orchestra (VPO) | solo + ensemble (best playability) | ✅ | 2–3 + round-robin | **SFZ only** | ~3.7 GB | ❌ needs sfizz |
+| VCSL (Versilian Community) | solo-heavy, huge variety | ✅ | ~1 | SFZ | ~3 GB | ❌ needs sfizz |
+| University of Iowa MIS | **solo cello** (ff/mf/pp) | ✅ | 3 dynamics | raw WAV (loose) | ~100s MB | ❌ must package into sf2 first |
+| Spitfire LABS / BBCSO Discover | solo + ensemble | ✅✅ best-sounding | multi-dyn xfade | **VST/AU plugin** | ~0.2–1 GB | ❌ plugin, not sf2/sfz/FluidSynth |
+
+> Sizes/layer counts are approximate (knowledge-based) except the two marked *verified*. Three upgrade
+> routes: **(1) zero-install, now** → SSO (512 MB sf2): real *section* strings, no solo, single-layer.
+> **(2) real solo cello** → VSCO2 full or Iowa, but pay a step (install `sfizz_render`, or package the
+> Iowa WAVs into an sf2). **(3) best sound** → Spitfire LABS, but that means leaving this pipeline for a
+> DAW + plugin. Pick by **role first** (an ensemble pad ≠ a lead solo cello) then format.
 
 **Levers to push past "good piano" (layered by where they live in the pipeline):**
 - *Performance layer (edit MIDI/manifest):* real sustain pedal (CC64 — note `midiBuffer` only emits
@@ -370,3 +400,67 @@ web deliverables, and `publishProject` never copies/serves them. As of commit f5
 sf2 in the project does not block publish — the page just references the produced WAV/MP3. (Earlier
 builds errored "File exceeds max size"; the workaround then was to `delete_project_file` the sf2
 before publishing.)
+
+## 16. The validated "Salamander-level" production recipe + gotchas
+
+A full piece was taken end-to-end at this quality (project `Lantern on Still Water`): a ~3-min solo
+piano arrangement (+ optional strings) on Salamander, in a real concert hall. The pipeline that
+works, and the non-obvious traps found doing it — **none of which `inspect_audio_quality` flags as
+blocking, so they must be checked deliberately.**
+
+### Pipeline (each stage is an orthogonal knob — change one, A/B it alone)
+
+```
+compose (motivic, from a loved theme)  →  finer velocity curve + CC64 pedal + humanization (edit MIDI)
+   →  FluidSynth render w/ Salamander (.sf2)  →  convolution reverb w/ a REAL trimmed hall IR
+   →  2-pass loudnorm (-16 LUFS / -1.5 dBTP)  →  mp3  →  publish_and_report
+```
+
+- **Compose by transformation, not invention.** A long piece (intro→theme→development→climax→reprise→
+  outro) grown from *one* approved theme (octave-doubling, register shift, dynamics) holds together and
+  is the safe choice when you cannot audition every note. Avoid new melodies / key changes you can't hear.
+- **Finer velocity curve** = interpolate the phrase arc note-to-note (no per-bar stairs) + metric accents
+  (downbeat>beat3>off-beat) + melodic contour (lean into high notes) + tighten random jitter to ±2 so
+  *shape*, not noise, carries expression. It pays off most on Salamander because its **16 velocity layers**
+  trigger physically different samples — a richer curve is wasted on a 1-layer SoundFont (this synergy is
+  why "finer curve × multi-layer piano" widens measured dynamic range).
+
+### Gotchas (verified, do not relearn the hard way)
+
+1. **A real recorded IR contains the direct impulse** (peak in the first ~0.3 ms). Convolving it wet and
+   summing back the dry **comb-filters the dry** (hollow/phasey) — invisible to loudness/clip checks.
+   **Trim the IR up to & including the direct peak** (≈ first 1 ms, short fade-in) so it becomes
+   reflections+tail, then it behaves like a synthetic IR. Set reverb *amount* by **RMS-matching the wet
+   bus**, not by the IR's raw energy, so an A/B isolates hall *character*, not "more reverb".
+2. **ffmpeg 8's `afir` mis-gains** (output near-silent / wildly attenuated) — don't fight its `dry/wet/
+   gtype`. Do convolution in **pure numpy** (FFT per channel) with explicit wet/dry RMS control. Reliable
+   and fully controllable.
+3. **Over-wide composed dynamics make soft sections inaudible.** A first pass measured **53 dB** dynamic
+   range — the intro was ~50 dB under the climax, unhearable at a comfortable volume (`inspect_audio_quality`
+   reported `silenceRatio 0.20`). Fix at the **composition velocity floor** (lift soft sections, trim the
+   climax peak) → DR dropped to ~20 dB. **Never "fix" this with a compressor** — it would undo the
+   humanization. The tool's "wide dynamic range" warning is a *background-music* criterion and is a non-issue
+   for expressive solo piano **until the number is genuinely extreme (>~40 dB)**.
+4. **Salamander's softest velocity layers are quiet AND noisy.** A too-soft passage sits on those layers,
+   and after loudnorm pulls the whole mix up, the **sample hiss becomes audible** (notably on earbuds in a
+   quiet intro). Keep the dynamic range in the **cleaner mid layers** (raise the floor — intro velocity ~58
+   not ~28) and a narrower span, paired with a **linear** loudnorm pass. This fixes the noise at the source
+   rather than masking it. (Tune the level arrays in `gen_full.py`-style generators; objective tells:
+   `noiseFloorRms` and the soft-section silence flags.)
+5. **A new SoundFont's presets are NOT GM.** VSCO2 strings live at **bank 0 / prog 0** (`String Ensemble`),
+   not GM program 49. Dump the sf2 `phdr` (preset header) and wire the MIDI program to what's actually there
+   — FluidSynth renders **silence** for a program the sf2 doesn't define. Read the table, don't assume GM.
+6. **Real strings are quieter than GM.** VSCO2 rendered ~½ the RMS of GeneralUser-GS strings; bump its mix
+   gain (~0.8→1.5) to keep the same subtle bed. Sum piano+strings dry → **one** convolution (same hall), and
+   re-run the pre-convolution clip check + comb proxy because two summed sources now hit the IR at the climax.
+
+### What you CAN verify when you can't hear it
+
+There is no objective metric for "is the music good," so check the slice that *is* measurable:
+- **Dynamic arc** — dump per-section mean velocity + note-density; confirm `intro < theme < development <
+  climax > reprise > outro` and total duration in range.
+- **`inspect_audio_quality`** — treat `productionSafe`, `loopSeamClickProxy`/comb (≈0 = no phase smearing),
+  `harshHighFrequencyProxy`, `mechanicalScore` (≈0 = human), `noiseFloorRms`, `dynamicRange` as the ears you
+  don't have. A `silenceRatio` spike at the *start* means a section went inaudible (gotcha 3/4), not "it's fine."
+- **Ritard check** — if you wrote tempo-slowdown meta events, the rendered duration must exceed `bars×60/BPM`.
+- **ebur128** for authoritative integrated LUFS / true-peak / LRA (the tool's `estimatedLufs` is a rough proxy).
