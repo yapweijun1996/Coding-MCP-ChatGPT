@@ -311,10 +311,10 @@ ordering, minor-key import, `.xml`-path import — all in `tests/music-workflow.
 FluidSynth now **rejects options-after-files** (mimics 2.x), so the e2e renders fail closed on a
 regression. Verified end-to-end against real FluidSynth 2.5.5.
 
-> Note: `render_production_music`'s built-in master chain is a safe-PCM proxy and leaves output
-> quiet (~-35 LUFS proxy). For broadcast level, run a real `ffmpeg loudnorm` pass after it, or use
-> `render_midi_with_soundfont` with `normalize: true`. (Open improvement: make the production master
-> use real ffmpeg loudnorm.)
+> Loudness: `render_production_music` now finishes the production WAV with a real `ffmpeg loudnorm`
+> pass (-16 LUFS / -1.5 dBTP) when ffmpeg is available (report carries `loudnessFinalizedWithFfmpeg`),
+> falling back to the master-chain output otherwise — fixed in commit f532d86 (earlier builds shipped
+> a quiet ~-35 LUFS proxy master). `render_midi_with_soundfont` has its own opt-in `normalize: true`.
 
 ## 14. SoundFont quality tiers — the "pro sound" levers
 
@@ -364,6 +364,9 @@ To let an MCP client (Claude Code, etc.) call these tools natively against local
 3. The deployed Docker container (`:6859`, serves `gmb01.xyz`) is `NODE_ENV=production` → dev-token
    bypass is **off**; connecting to it needs the real OAuth flow.
 
-**Publish caveat:** project publish validation enforces a max per-file size, so a large sf2
-(118 MB / 1.27 GB) is rejected. The sf2 is only the render *source* — delete it from the project
-after rendering (`delete_project_file`) and publish referencing the produced WAV/MP3.
+**Publish + large sf2:** instrument source assets (`.sf2`/`.sf3`/`.sfz`) are render *inputs*, not
+web deliverables, and `publishProject` never copies/serves them. As of commit f532d86,
+`validateProject` **warns** (no longer errors) on an oversized instrument pack, so a 118 MB / 1.27 GB
+sf2 in the project does not block publish — the page just references the produced WAV/MP3. (Earlier
+builds errored "File exceeds max size"; the workaround then was to `delete_project_file` the sf2
+before publishing.)
