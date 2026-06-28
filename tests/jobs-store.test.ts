@@ -6,7 +6,11 @@ import path from "node:path";
 import { cancelJob, initializeJobStore, listJobs, saveJob, getJob, updateJob, type JobRecord } from "../src/jobs/store.js";
 
 function job(id: string, status: JobRecord["status"]): JobRecord {
-  const now = "2026-06-20T10:00:00.000Z";
+  // Use a current timestamp so fixtures stay inside the default retention window. A hardcoded date
+  // turned these tests into a time bomb: once wall-clock passed retentionDays (7) beyond it,
+  // initializeJobStore pruned the fixture before the behavior under test (reconcile / survive) ran.
+  // Tests that exercise pruning override updatedAt explicitly, so a fresh default is safe.
+  const now = new Date().toISOString();
   return { id, status, title: "run_project_build", summary: "x", logs: [], artifacts: [], errors: [], createdAt: now, updatedAt: now };
 }
 
