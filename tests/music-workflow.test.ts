@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { getToolModule } from "../src/mcp/registry.js";
 import { pickJazzPackRegistryCandidatePaths, buildEnsembleQa, fluidSynthArgs } from "../src/mcp/tools/music-workflow.js";
-import { createProject, getProjectStoredFilePath, readProjectFile, writeProjectAsset, writeProjectFile } from "../src/projects/store.js";
+import { createProject, getProjectStoredFilePath, getProjectFilesDirectory, validateProject, readProjectFile, writeProjectAsset, writeProjectFile } from "../src/projects/store.js";
+import { mkdir as mkdirNode, truncate as truncateNode } from "node:fs/promises";
 import { skillRegistry } from "../src/skills/registry.js";
 import type { ToolContext } from "../src/mcp/types.js";
 
@@ -287,7 +288,21 @@ if (!out) {
   console.error("missing output");
   process.exit(2);
 }
-fs.writeFileSync(out, Buffer.concat([Buffer.from("ID3", "ascii"), Buffer.alloc(256, 1)]));
+// WAV outputs (e.g. the loudnorm finalize pass) need a real PCM WAV so assertPcmWav passes; only the
+// MP3 encode wants ID3. Emit the right container by output extension.
+if (out.toLowerCase().endsWith(".wav")) {
+  const frames = 2000;
+  const pcm = Buffer.alloc(frames * 2);
+  for (let i = 0; i < frames; i++) pcm.writeInt16LE(Math.round(Math.sin(i / 12) * 9000), i * 2);
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0); header.writeUInt32LE(36 + pcm.length, 4); header.write("WAVEfmt ", 8);
+  header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(44100, 24); header.writeUInt32LE(44100 * 2, 28); header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34); header.write("data", 36); header.writeUInt32LE(pcm.length, 40);
+  fs.writeFileSync(out, Buffer.concat([header, pcm]));
+} else {
+  fs.writeFileSync(out, Buffer.concat([Buffer.from("ID3", "ascii"), Buffer.alloc(256, 1)]));
+}
 `;
   await writeFile(scriptPath, script);
   await chmod(scriptPath, 0o755);
@@ -686,12 +701,15 @@ test("end-to-end: install GeneralUser GS -> compose cello+piano -> render covers
       publish: false
     }, ctx);
     assert.equal(render.ok, true, `render should succeed using the GM pack for both roles: ${JSON.stringify(render.errors)}`);
-    const payload = render.structuredContent as { stemPaths: Record<string, string>; stemRenderers: Record<string, { role: string; packId: string }>; instrumentCoverage: Array<{ covered: boolean }> };
+    const payload = render.structuredContent as { stemPaths: Record<string, string>; stemRenderers: Record<string, { role: string; packId: string }>; instrumentCoverage: Array<{ covered: boolean }>; loudnessFinalizedWithFfmpeg: boolean };
     assert.ok(payload.stemPaths.piano, "piano stem rendered");
     assert.ok(payload.stemPaths.cello, "cello stem rendered from the same GM pack");
     assert.equal(payload.stemRenderers.cello.packId, "generaluser_gs");
     assert.equal(payload.stemRenderers.piano.packId, "generaluser_gs");
     assert.ok(payload.instrumentCoverage.every((entry) => entry.covered), "all roles covered by the one GM pack");
+    // The built-in PCM master leaves levels ~-35 LUFS; production render must finish with a real
+    // ffmpeg loudnorm pass when ffmpeg is present (otherwise the "mastered" file ships too quiet).
+    assert.equal(payload.loudnessFinalizedWithFfmpeg, true, "production master is loudness-finalized via ffmpeg");
 
     // 4) The natural flow: render again with NO soundfontPackId and NO instrumentPackMap — the
     // auto-registered general_midi pack must be discovered as the fallback and still cover both roles.
@@ -3369,6 +3387,31 @@ test("import_musicxml_score reads a score from a .xml project file path (extensi
     const payload = result.structuredContent as { key: string; scoreSource: { sourcePath: string } };
     assert.equal(payload.key, "D minor");
     assert.equal(payload.scoreSource.sourcePath, "music/score.xml");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// A sampled SoundFont (e.g. a grand piano) is legitimately 100MB-1GB+. It is a render input, never a
+// web-served deliverable, and publishProject does not copy it — so an oversized .sf2 must WARN, not
+// ERROR, or the music project can never be published. (Regression for the YDP 118MB publish block.)
+test("validateProject warns (not errors) on an oversized instrument SoundFont asset", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-sf2-validate-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "SF2 size", createdByClientId: "composer" });
+    await writeProjectFile(ctx.projectRoot, project.id, "index.html", "<!doctype html><title>ok</title><p>player</p>");
+    // Create a sparse 130MB .sf2 (over the ~100MB asset cap) without writing real bytes.
+    const filesRoot = getProjectFilesDirectory(ctx.projectRoot, project.id);
+    await mkdirNode(path.join(filesRoot, "soundfonts"), { recursive: true });
+    const sf2 = path.join(filesRoot, "soundfonts", "grand.sf2");
+    await writeFile(sf2, Buffer.from("RIFF")); // valid-ish header byte; size set by truncate
+    await truncateNode(sf2, 130 * 1024 * 1024);
+
+    const result = await validateProject(ctx.projectRoot, project.id, "index.html");
+    assert.equal(result.errors.some((e) => /exceeds max size/i.test(e)), false, "oversized .sf2 must not be a blocking error");
+    assert.equal(result.ok, true, "project with a large render-only SoundFont still validates");
+    assert.ok(result.warnings.some((w) => /grand\.sf2/.test(w) && /render input/i.test(w)), "oversized SoundFont is surfaced as a warning");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -5027,10 +5027,25 @@ export const musicWorkflowTools: ToolModule[] = [
           outputAudioPath: parsed.outputProductionWavPath,
           outputReportPath: parsed.outputReportPath
         });
-        const productionFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputProductionWavPath, mastered.output, "audio/wav");
+        // The built-in PCM master chain leaves levels well below broadcast (~-35 LUFS), so a "mastered"
+        // render still sounds very quiet. Finish with a real ffmpeg loudnorm pass to land at a usable
+        // level (~-16 LUFS, -1.5 dBTP). Falls back to the master-chain output if ffmpeg is unavailable.
+        const masteredTempPath = path.join(tempDir, "mastered.wav");
+        await writeFile(masteredTempPath, mastered.output);
         const productionTempPath = path.join(tempDir, "production.wav");
+        let productionBuffer = mastered.output;
+        let loudnessFinalizedWithFfmpeg = false;
+        if (environment.tools.ffmpeg?.ok) {
+          try {
+            productionBuffer = await normalizeWavWithFfmpeg(masteredTempPath, productionTempPath, parsed.sampleRate, ctx.commandTimeoutMs);
+            loudnessFinalizedWithFfmpeg = true;
+          } catch {
+            productionBuffer = mastered.output;
+          }
+        }
+        if (!loudnessFinalizedWithFfmpeg) await writeFile(productionTempPath, productionBuffer);
+        const productionFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputProductionWavPath, productionBuffer, "audio/wav");
         const mp3TempPath = path.join(tempDir, "preview.mp3");
-        await writeFile(productionTempPath, mastered.output);
 	        const mp3 = await encodeMp3WithFfmpeg(productionTempPath, mp3TempPath, ctx.commandTimeoutMs);
 	        const mp3File = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputPreviewMp3Path, mp3, "audio/mpeg");
 	        const licenses = renderProductionLicensesMarkdown({
@@ -5067,6 +5082,7 @@ export const musicWorkflowTools: ToolModule[] = [
 	          roleMap: Object.fromEntries(packResolution.instrumentCoverage.map((entry) => [entry.track, entry.requiredRole])),
 	          channelMap: parsed.channelMap,
 	          mixMasterChain: ["gain_staging", "eq_cleanup", "light_compression", "room_reverb", "master_limiter", "loudness_normalize"],
+	          loudnessFinalizedWithFfmpeg,
 	          masteringReport: { ...mastered.report, qualityTier: "production_candidate", productionReady: true, blockingReasons: [], sourceRenderPath: rawFile.path },
 	          soundfont: resolvedPacks[0] ? {
 	            packId: resolvedPacks[0].pack.packId,
