@@ -244,9 +244,14 @@ const renderProductionMusicInputSchema = z.object({
 
 const installFreeSoundfontPackInputSchema = z.object({
   projectId: z.string().min(8).max(80),
-  packId: z.enum(["generaluser_gs"]),
-  outputDirectory: z.string().min(1).max(200).optional().default("soundfonts/generaluser-gs")
-});
+  packId: z.enum(["generaluser_gs", "ydp_grand", "salamander_grand"]),
+  // Default the install directory to the pack's own folder so different packs don't overwrite each
+  // other; the literal default keeps the prior GeneralUser behaviour when packId is omitted upstream.
+  outputDirectory: z.string().min(1).max(200).optional()
+}).transform((value) => ({
+  ...value,
+  outputDirectory: value.outputDirectory ?? (value.packId === "ydp_grand" ? "soundfonts/ydp-grand" : value.packId === "salamander_grand" ? "soundfonts/salamander" : "soundfonts/generaluser-gs")
+}));
 
 const discoverSoundfontPacksInputSchema = z.object({
   projectId: z.string().min(8).max(80),
@@ -2736,11 +2741,51 @@ async function fetchBuffer(url: string) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-function bundledGeneralUserGsDirectories() {
+function bundledSoundfontDirectories(dirName: string) {
   const configured = process.env.MUSIC_SOUNDFONT_DIR?.trim();
   const roots = [configured, "/app/soundfonts", path.join(process.cwd(), "soundfonts"), path.join(process.cwd(), ".music-packs")].filter((value): value is string => Boolean(value));
-  return [...new Set(roots)].map((root) => path.join(root, "generaluser-gs"));
+  return [...new Set(roots)].map((root) => path.join(root, dirName));
 }
+
+function bundledGeneralUserGsDirectories() {
+  return bundledSoundfontDirectories("generaluser-gs");
+}
+
+// Sampled grand pianos installable straight from the runtime soundfont directory (MUSIC_SOUNDFONT_DIR).
+// They are CC-BY 3.0: commercial use is allowed WITH attribution, and that attribution flows
+// automatically into the license manifest / LICENSES.md once auto-registered (so business delivery is
+// legal with zero manual credit work — just keep the generated attribution line). Upstream ships them
+// as compressed archives Node cannot extract, so these are bundled-only: install fails closed with
+// download/extract guidance when the runtime directory does not contain the pack.
+const sampledPianoPacks = {
+  ydp_grand: {
+    packId: "ydp_grand",
+    displayName: "YDP Grand Piano",
+    version: "20160804",
+    dirName: "ydp-grand",
+    sf2File: "YDP-GrandPiano.sf2",
+    licenseFile: "LICENSE.txt",
+    readmeFile: "README.md",
+    licenseType: "cc_by",
+    sourceUrl: "https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html",
+    attribution: "YDP Grand Piano (FreePats), CC-BY 3.0",
+    instrumentRole: "realistic_piano" as JazzInstrumentRole
+  },
+  salamander_grand: {
+    packId: "salamander_grand",
+    displayName: "Salamander Grand Piano V3 (Yamaha C5)",
+    version: "V3-20200602",
+    dirName: "salamander",
+    sf2File: "Salamander.sf2",
+    licenseFile: "LICENSE.txt",
+    readmeFile: "README.md",
+    licenseType: "cc_by",
+    sourceUrl: "https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html",
+    attribution: "Salamander Grand Piano by Alexander Holm, SF2 by FreePats, CC-BY 3.0",
+    instrumentRole: "realistic_piano" as JazzInstrumentRole
+  }
+} as const;
+type SampledPianoPackId = keyof typeof sampledPianoPacks;
 
 async function readBundledGeneralUserGsPack() {
   for (const directory of bundledGeneralUserGsDirectories()) {
@@ -2800,7 +2845,9 @@ async function installGeneralUserGsPack(ctx: ToolContext, input: z.infer<typeof 
       source: generalUserGsPack.sourceUrl,
       installSource: bundled?.source ?? "downloaded_from_upstream",
       bundledDirectory: bundled?.directory,
-      licenseType: generalUserGsPack.licenseType,
+      licenseType: generalUserGsPack.licenseType as string,
+      attribution: "GeneralUser GS by S. Christian Collins",
+      instrumentRole: "general_midi" as JazzInstrumentRole,
       commercialUseAllowed: true,
       redistributionAllowed: true,
       productionUseApproved: true,
@@ -2813,6 +2860,73 @@ async function installGeneralUserGsPack(ctx: ToolContext, input: z.infer<typeof 
       packId: generalUserGsPack.packId,
       displayName: generalUserGsPack.displayName,
       sourceUrl: generalUserGsPack.sourceUrl,
+      qualityTier: "blocked" as const,
+      errors: [error instanceof Error ? error.message : String(error)]
+    };
+  }
+}
+
+// Install a bundled sampled grand piano (YDP / Salamander) from the runtime soundfont directory.
+// Returns the same ok-shape as installGeneralUserGsPack so the handler + auto-register treat both
+// uniformly; only instrumentRole ("realistic_piano") and the CC-BY attribution differ.
+async function installSampledPianoPack(ctx: ToolContext, input: z.infer<typeof installFreeSoundfontPackInputSchema>, pack: typeof sampledPianoPacks[SampledPianoPackId]) {
+  const paths = {
+    soundfont: `${input.outputDirectory}/${pack.sf2File}`,
+    license: `${input.outputDirectory}/${pack.licenseFile}`,
+    readme: `${input.outputDirectory}/${pack.readmeFile}`
+  };
+  try {
+    let bundle: { soundfontBytes: Buffer; licenseBytes: Buffer; readmeBytes: Buffer; directory: string } | undefined;
+    for (const directory of bundledSoundfontDirectories(pack.dirName)) {
+      try {
+        const soundfontBytes = await readFile(path.join(directory, pack.sf2File));
+        if (!isValidSoundfontBytes(soundfontBytes)) throw new Error(`${pack.sf2File} is not a valid RIFF/sfbk SoundFont.`);
+        const licenseBytes = await readFile(path.join(directory, pack.licenseFile));
+        const readmeBytes = await readFile(path.join(directory, pack.readmeFile)).catch(() => licenseBytes);
+        bundle = { soundfontBytes, licenseBytes, readmeBytes, directory };
+        break;
+      } catch {
+        // try the next configured soundfont directory
+      }
+    }
+    if (!bundle) {
+      throw new Error(`${pack.displayName} is not bundled in this runtime. Download it from ${pack.sourceUrl}, extract the archive, and place ${pack.sf2File} + ${pack.licenseFile} under <MUSIC_SOUNDFONT_DIR>/${pack.dirName}/, then re-run. (Large sampled .sf2 ships as a compressed archive, so it is not auto-downloaded.)`);
+    }
+    if (!bundle.licenseBytes.length) throw new Error("License file is empty.");
+    const computedSha256 = sha256Hex(bundle.soundfontBytes);
+    const [soundfontFile, licenseFile, readmeFile] = await Promise.all([
+      writeProjectAsset(ctx.projectRoot, input.projectId, paths.soundfont, bundle.soundfontBytes, "audio/soundfont"),
+      writeProjectFile(ctx.projectRoot, input.projectId, paths.license, bundle.licenseBytes.toString("utf8")),
+      writeProjectFile(ctx.projectRoot, input.projectId, paths.readme, bundle.readmeBytes.toString("utf8"))
+    ]);
+    return {
+      ok: true as const,
+      packId: pack.packId,
+      displayName: pack.displayName,
+      version: pack.version,
+      assetPaths: [soundfontFile.path],
+      licenseTextPath: licenseFile.path,
+      readmePath: readmeFile.path,
+      computedSha256,
+      sourceUrl: pack.sourceUrl,
+      source: pack.sourceUrl,
+      installSource: "bundled_runtime_soundfont" as const,
+      bundledDirectory: bundle.directory,
+      licenseType: pack.licenseType as string,
+      attribution: pack.attribution,
+      instrumentRole: pack.instrumentRole,
+      commercialUseAllowed: true,
+      redistributionAllowed: true,
+      productionUseApproved: true,
+      qualityTier: "production_candidate" as const,
+      recommendedNextTool: "manage_jazz_instrument_packs"
+    };
+  } catch (error) {
+    return {
+      ok: false as const,
+      packId: pack.packId,
+      displayName: pack.displayName,
+      sourceUrl: pack.sourceUrl,
       qualityTier: "blocked" as const,
       errors: [error instanceof Error ? error.message : String(error)]
     };
@@ -3902,21 +4016,31 @@ function jazzPackRecordToInputSpec(record: JazzPackRecord): z.infer<typeof jazzI
 // as a general_midi pack, MERGING with any existing packs, so render_midi_with_soundfont /
 // render_production_music can use the returned pack id immediately (issue_0145). One GM pack then
 // covers every melodic/percussion role of an ensemble.
-async function autoRegisterInstalledGeneralMidiPack(ctx: ToolContext, projectId: string, installResult: Extract<Awaited<ReturnType<typeof installGeneralUserGsPack>>, { ok: true }>) {
-  const gmSpec: z.infer<typeof jazzInstrumentPackSchema> = {
+// Auto-register a freshly installed pack (GeneralUser GS general_midi, or a sampled realistic_piano
+// grand) into the project registry, MERGING with existing packs, so render tools can use the pack id
+// immediately. instrumentRole + attribution come from the install result, so CC-BY grands carry their
+// required attribution into the license manifest automatically.
+type InstalledPack = {
+  ok: true; packId: string; displayName: string; version: string; assetPaths: string[];
+  computedSha256: string; licenseType: string; source: string; sourceUrl: string;
+  licenseTextPath: string; readmePath: string; attribution: string; instrumentRole: JazzInstrumentRole;
+};
+
+async function autoRegisterInstalledPack(ctx: ToolContext, projectId: string, installResult: InstalledPack) {
+  const spec: z.infer<typeof jazzInstrumentPackSchema> = {
     packId: installResult.packId,
     displayName: installResult.displayName,
-    instrumentRole: "general_midi",
+    instrumentRole: installResult.instrumentRole,
     format: "soundfont",
     assetPaths: installResult.assetPaths,
     version: installResult.version,
     declaredSha256: installResult.computedSha256,
-    licenseType: installResult.licenseType,
+    licenseType: installResult.licenseType as z.infer<typeof jazzInstrumentPackSchema>["licenseType"],
     source: installResult.source,
     sourceUrl: installResult.sourceUrl,
     licenseTextPath: installResult.licenseTextPath,
     readmePath: installResult.readmePath,
-    attribution: "GeneralUser GS by S. Christian Collins",
+    attribution: installResult.attribution,
     productionUseApproved: true,
     qualityTier: "production_candidate",
     commercialUseAllowed: true,
@@ -3926,14 +4050,14 @@ async function autoRegisterInstalledGeneralMidiPack(ctx: ToolContext, projectId:
   const existing = await readJazzPackRegistry(ctx, projectId);
   // NOTE: existing packs are re-analyzed on merge. A previously-registered pack whose stored
   // attribution/sourceUrl is empty could re-acquire a risk flag here; install's ok only gates on the
-  // GM pack so it won't lie, but a second user pack could be quietly demoted to review_required.
+  // newly installed pack so it won't lie, but a second user pack could be quietly demoted.
   const existingSpecs = (existing?.packs ?? [])
-    .filter((record) => record.packId !== gmSpec.packId)
+    .filter((record) => record.packId !== spec.packId)
     .map(jazzPackRecordToInputSpec);
   const parsedInput = manageJazzInstrumentPacksInputSchema.parse({
     projectId,
     intendedUse: "client_delivery",
-    packs: [...existingSpecs, gmSpec]
+    packs: [...existingSpecs, spec]
   });
   const registry = await manageJazzInstrumentPacks(parsedInput, ctx.projectRoot);
   const [registryFile] = await Promise.all([
@@ -3942,7 +4066,7 @@ async function autoRegisterInstalledGeneralMidiPack(ctx: ToolContext, projectId:
   ]);
   return {
     registryPath: registryFile.path,
-    registered: registry.readyPackIds.includes(gmSpec.packId),
+    registered: registry.readyPackIds.includes(spec.packId),
     readyPackIds: registry.readyPackIds,
     reviewRequiredPackIds: registry.reviewRequiredPackIds,
     blockedPackIds: registry.blockedPackIds
@@ -5141,24 +5265,28 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "install_free_soundfont_pack", description: "Install a free commercial-friendly SoundFont pack into project assets with license/readme/source/hash metadata for production_candidate review. v1 supports GeneralUser GS only and does not label it MIT.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, packId: { type: "string", enum: ["generaluser_gs"] }, outputDirectory: { type: "string" } }, required: ["projectId", "packId"], additionalProperties: false } },
+    definition: { name: "install_free_soundfont_pack", description: "Install a free commercial-safe SoundFont into project assets (license/readme/source/hash metadata) and auto-register it for rendering. packIds: generaluser_gs (General MIDI, no attribution required); ydp_grand / salamander_grand (sampled grand pianos, CC-BY 3.0 — commercial use allowed WITH attribution, which is recorded automatically). The sampled grands are bundled-only: place their extracted .sf2+LICENSE under <MUSIC_SOUNDFONT_DIR>/<pack>/ first.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, packId: { type: "string", enum: ["generaluser_gs", "ydp_grand", "salamander_grand"] }, outputDirectory: { type: "string" } }, required: ["projectId", "packId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: installFreeSoundfontPackInputSchema,
     handler: async (input, ctx) => {
       const parsed = installFreeSoundfontPackInputSchema.parse(input);
-      const result = await installGeneralUserGsPack(ctx, parsed);
+      const sampledPack = (sampledPianoPacks as Record<string, typeof sampledPianoPacks[SampledPianoPackId] | undefined>)[parsed.packId];
+      const result = sampledPack ? await installSampledPianoPack(ctx, parsed, sampledPack) : await installGeneralUserGsPack(ctx, parsed);
       // issue_0145: auto-register the installed pack so render tools can use the pack id directly,
       // instead of dead-ending the user at "install succeeded but render doesn't recognize it".
-      const registration = result.ok ? await autoRegisterInstalledGeneralMidiPack(ctx, parsed.projectId, result) : undefined;
+      const registration = result.ok ? await autoRegisterInstalledPack(ctx, parsed.projectId, result) : undefined;
       const artifacts = result.ok ? [...result.assetPaths, result.licenseTextPath, result.readmePath, ...(registration ? [registration.registryPath] : [])] : [];
+      const isGeneralMidi = result.ok && result.instrumentRole === "general_midi";
       const structuredContent = result.ok
         ? {
           ...result,
           autoRegistered: registration?.registered ?? false,
           packRegistryPath: registration?.registryPath,
           readyPackIds: registration?.readyPackIds ?? [],
+          attributionRequired: result.licenseType === "cc_by",
+          attributionText: result.licenseType === "cc_by" ? result.attribution : undefined,
           renderUsage: registration?.registered
-            ? `Pack "${result.packId}" is registered and ready. Render directly with render_midi_with_soundfont or render_production_music using soundfontPackId="${result.packId}" (a general_midi pack covers every instrument role).`
+            ? `Pack "${result.packId}" is registered and ready. Render with soundfontPackId="${result.packId}"${isGeneralMidi ? " (a general_midi pack covers every instrument role)" : " for the realistic_piano role"}.${result.licenseType === "cc_by" ? ` Commercial use is allowed WITH attribution — keep this credit in your delivery: "${result.attribution}".` : ""}`
             : "Auto-registration did not pass production gates; inspect the registry and license sidecar.",
           recommendedNextTool: "render_production_music"
         }
