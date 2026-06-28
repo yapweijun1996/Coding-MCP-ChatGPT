@@ -715,6 +715,31 @@ const keyNamesByFifths: Record<number, string> = {
   7: "C# major"
 };
 
+// Relative minor for each fifths count, so a MusicXML <key> with <mode>minor</mode> imports as the
+// minor key it actually is (e.g. fifths=-1 + minor = D minor, not its relative major F).
+const keyNamesByFifthsMinor: Record<number, string> = {
+  "-7": "Ab minor",
+  "-6": "Eb minor",
+  "-5": "Bb minor",
+  "-4": "F minor",
+  "-3": "C minor",
+  "-2": "G minor",
+  "-1": "D minor",
+  0: "A minor",
+  1: "E minor",
+  2: "B minor",
+  3: "F# minor",
+  4: "C# minor",
+  5: "G# minor",
+  6: "D# minor",
+  7: "A# minor"
+};
+
+function keyNameFromFifths(fifths: number, mode: string | undefined): string | undefined {
+  const table = mode?.toLowerCase() === "minor" ? keyNamesByFifthsMinor : keyNamesByFifths;
+  return table[fifths];
+}
+
 function midiFromMusicXmlPitch(pitch: unknown): number | undefined {
   if (!pitch || typeof pitch !== "object") return undefined;
   const record = pitch as Record<string, unknown>;
@@ -850,8 +875,9 @@ async function importMusicXmlScore(ctx: ToolContext, input: z.infer<typeof impor
       const attributes = measure.attributes as Record<string, unknown> | undefined;
       const nextDivisions = numericValue(attributes?.divisions);
       if (nextDivisions && nextDivisions > 0) divisions = nextDivisions;
-      const fifths = firstNumber((attributes?.key as Record<string, unknown> | undefined)?.fifths);
-      if (fifths !== undefined) key = keyNamesByFifths[fifths] ?? key;
+      const keyNode = attributes?.key as Record<string, unknown> | undefined;
+      const fifths = firstNumber(keyNode?.fifths);
+      if (fifths !== undefined) key = keyNameFromFifths(fifths, textValue(keyNode?.mode)) ?? key;
       for (const direction of asArray(measure.direction as Record<string, unknown> | Record<string, unknown>[] | undefined)) {
         const parsedTempo = directionTempo(direction);
         if (parsedTempo !== undefined) tempo = Math.max(40, Math.min(220, Math.round(parsedTempo)));

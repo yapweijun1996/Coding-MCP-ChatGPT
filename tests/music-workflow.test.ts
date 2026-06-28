@@ -3312,3 +3312,64 @@ test("fluidSynthArgs: render options precede the SoundFont and MIDI positional a
   // SoundFont before MIDI (FluidSynth positional order).
   assert.ok(sfIdx < midIdx, "SoundFont positional precedes the MIDI positional");
 });
+
+// A D-minor score: fifths=-1 with <mode>minor</mode>. Two parts so import is a real piano+cello duet.
+const dMinorDuetMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <work><work-title>Minor Duet</work-title></work>
+  <part-list>
+    <score-part id="P1"><part-name>Piano</part-name><midi-instrument id="P1-I1"><midi-program>1</midi-program></midi-instrument></score-part>
+    <score-part id="P2"><part-name>Violoncello</part-name><midi-instrument id="P2-I1"><midi-program>43</midi-program></midi-instrument></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>2</divisions><key><fifths>-1</fifths><mode>minor</mode></key><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>D</step><octave>3</octave></pitch><duration>4</duration><type>half</type></note>
+      <note><pitch><step>A</step><octave>3</octave></pitch><duration>4</duration><type>half</type></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <attributes><divisions>2</divisions><key><fifths>-1</fifths><mode>minor</mode></key><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>8</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+// Bug fix: a MusicXML <key> with <mode>minor</mode> must import as the minor key, not its relative
+// major (fifths=-1 + minor = D minor, previously mislabeled "F major").
+test("import_musicxml_score honors <mode>minor</mode> (fifths=-1 imports as D minor, not F major)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "musicxml-minor-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Minor key", createdByClientId: "composer" });
+    const importer = getToolModule("import_musicxml_score");
+    const result = await importer!.handler({ projectId: project.id, musicXmlString: dMinorDuetMusicXml, outputManifestPath: "music/minor.json", outputMidiPath: "music/minor.mid" }, ctx);
+    assert.equal(result.ok, true);
+    const payload = result.structuredContent as { key: string; tracks: Record<string, unknown[]> };
+    assert.equal(payload.key, "D minor");
+    assert.ok(payload.tracks.piano && payload.tracks.cello, "both parts import");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Bug fix: import_musicxml_score reads via the project file allowlist, which rejected .xml/.musicxml
+// (the standard MusicXML extensions) — so musicXmlPath was unusable and only musicXmlString worked.
+test("import_musicxml_score reads a score from a .xml project file path (extension allowlist)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "musicxml-ext-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Xml ext", createdByClientId: "composer" });
+    // write_project_file would previously reject .xml; the allowlist now permits it.
+    await writeProjectFile(ctx.projectRoot, project.id, "music/score.xml", dMinorDuetMusicXml);
+    const importer = getToolModule("import_musicxml_score");
+    const result = await importer!.handler({ projectId: project.id, musicXmlPath: "music/score.xml", outputManifestPath: "music/from-xml.json", outputMidiPath: "music/from-xml.mid" }, ctx);
+    assert.equal(result.ok, true, `import from .xml path should succeed: ${JSON.stringify(result.errors)}`);
+    const payload = result.structuredContent as { key: string; scoreSource: { sourcePath: string } };
+    assert.equal(payload.key, "D minor");
+    assert.equal(payload.scoreSource.sourcePath, "music/score.xml");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
