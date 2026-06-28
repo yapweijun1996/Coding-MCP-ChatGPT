@@ -19,7 +19,7 @@ RUN NODE_OPTIONS=--max-old-space-size=2048 npm run build
 FROM mcr.microsoft.com/playwright:v1.61.0-noble AS runtime
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends fluidsynth ffmpeg \
+  && apt-get install -y --no-install-recommends fluidsynth ffmpeg bzip2 \
   && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /app/soundfonts/generaluser-gs \
@@ -59,6 +59,20 @@ async function download(sourcePath, targetName, expectedSha256) {
   }
 })();
 NODE
+
+# Bundle the YDP Grand Piano (sampled Yamaha grand, CC-BY 3.0) so install_free_soundfont_pack
+# packId=ydp_grand resolves from MUSIC_SOUNDFONT_DIR with no per-run download (~118 MB sampled .sf2
+# ships as a bz2 archive Node cannot extract, so it is fetched + extracted here at build time).
+# Salamander (1.27 GB) is intentionally NOT bundled — it stays download-on-demand to keep the image small.
+RUN mkdir -p /app/soundfonts/ydp-grand \
+  && node -e "const fs=require('node:fs');fetch('https://freepats.zenvoid.org/Piano/YDP-GrandPiano/YDP-GrandPiano-SF2-20160804.tar.bz2').then(r=>{if(!r.ok)throw new Error('download '+r.status);return r.arrayBuffer()}).then(b=>fs.writeFileSync('/tmp/ydp.tar.bz2',Buffer.from(b)))" \
+  && tar -xjf /tmp/ydp.tar.bz2 -C /tmp \
+  && SRC=/tmp/YDP-GrandPiano-SF2-20160804 \
+  && echo "8757076aecf80abdad1e8f8f6168370399b06f94481796986e6e75ceca09ad21  $SRC/YDP-GrandPiano-20160804.sf2" | sha256sum -c - \
+  && cp "$SRC/YDP-GrandPiano-20160804.sf2" /app/soundfonts/ydp-grand/YDP-GrandPiano.sf2 \
+  && cp "$SRC/YDP-GrandPiano-20160804.txt" /app/soundfonts/ydp-grand/LICENSE.txt \
+  && cp "$SRC/YDP-GrandPiano-20160804.txt" /app/soundfonts/ydp-grand/README.md \
+  && rm -rf /tmp/ydp.tar.bz2 "$SRC"
 
 ENV NODE_ENV=production \
     PORT=6859 \

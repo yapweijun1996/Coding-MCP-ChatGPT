@@ -3416,3 +3416,62 @@ test("validateProject warns (not errors) on an oversized instrument SoundFont as
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// option: install_free_soundfont_pack now installs bundled sampled grand pianos (YDP / Salamander)
+// straight from MUSIC_SOUNDFONT_DIR and auto-registers them as realistic_piano with CC-BY attribution
+// recorded automatically (so business delivery is legal with zero manual credit work).
+test("install_free_soundfont_pack installs a bundled sampled grand (YDP) with auto CC-BY attribution", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-ydp-install-"));
+  const oldSoundfontDir = process.env.MUSIC_SOUNDFONT_DIR;
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "YDP install", createdByClientId: "producer" });
+    // Bundle a fake YDP under MUSIC_SOUNDFONT_DIR/ydp-grand/ (valid RIFF/sfbk so it passes validation).
+    const bundleDir = path.join(root, "soundfonts", "ydp-grand");
+    await mkdir(bundleDir, { recursive: true });
+    await writeFile(path.join(bundleDir, "YDP-GrandPiano.sf2"), fakeSoundfontBytes());
+    await writeFile(path.join(bundleDir, "LICENSE.txt"), "YDP Grand Piano — Creative Commons Attribution 3.0\n");
+    await writeFile(path.join(bundleDir, "README.md"), "# YDP Grand Piano fixture\n");
+    process.env.MUSIC_SOUNDFONT_DIR = path.join(root, "soundfonts");
+
+    const installer = getToolModule("install_free_soundfont_pack");
+    assert.ok(installer);
+    const result = await installer!.handler({ projectId: project.id, packId: "ydp_grand" }, ctx);
+    assert.equal(result.ok, true, `install should succeed: ${JSON.stringify(result.errors)}`);
+    const payload = result.structuredContent as { instrumentRole: string; licenseType: string; autoRegistered: boolean; readyPackIds: string[]; attributionRequired: boolean; attributionText?: string; assetPaths: string[]; installSource: string };
+    assert.equal(payload.instrumentRole, "realistic_piano");
+    assert.equal(payload.licenseType, "cc_by");
+    assert.equal(payload.installSource, "bundled_runtime_soundfont");
+    assert.equal(payload.autoRegistered, true, "sampled grand must auto-register so render can use it directly");
+    assert.ok(payload.readyPackIds.includes("ydp_grand"));
+    assert.equal(payload.attributionRequired, true, "CC-BY requires attribution");
+    assert.match(payload.attributionText ?? "", /YDP Grand Piano.*CC-BY 3\.0/);
+    assert.deepEqual(payload.assetPaths, ["soundfonts/ydp-grand/YDP-GrandPiano.sf2"]);
+    // The license manifest must carry the attribution automatically (legal commercial delivery).
+    const licenseManifest = await readProjectFile(ctx.projectRoot, project.id, "music/jazz-instrument-license-manifest.json", 1024 * 1024);
+    assert.match(licenseManifest, /allowed_with_attribution/);
+    assert.match(licenseManifest, /YDP Grand Piano/);
+  } finally {
+    if (oldSoundfontDir === undefined) delete process.env.MUSIC_SOUNDFONT_DIR; else process.env.MUSIC_SOUNDFONT_DIR = oldSoundfontDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Bundled-only: when the sampled grand is not present in the runtime soundfont directory, install
+// fails closed with download/extract guidance rather than silently producing nothing.
+test("install_free_soundfont_pack fails closed for a sampled grand that is not bundled", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-ydp-missing-"));
+  const oldSoundfontDir = process.env.MUSIC_SOUNDFONT_DIR;
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "YDP missing", createdByClientId: "producer" });
+    process.env.MUSIC_SOUNDFONT_DIR = path.join(root, "empty-soundfonts");
+    const installer = getToolModule("install_free_soundfont_pack");
+    const result = await installer!.handler({ projectId: project.id, packId: "salamander_grand" }, ctx);
+    assert.equal(result.ok, false);
+    assert.match(JSON.stringify(result.errors), /not bundled|MUSIC_SOUNDFONT_DIR/);
+  } finally {
+    if (oldSoundfontDir === undefined) delete process.env.MUSIC_SOUNDFONT_DIR; else process.env.MUSIC_SOUNDFONT_DIR = oldSoundfontDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
