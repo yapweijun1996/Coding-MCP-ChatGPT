@@ -1,16 +1,21 @@
 # Coding MCP ChatGPT
 
-轻量 MCP（Model Context Protocol）服务工程骨架，用于将自建工具服务通过 ChatGPT 连接器（开发者模式）接入到 ChatGPT（含写操作能力），并通过 `gmb01.xyz`/`/mcp` 对外暴露；通过预览页面返回结果链接，支持“编码 -> 验证 -> 可访问产物链接”闭环。
+一个**已落地实现**的 MCP（Model Context Protocol）HTTP 服务（TypeScript + Express，入口
+[`src/server.ts`](src/server.ts)）。它把一组受控工具（项目交付、研究、音乐生成、浏览器 QA、
+Git 等）通过 ChatGPT 连接器（开发者模式 / OAuth）暴露给 ChatGPT，并经 `gmb01.xyz`/`/mcp`
+对外提供；工具在服务端做真实副作用（创建持久化项目、构建并发布静态站点、渲染音乐），通过预览/
+分享页返回可访问产物链接，支持“编码 -> 验证 -> 可访问产物链接”闭环。
 
-本仓库当前主要用于：
+核心能力：
 
-- 设计可落地的 MCP 工具服务结构
-- 记录 ChatGPT MCP 接入规范与安全边界
-- 规范 Cloudflare Tunnel 暴露与部署流程
-- 提供可执行的文档与操作手册模板
-- 提供 MIT-safe 的浏览器端视频演示导出：MCP 生成可发布 HTML 预览页，用户在浏览器中通过 WebCodecs 导出 MP4；默认核心不打包服务端视频渲染器或媒体编码二进制。
+- 持久化 **Project** 工具链：创建/写入/校验/发布静态站点，产出 `https://gmb01.xyz/share/{projectId}/index.html`
+- 研究工作区、音乐合成与渲染、浏览器 QA / 抓取重建、SEO/Blog 内容生成
+- ChatGPT MCP 接入规范与安全边界（OAuth + PKCE + DCR、两层工具访问门、路径白名单、SSRF 防护）
+- Cloudflare Tunnel 暴露与 Docker Compose 部署
+- MIT-safe 的浏览器端视频演示导出：MCP 生成可发布 HTML 预览页，用户在浏览器中通过 WebCodecs 导出 MP4；默认核心不打包服务端视频渲染器或媒体编码二进制。
 
-> 项目是“文档优先 + 代码可插拔”的形态，当前提供标准化文档框架与实践约定，便于后续填充具体实现代码。
+> **新接手的工程师从这里开始读 → [`docs/handover.md`](docs/handover.md)**（系统心智模型、代码地图、
+> 本地开发与测试、部署、约定与避坑）。下面的章节是面向接入/运维的参考。
 
 ## 许可证
 
@@ -81,24 +86,46 @@ curl -sS http://127.0.0.1:6859/health
 - 结果页链接只返回任务摘要与白名单资源路径
 - 云端（Cloudflare）与本地服务应做到职责分离：Cloudflare 负责 ingress 与流量防护，应用负责业务鉴权
 
-## 目录结构（建议）
+## 目录结构
 
 ```text
 .
-├── README.md
-├── docs/
-│   ├── README.md
-│   ├── architecture.md
-│   ├── setup.md
-│   ├── mcp.md
-│   ├── chatgpt.md
-│   ├── cloudflare.md
-│   ├── operations.md
-│   └── troubleshooting.md
-└── (source code...)
+├── README.md                 # 本文件（接入/运维参考）
+├── Dockerfile, docker-compose.yml
+├── package.json              # npm scripts: dev / build / test / typecheck / check:mcp / docker:*
+├── docs/                     # 工程文档（见下方索引）
+├── scripts/                  # check-mcp-registry.mjs 等校验脚本
+├── tests/                    # node:test 测试（tsx --test tests/*.test.ts）
+├── admin-ui/                 # React Admin 运维控制台前端
+└── src/
+    ├── server.ts             # 入口：Express bootstrap + 路由挂载
+    ├── mcp/                  # MCP 核心：registry / router / result / types / tools/
+    ├── projects/             # 持久化 Project store（核心交付路径）
+    ├── research/             # 研究工作区
+    ├── blog/ · site/         # 内容 / SEO / 落地页
+    ├── web-capture/          # Playwright 抓取 / 重建 / 浏览器审计
+    ├── oauth.ts              # OAuth / OIDC / PKCE / DCR
+    ├── skills/ · tool-state.ts · special-tools.ts  # 两层工具访问门
+    ├── security/             # 路径白名单 / SSRF / origin 隔离
+    └── jobs/ · activity.ts · admin*.ts · telemetry/
 ```
 
-> 当前仓库以文档为主，源码可按上述结构放置或映射到你的现有实现。
+> 完整的模块逐项说明见 [`docs/code-map.md`](docs/code-map.md)。
+
+### 工程文档索引（开发者）
+
+| 文档 | 内容 |
+|---|---|
+| [docs/handover.md](docs/handover.md) | **新人入门主文档**：心智模型、代码地图、开发/测试、部署、约定与避坑 |
+| [docs/code-map.md](docs/code-map.md) | `src/` 逐模块说明 |
+| [docs/request-lifecycle.md](docs/request-lifecycle.md) | 一次 `tools/call` 的完整链路（鉴权 → 访问门 → handler → 结果） |
+| [docs/adding-a-tool.md](docs/adding-a-tool.md) | 新增 MCP 工具的分步指南 |
+| [docs/mcp-tools.md](docs/mcp-tools.md) | 工具目录 + 默认访问规则 |
+| [docs/music-workflow.md](docs/music-workflow.md) | 音乐子系统开发者深潜（最复杂子系统范例） |
+| [docs/architecture.md](docs/architecture.md) · [docs/mcp.md](docs/mcp.md) | 架构与边界 / MCP 协议约定 |
+| [docs/project-management.md](docs/project-management.md) · [docs/research-workflow.md](docs/research-workflow.md) | Project / Research 工作流 |
+| [docs/setup.md](docs/setup.md) · [docs/docker.md](docs/docker.md) · [docs/operations.md](docs/operations.md) · [docs/cloudflare.md](docs/cloudflare.md) | 运行 / 容器 / 运维 / 暴露 |
+| [docs/security-origin-isolation.md](docs/security-origin-isolation.md) · [docs/troubleshooting.md](docs/troubleshooting.md) | 安全 / 故障排查 |
 
 ## 配置说明
 
