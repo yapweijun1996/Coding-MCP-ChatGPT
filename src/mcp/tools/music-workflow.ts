@@ -190,6 +190,11 @@ const renderMidiWithSoundfontInputSchema = z.object({
   // Opt-in loudness normalization (ffmpeg loudnorm). FluidSynth's default gain renders quiet; enable
   // for review-ready levels without using the full render_production_music mastering chain.
   normalize: z.boolean().optional().default(false),
+  // Auto-author bow-pressure (CC11) swells + vibrato (CC1) into monophonic bowed-string lines so
+  // sustained cello/violin/strings notes breathe instead of sitting flat. Only applies on the
+  // compositionManifestPath path (externally supplied midiPath files render as-is). Default on;
+  // set false to render strings exactly as written.
+  expressiveStrings: z.boolean().optional().default(true),
   sampleRate: z.number().int().min(8000).max(96000).optional().default(44100),
   outputAudioPath: z.string().min(1).max(240).optional().default("music/rendered-soundfont.wav"),
   outputStemDirectory: z.string().min(1).max(200).optional().default("music/soundfont-stems"),
@@ -1280,7 +1285,64 @@ function varLen(value: number) {
   return bytes;
 }
 
-function midiBuffer(composition: Composition, options: { channelMap?: Record<string, number>; programMap?: Record<string, number> } = {}) {
+// Bowed strings are the family that "breathes": a real bow swells inside a sustained note, where a
+// raw MIDI note sits at one flat level — the #1 giveaway of synthetic strings. Pizzicato/harp/
+// ensemble-pad timbres are excluded by only matching these three canonical instruments.
+const bowedStringInstruments = new Set<CanonicalInstrument>(["violin", "cello", "strings"]);
+
+// Author bow-pressure (CC11 expression) swells and a gentle vibrato (CC1) ramp into a MONOPHONIC
+// bowed-string line so sustained notes breathe. Purely additive: it never moves, retimes, or
+// repitches a note — only emits per-note controller curves on the track's channel.
+//
+// Monophony guard: CC11/CC1 are per-CHANNEL, but these curves are per-NOTE. On a chordal/divisi
+// track (e.g. a `strings` ensemble or a cello double-stop) overlapping per-note curves would stomp
+// each other — note A's decrescendo tail would crush note B's attack. So if ANY note overlaps the
+// previous one, the whole track is left flat (no regression vs. today). Deterministic (no RNG).
+function bowedStringExpressionEvents(
+  channel: number,
+  notes: Array<z.infer<typeof noteSchema>>,
+  ppq: number
+): Array<{ tick: number; bytes: number[] }> {
+  if (notes.length === 0) return [];
+  const ordered = [...notes].sort((a, b) => a.startBeat - b.startBeat);
+  for (let i = 1; i < ordered.length; i++) {
+    if (ordered[i].startBeat < ordered[i - 1].startBeat + ordered[i - 1].durationBeats - 1e-6) return [];
+  }
+  const events: Array<{ tick: number; bytes: number[] }> = [];
+  const EXPRESSION = 11;
+  const MODWHEEL = 1;
+  const minSwellBeats = 0.75;   // shorter notes read as detache strokes — no swell
+  const minVibratoBeats = 1.2;  // vibrato only once a note has time to settle
+  for (const note of ordered) {
+    if (note.durationBeats < minSwellBeats) continue;
+    const startTick = Math.round(note.startBeat * ppq);
+    const durTicks = Math.max(1, Math.round(note.durationBeats * ppq));
+    const steps = Math.max(4, Math.round(note.durationBeats / 0.25));
+    // Asymmetric hump: soft bow attack at `floor`, swell to a velocity-scaled `peak` at 60% of the
+    // note, then ease back toward `tail`. Each note authors its own floor at its onset, so there is
+    // no cross-note "reset" event to fight insertion order.
+    const floor = 58;
+    const peak = Math.max(96, Math.min(122, Math.round(90 + (note.velocity - 60) * 0.6)));
+    const tail = 90;
+    for (let s = 0; s <= steps; s++) {
+      const frac = s / steps;
+      const value = frac <= 0.6 ? floor + (peak - floor) * (frac / 0.6) : peak - (peak - tail) * ((frac - 0.6) / 0.4);
+      const tick = s === 0 ? Math.max(0, startTick - 2) : startTick + Math.round(frac * durTicks);
+      events.push({ tick, bytes: [0xb0 + channel, EXPRESSION, Math.max(1, Math.min(127, Math.round(value)))] });
+    }
+    if (note.durationBeats >= minVibratoBeats) {
+      for (let s = 0; s <= steps; s++) {
+        const frac = s / steps;
+        const vib = frac < 0.25 ? 0 : Math.round(Math.min(44, ((frac - 0.25) / 0.75) * 44));
+        events.push({ tick: startTick + Math.round(frac * durTicks), bytes: [0xb0 + channel, MODWHEEL, vib] });
+      }
+    }
+  }
+  return events;
+}
+
+export function midiBuffer(composition: Composition, options: { channelMap?: Record<string, number>; programMap?: Record<string, number>; expressiveStrings?: boolean } = {}) {
+  const expressiveStrings = options.expressiveStrings ?? true;
   const ppq = 480;
   const events: Array<{ tick: number; bytes: number[] }> = [];
   const pushText = (type: number, text: string) => events.push({ tick: 0, bytes: [0xff, type, ...varLen(Buffer.byteLength(text)), ...Buffer.from(text, "utf8")] });
@@ -1331,6 +1393,32 @@ function midiBuffer(composition: Composition, options: { channelMap?: Record<str
       const end = Math.round((note.startBeat + note.durationBeats) * ppq);
       events.push({ tick: start, bytes: [0x90 + channel, note.midi, note.velocity] });
       events.push({ tick: end, bytes: [0x80 + channel, note.midi, 0] });
+    }
+  }
+  // Auto-author bow expression for monophonic bowed-string lines so sustained notes breathe.
+  // This is done at CHANNEL granularity, not per-track, because CC11/CC1 are per-channel and the
+  // catalog routes several string parts onto one shared channel (violin+viola -> ch4, cello+cello_2
+  // -> ch5, a quartet -> two channels). Authoring per-track would let two individually-monophonic
+  // lines on the same channel interleave their curves and pump each other's level — worse than flat.
+  // So we merge every track's notes by resolved channel and only author when (a) every track on that
+  // channel is a bowed string and (b) the merged line is monophonic (the guard inside
+  // bowedStringExpressionEvents). A string section/quartet (overlapping merge) stays flat = no
+  // regression.
+  if (expressiveStrings) {
+    const byChannel = new Map<number, { notes: Array<z.infer<typeof noteSchema>>; allBowed: boolean }>();
+    for (const [track, notes] of Object.entries(composition.tracks)) {
+      const channel = channelFor(track);
+      if (channel === 9) continue; // percussion
+      const instrument = resolvedInstrumentFor(track);
+      const bowed = Boolean(instrument && bowedStringInstruments.has(instrument));
+      const entry = byChannel.get(channel) ?? { notes: [], allBowed: true };
+      entry.notes.push(...notes);
+      entry.allBowed = entry.allBowed && bowed;
+      byChannel.set(channel, entry);
+    }
+    for (const [channel, entry] of byChannel) {
+      if (!entry.allBowed || entry.notes.length === 0) continue;
+      for (const event of bowedStringExpressionEvents(channel, entry.notes, ppq)) events.push(event);
     }
   }
   events.sort((a, b) => a.tick - b.tick);
@@ -5323,7 +5411,7 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "render_midi_with_soundfont", description: "Render a MIDI/composition manifest through a registered ready .sf2/.sf3 SoundFont or .sfz instrument pack, producing production_candidate WAV, optional stems, and a renderer/license report. .sf2/.sf3 uses FluidSynth; .sfz uses sfizz_render when installed.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, stems: { type: "boolean" }, normalize: { type: "boolean" }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "render_midi_with_soundfont", description: "Render a MIDI/composition manifest through a registered ready .sf2/.sf3 SoundFont or .sfz instrument pack, producing production_candidate WAV, optional stems, and a renderer/license report. .sf2/.sf3 uses FluidSynth; .sfz uses sfizz_render when installed.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, stems: { type: "boolean" }, normalize: { type: "boolean" }, expressiveStrings: { type: "boolean", description: "Auto-author CC11 bow swells + CC1 vibrato into monophonic cello/violin/strings lines (compositionManifestPath path only). Default true." }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: renderMidiWithSoundfontInputSchema,
     handler: async (input, ctx) => {
@@ -5374,7 +5462,7 @@ export const musicWorkflowTools: ToolModule[] = [
 	        const tempDir = path.join(ctx.artifactRoot, `music-render-${parsed.projectId}-${Date.now()}`);
 	        await mkdir(tempDir, { recursive: true });
 	        midiAbsolutePath = path.join(tempDir, "full.mid");
-	        await writeFile(midiAbsolutePath, midiBuffer(composition!, { channelMap: parsed.channelMap, programMap: parsed.programMap }));
+	        await writeFile(midiAbsolutePath, midiBuffer(composition!, { channelMap: parsed.channelMap, programMap: parsed.programMap, expressiveStrings: parsed.expressiveStrings }));
 	        temporaryFiles.push(tempDir);
       } else {
         midiAbsolutePath = await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, parsed.midiPath!);
@@ -5400,7 +5488,7 @@ export const musicWorkflowTools: ToolModule[] = [
           for (const track of Object.keys(composition.tracks)) {
             const stemMidiPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.mid`);
             const stemWavPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.wav`);
-            await writeFile(stemMidiPath, midiBuffer(compositionWithSingleTrack(composition!, track), { channelMap: parsed.channelMap, programMap: parsed.programMap }));
+            await writeFile(stemMidiPath, midiBuffer(compositionWithSingleTrack(composition!, track), { channelMap: parsed.channelMap, programMap: parsed.programMap, expressiveStrings: parsed.expressiveStrings }));
             const rawStemWav = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, stemMidiPath, stemWavPath, parsed.sampleRate, ctx.commandTimeoutMs);
             // Validate the RAW stem (pre-normalize): loudnorm would otherwise amplify a near-silent
             // stem's noise floor and let a missing instrument pass the silence guard.
