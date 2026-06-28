@@ -293,8 +293,11 @@ const metadataFilename = "project.json";
 const filesDirectoryName = "files";
 const workspaceDirectoryName = "workspace";
 const maxTaskHistoryItems = 100;
-const allowedTextExtensions = new Set([".html", ".css", ".js", ".mjs", ".json", ".webmanifest", ".txt", ".md", ".csv", ".svg"]);
+const allowedTextExtensions = new Set([".html", ".css", ".js", ".mjs", ".json", ".webmanifest", ".txt", ".md", ".csv", ".svg", ".xml", ".musicxml"]);
 const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".sf3", ".mp4", ".webm", ".mov", ".pptx", ".zip"]);
+// SoundFont / SFZ instrument packs are render inputs (a sampled grand piano can be 100MB-1GB+), not
+// web-served deliverables. They are exempt from the publish max-size gate (warned, not blocked).
+const instrumentSourceAssetExtensions = new Set([".sf2", ".sf3", ".sfz"]);
 const mediaAssetExtensions = new Set([".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".sf3", ".mp4", ".webm", ".mov"]);
 const projectContentTypes = new Map([
   [".html", "text/html"],
@@ -1578,7 +1581,15 @@ export async function validateProject(projectRoot: string, projectId: string, en
     const extension = path.extname(file.path).toLowerCase();
     const maxBytes = maxProjectAssetBytesForExtension(extension);
     if (file.size > maxBytes) {
-      errors.push(`File exceeds max size: ${file.path}`);
+      // Instrument source assets (SoundFont/SFZ) are render inputs, not web deliverables — a sampled
+      // grand piano is legitimately 100MB-1GB+. publishProject does not copy/serve them (pages
+      // reference the rendered WAV/MP3), so an oversized instrument pack must not block publishing.
+      // Warn instead of erroring so the render-source pack can stay in the project.
+      if (instrumentSourceAssetExtensions.has(extension)) {
+        warnings.push(`Instrument source asset is large and will not be served to visitors (render input only): ${file.path}`);
+      } else {
+        errors.push(`File exceeds max size: ${file.path}`);
+      }
     }
     if (isProjectTextFilePath(file.path) && file.size <= maxProjectFileBytes) {
       try {

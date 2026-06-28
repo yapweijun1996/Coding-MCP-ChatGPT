@@ -187,6 +187,9 @@ const renderMidiWithSoundfontInputSchema = z.object({
   channelMap: z.record(z.number().int().min(0).max(15)).optional().default({}),
   programMap: z.record(z.number().int().min(1).max(128)).optional().default({}),
   stems: z.boolean().optional().default(false),
+  // Opt-in loudness normalization (ffmpeg loudnorm). FluidSynth's default gain renders quiet; enable
+  // for review-ready levels without using the full render_production_music mastering chain.
+  normalize: z.boolean().optional().default(false),
   sampleRate: z.number().int().min(8000).max(96000).optional().default(44100),
   outputAudioPath: z.string().min(1).max(240).optional().default("music/rendered-soundfont.wav"),
   outputStemDirectory: z.string().min(1).max(200).optional().default("music/soundfont-stems"),
@@ -200,7 +203,7 @@ const renderMidiWithSoundfontInputSchema = z.object({
 const checkMusicRenderEnvironmentInputSchema = z.object({
   projectId: z.string().min(8).max(80).optional(),
   includeLocalMusicPacks: z.boolean().optional().default(true),
-  projectSearchDirectories: z.array(z.string().min(1).max(200)).max(20).optional().default(["soundfonts", "instruments", "music"])
+  projectSearchDirectories: z.array(z.string().min(1).max(200)).max(20).optional().default(["soundfonts", "instruments", "music", "assets/soundfonts", "assets"])
 });
 
 const renderProductionMusicInputSchema = z.object({
@@ -248,7 +251,10 @@ const installFreeSoundfontPackInputSchema = z.object({
 const discoverSoundfontPacksInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   includeLocalMusicPacks: z.boolean().optional().default(true),
-  projectSearchDirectories: z.array(z.string().min(1).max(200)).max(20).optional().default(["soundfonts", "instruments", "music"])
+  // issue_0146: include assets/soundfonts so a SoundFont installed under the project's assets tree
+  // (install_free_soundfont_pack is frequently pointed there) is discoverable for self-heal
+  // auto-registration, not just the bare soundfonts/ root.
+  projectSearchDirectories: z.array(z.string().min(1).max(200)).max(20).optional().default(["soundfonts", "instruments", "music", "assets/soundfonts", "assets"])
 });
 
 const generateJazzHarmonyInputSchema = z.object({
@@ -709,6 +715,31 @@ const keyNamesByFifths: Record<number, string> = {
   7: "C# major"
 };
 
+// Relative minor for each fifths count, so a MusicXML <key> with <mode>minor</mode> imports as the
+// minor key it actually is (e.g. fifths=-1 + minor = D minor, not its relative major F).
+const keyNamesByFifthsMinor: Record<number, string> = {
+  "-7": "Ab minor",
+  "-6": "Eb minor",
+  "-5": "Bb minor",
+  "-4": "F minor",
+  "-3": "C minor",
+  "-2": "G minor",
+  "-1": "D minor",
+  0: "A minor",
+  1: "E minor",
+  2: "B minor",
+  3: "F# minor",
+  4: "C# minor",
+  5: "G# minor",
+  6: "D# minor",
+  7: "A# minor"
+};
+
+function keyNameFromFifths(fifths: number, mode: string | undefined): string | undefined {
+  const table = mode?.toLowerCase() === "minor" ? keyNamesByFifthsMinor : keyNamesByFifths;
+  return table[fifths];
+}
+
 function midiFromMusicXmlPitch(pitch: unknown): number | undefined {
   if (!pitch || typeof pitch !== "object") return undefined;
   const record = pitch as Record<string, unknown>;
@@ -844,8 +875,9 @@ async function importMusicXmlScore(ctx: ToolContext, input: z.infer<typeof impor
       const attributes = measure.attributes as Record<string, unknown> | undefined;
       const nextDivisions = numericValue(attributes?.divisions);
       if (nextDivisions && nextDivisions > 0) divisions = nextDivisions;
-      const fifths = firstNumber((attributes?.key as Record<string, unknown> | undefined)?.fifths);
-      if (fifths !== undefined) key = keyNamesByFifths[fifths] ?? key;
+      const keyNode = attributes?.key as Record<string, unknown> | undefined;
+      const fifths = firstNumber(keyNode?.fifths);
+      if (fifths !== undefined) key = keyNameFromFifths(fifths, textValue(keyNode?.mode)) ?? key;
       for (const direction of asArray(measure.direction as Record<string, unknown> | Record<string, unknown>[] | undefined)) {
         const parsedTempo = directionTempo(direction);
         if (parsedTempo !== undefined) tempo = Math.max(40, Math.min(220, Math.round(parsedTempo)));
@@ -1553,6 +1585,64 @@ function analyzeEnsemble(
     longestSingleInstrumentSpan: longest,
     failures,
     warnings
+  };
+}
+
+export type EnsembleQaTrack = {
+  instrument: string;
+  matchedTracks: string[];
+  channel: number | null;
+  gmProgram: number | null;
+  noteCount: number;
+  firstBeat: number | null;
+  firstSeconds: number | null;
+  lastBeat: number | null;
+};
+
+export type EnsembleQa = {
+  instrumentsRequested: string[];
+  instrumentsFound: string[];
+  missingInstruments: string[];
+  missingInstrumentWarnings: string[];
+  overlap: EnsembleReport["overlap"];
+  overlapFromBeat0: boolean;
+  tracks: EnsembleQaTrack[];
+};
+
+// issue_0147: always-on ensemble QA. Unlike analyzeEnsemble (the opt-in fail-closed GATE), this is a
+// non-blocking transparency report so compose/render outputs can ALWAYS prove which requested
+// instruments carry notes, their channel/program mapping, first-note time, and whether they actually
+// overlap — instead of the user having to infer a "fake duet" from a missing stem. Reuses
+// analyzeEnsemble for the note-level math; adds the channel/program mapping the renderer emits.
+export function buildEnsembleQa(composition: Composition, requestedInstruments: string[]): EnsembleQa {
+  const requested = (requestedInstruments.length ? requestedInstruments : composition.instruments).filter(Boolean);
+  const report = analyzeEnsemble(composition, { requiredInstruments: requested });
+  const tracks: EnsembleQaTrack[] = report.tracks.map((stat) => {
+    const canon = canonicalInstrumentFromName(stat.instrument) ?? canonicalInstrumentFromTrackKey(stat.instrument);
+    const catalog = canon ? instrumentCatalog[canon] : undefined;
+    return {
+      instrument: stat.instrument,
+      matchedTracks: stat.matchedTracks,
+      channel: catalog?.channel ?? null,
+      gmProgram: catalog?.gmProgram ?? null,
+      noteCount: stat.noteCount,
+      firstBeat: stat.firstNoteBeat,
+      firstSeconds: stat.firstNoteSeconds,
+      lastBeat: stat.lastNoteEndBeat
+    };
+  });
+  const instrumentsFound = report.tracks.filter((stat) => stat.noteCount > 0).map((stat) => stat.instrument);
+  const missingInstruments = report.tracks.filter((stat) => stat.noteCount === 0).map((stat) => stat.instrument);
+  return {
+    instrumentsRequested: requested,
+    instrumentsFound,
+    missingInstruments,
+    missingInstrumentWarnings: missingInstruments.map((instrument) => `Requested instrument "${instrument}" has no notes in the composition; it will be silent/absent in the render.`),
+    overlap: report.overlap,
+    // "Both voices sound together from the top": a simultaneity window exists and opens within the
+    // first half-second (≈ downbeat), not a late sequential entry.
+    overlapFromBeat0: report.overlap !== null && report.overlap.startSeconds < 0.5,
+    tracks
   };
 }
 
@@ -3065,12 +3155,54 @@ export function selectAutoRegistrablePacks(
   return selected;
 }
 
-async function readJazzPackRegistry(ctx: ToolContext, projectId: string): Promise<{ packs?: JazzPackRecord[]; readyPackIds?: string[] } | undefined> {
+// SSOT for the instrument-pack registry filename. manage_jazz_instrument_packs writes here by
+// default and render tools read here first.
+const DEFAULT_JAZZ_PACK_REGISTRY_PATH = "music/jazz-instrument-packs.json";
+
+// Pure: from the relative file paths under the project, return the ordered registry files to try.
+// The default path is always tried first; then any other *instrument-packs*.json the agent may have
+// written under a non-default name. This is the read-side fix for issue_0146: manage_*'s outputPath
+// was a free parameter while the render read path was a hardcoded constant, so an agent that wrote
+// the registry as music/instrument-packs.json got a misleading "no registered pack". License
+// manifests (…license…json) are never registry files.
+export function pickJazzPackRegistryCandidatePaths(relativePaths: string[]): string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const push = (candidate: string) => {
+    if (candidate && !seen.has(candidate)) { seen.add(candidate); ordered.push(candidate); }
+  };
+  push(DEFAULT_JAZZ_PACK_REGISTRY_PATH);
+  const isRegistryName = (candidate: string) =>
+    /(^|\/)[a-z0-9._-]*instrument-packs[a-z0-9._-]*\.json$/i.test(candidate) && !/license/i.test(candidate);
+  for (const candidate of relativePaths.filter(isRegistryName).sort()) push(candidate);
+  return ordered;
+}
+
+type JazzPackRegistry = { packs?: JazzPackRecord[]; readyPackIds?: string[]; registryPath?: string; searchedPaths: string[] };
+
+async function readJazzPackRegistry(ctx: ToolContext, projectId: string): Promise<JazzPackRegistry> {
+  const projectFilesRoot = getProjectFilesDirectory(ctx.projectRoot, projectId);
+  let relativePaths: string[] = [];
   try {
-    return JSON.parse(await readProjectFile(ctx.projectRoot, projectId, "music/jazz-instrument-packs.json", 2 * 1024 * 1024));
+    const files = await listFilesRecursive(projectFilesRoot);
+    relativePaths = files
+      .map((file) => relativeProjectAssetPath(projectFilesRoot, file))
+      .filter((relativePath): relativePath is string => Boolean(relativePath) && /\.json$/i.test(relativePath!));
   } catch {
-    return undefined;
+    // fall back to the default path only
   }
+  const candidates = pickJazzPackRegistryCandidatePaths(relativePaths);
+  const searchedPaths: string[] = [];
+  for (const candidate of candidates) {
+    searchedPaths.push(candidate);
+    try {
+      const parsed = JSON.parse(await readProjectFile(ctx.projectRoot, projectId, candidate, 2 * 1024 * 1024));
+      if (parsed && Array.isArray(parsed.packs)) return { ...parsed, registryPath: candidate, searchedPaths };
+    } catch {
+      // try the next candidate registry file
+    }
+  }
+  return { searchedPaths };
 }
 
 function findRegisteredPack(registry: { packs?: JazzPackRecord[] } | undefined, parsed: z.infer<typeof renderMidiWithSoundfontInputSchema>): JazzPackRecord | undefined {
@@ -3125,7 +3257,7 @@ async function resolveProductionSoundfont(ctx: ToolContext, parsed: z.infer<type
 
   // Only self-heal when no registry exists yet — never clobber a populated registry, where a
   // miss means "no pack matches this request" and the right answer is remediation, not rewrite.
-  if (!registry?.packs?.length) {
+  if (!registry.packs?.length) {
     const auto = await autoRegisterDiscoveredProductionPacks(ctx, parsed);
     if (auto.registered) {
       const refreshed = await readJazzPackRegistry(ctx, parsed.projectId);
@@ -3133,7 +3265,19 @@ async function resolveProductionSoundfont(ctx: ToolContext, parsed: z.infer<type
       blockers = productionRenderBlockersForPack(pack, parsed.soundfontPath);
       if (!blockers.length && pack) return buildResolvedSoundfont(ctx, parsed, pack);
     }
-    return { ok: false as const, blockers: [...blockers, ...auto.remediation], pack };
+    // issue_0146: the old failure was a bare "No registered ready instrument pack matches…", which
+    // hid the real cause (registry written under a name/dir the reader never checked). State exactly
+    // which registry files and which directories were searched so the agent can self-correct.
+    const searchDirs = discoverSoundfontPacksInputSchema.parse({ projectId: parsed.projectId }).projectSearchDirectories;
+    const checked = registry.searchedPaths.length ? registry.searchedPaths.join(", ") : DEFAULT_JAZZ_PACK_REGISTRY_PATH;
+    const diagnostic = `No instrument-pack registry with ready packs was found. Registry files checked: ${checked}. Directories scanned for an installable .sf2/.sfz: ${searchDirs.join(", ")}. Fix: register the pack with manage_jazz_instrument_packs (any music/*instrument-packs*.json is now read back automatically), or place the SoundFont under one of the scanned directories, then re-run.`;
+    return { ok: false as const, blockers: [diagnostic, ...auto.remediation], pack };
+  }
+  // Registry exists but the requested pack id/path did not resolve to a ready pack. Surface the
+  // registry path and what it actually contains instead of a generic "not registered".
+  if (!pack) {
+    const available = registry.packs.map((candidate) => `${candidate.packId} (${candidate.status})`).join(", ") || "none";
+    return { ok: false as const, blockers: [`No registered ready instrument pack matches soundfontPackId=${parsed.soundfontPackId ?? "—"} / soundfontPath=${parsed.soundfontPath ?? "—"}. Registry ${registry.registryPath ?? DEFAULT_JAZZ_PACK_REGISTRY_PATH} contains: ${available}. Pass soundfontPackId for one of these (a general_midi pack covers every role), or register the intended pack.`], pack };
   }
   return { ok: false as const, blockers, pack };
 }
@@ -3227,10 +3371,28 @@ async function writeSoundfontRenderFailure(ctx: ToolContext, parsed: z.infer<typ
   };
 }
 
+// FluidSynth 2.x parses every argument after the first positional (SoundFont) file as another input
+// file, so trailing -F/-r options raise "illegal option at this place" and no WAV is written. Options
+// MUST precede the positional SoundFont + MIDI paths. Kept pure + exported so a regression test can
+// assert the ordering without a fluidsynth binary.
+export function fluidSynthArgs(soundfontPath: string, midiPath: string, outputPath: string, sampleRate: number): string[] {
+  return ["-ni", "-F", outputPath, "-r", String(sampleRate), soundfontPath, midiPath];
+}
+
 async function fluidSynthRender(soundfontPath: string, midiPath: string, outputPath: string, sampleRate: number, timeout: number) {
-  await execFileAsync("fluidsynth", ["-ni", soundfontPath, midiPath, "-F", outputPath, "-r", String(sampleRate)], { timeout, maxBuffer: 1024 * 1024 });
+  await execFileAsync("fluidsynth", fluidSynthArgs(soundfontPath, midiPath, outputPath, sampleRate), { timeout, maxBuffer: 1024 * 1024 });
   const output = await readFile(outputPath);
   assertPcmWav(output, "FluidSynth output");
+  return output;
+}
+
+// Opt-in loudness normalization for review-friendly levels. FluidSynth's default gain renders well
+// below 0 dBFS, so a raw render can sound very quiet; render_production_music masters, but the
+// single-pack render path does not. ffmpeg loudnorm targets a consistent level without clipping.
+async function normalizeWavWithFfmpeg(inputWavPath: string, outputWavPath: string, sampleRate: number, timeout: number) {
+  await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", inputWavPath, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", String(sampleRate), outputWavPath], { timeout, maxBuffer: 1024 * 1024 });
+  const output = await readFile(outputWavPath);
+  assertPcmWav(output, "Normalized output");
   return output;
 }
 
@@ -4729,6 +4891,9 @@ export const musicWorkflowTools: ToolModule[] = [
       // issue_0144: when the caller declares an ensemble, verify the requested instruments actually
       // play together (cello track present, with notes, overlapping piano) before reporting success.
       const ensembleReport = parsed.ensembleRequirement ? analyzeEnsemble(composition, parsed.ensembleRequirement) : undefined;
+      // issue_0147: always expose ensemble QA (per-instrument noteCount, channel/program, first-note
+      // time, overlap) so a missing/late voice is visible without opting into the fail-closed gate.
+      const ensembleQa = buildEnsembleQa(composition, parsed.instruments);
       const [manifestFile, midiFile] = await Promise.all([
         writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(composition, null, 2)}\n`),
         writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(composition), "audio/midi")
@@ -4737,12 +4902,12 @@ export const musicWorkflowTools: ToolModule[] = [
       return {
         ok: ensembleOk,
         summary: ensembleOk
-          ? `Composed ${composition.style} cue with ${Object.keys(composition.tracks).length} track(s).`
+          ? `Composed ${composition.style} cue with ${Object.keys(composition.tracks).length} track(s); requested ${ensembleQa.instrumentsRequested.length}, found ${ensembleQa.instrumentsFound.length} with notes.`
           : `Ensemble requirement not met: ${ensembleReport!.failures.length} blocking issue(s). MIDI written for inspection but not a deliverable ensemble.`,
         jobId: parsed.projectId,
         artifacts: [manifestFile.path, midiFile.path],
-        structuredContent: { ...composition, manifestPath: manifestFile.path, midiPath: midiFile.path, ensembleReport },
-        logs: [JSON.stringify({ ...composition, ensembleReport }, null, 2)],
+        structuredContent: { ...composition, manifestPath: manifestFile.path, midiPath: midiFile.path, ensembleReport, ensembleQa },
+        logs: [JSON.stringify({ ...composition, ensembleReport, ensembleQa }, null, 2)],
         errors: ensembleOk ? [] : ensembleReport!.failures
       };
     }
@@ -4862,10 +5027,25 @@ export const musicWorkflowTools: ToolModule[] = [
           outputAudioPath: parsed.outputProductionWavPath,
           outputReportPath: parsed.outputReportPath
         });
-        const productionFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputProductionWavPath, mastered.output, "audio/wav");
+        // The built-in PCM master chain leaves levels well below broadcast (~-35 LUFS), so a "mastered"
+        // render still sounds very quiet. Finish with a real ffmpeg loudnorm pass to land at a usable
+        // level (~-16 LUFS, -1.5 dBTP). Falls back to the master-chain output if ffmpeg is unavailable.
+        const masteredTempPath = path.join(tempDir, "mastered.wav");
+        await writeFile(masteredTempPath, mastered.output);
         const productionTempPath = path.join(tempDir, "production.wav");
+        let productionBuffer = mastered.output;
+        let loudnessFinalizedWithFfmpeg = false;
+        if (environment.tools.ffmpeg?.ok) {
+          try {
+            productionBuffer = await normalizeWavWithFfmpeg(masteredTempPath, productionTempPath, parsed.sampleRate, ctx.commandTimeoutMs);
+            loudnessFinalizedWithFfmpeg = true;
+          } catch {
+            productionBuffer = mastered.output;
+          }
+        }
+        if (!loudnessFinalizedWithFfmpeg) await writeFile(productionTempPath, productionBuffer);
+        const productionFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputProductionWavPath, productionBuffer, "audio/wav");
         const mp3TempPath = path.join(tempDir, "preview.mp3");
-        await writeFile(productionTempPath, mastered.output);
 	        const mp3 = await encodeMp3WithFfmpeg(productionTempPath, mp3TempPath, ctx.commandTimeoutMs);
 	        const mp3File = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputPreviewMp3Path, mp3, "audio/mpeg");
 	        const licenses = renderProductionLicensesMarkdown({
@@ -4898,9 +5078,11 @@ export const musicWorkflowTools: ToolModule[] = [
 	          missingStemGroups,
 	          requiredRoles: packResolution.requiredRoles,
 	          instrumentCoverage: packResolution.instrumentCoverage,
+	          ensembleQa: buildEnsembleQa(composition, composition.instruments),
 	          roleMap: Object.fromEntries(packResolution.instrumentCoverage.map((entry) => [entry.track, entry.requiredRole])),
 	          channelMap: parsed.channelMap,
 	          mixMasterChain: ["gain_staging", "eq_cleanup", "light_compression", "room_reverb", "master_limiter", "loudness_normalize"],
+	          loudnessFinalizedWithFfmpeg,
 	          masteringReport: { ...mastered.report, qualityTier: "production_candidate", productionReady: true, blockingReasons: [], sourceRenderPath: rawFile.path },
 	          soundfont: resolvedPacks[0] ? {
 	            packId: resolvedPacks[0].pack.packId,
@@ -5013,7 +5195,7 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "render_midi_with_soundfont", description: "Render a MIDI/composition manifest through a registered ready .sf2/.sf3 SoundFont or .sfz instrument pack, producing production_candidate WAV, optional stems, and a renderer/license report. .sf2/.sf3 uses FluidSynth; .sfz uses sfizz_render when installed.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, stems: { type: "boolean" }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "render_midi_with_soundfont", description: "Render a MIDI/composition manifest through a registered ready .sf2/.sf3 SoundFont or .sfz instrument pack, producing production_candidate WAV, optional stems, and a renderer/license report. .sf2/.sf3 uses FluidSynth; .sfz uses sfizz_render when installed.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, stems: { type: "boolean" }, normalize: { type: "boolean" }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: renderMidiWithSoundfontInputSchema,
     handler: async (input, ctx) => {
@@ -5076,8 +5258,13 @@ export const musicWorkflowTools: ToolModule[] = [
         const tempDir = temporaryFiles[0] ?? path.join(ctx.artifactRoot, `music-render-${parsed.projectId}-${Date.now()}`);
         await mkdir(tempDir, { recursive: true });
         if (!temporaryFiles.includes(tempDir)) temporaryFiles.push(tempDir);
+        // Normalize only when explicitly requested AND ffmpeg is present; otherwise keep the raw render.
+        const normalizeActive = parsed.normalize && ffmpegCapability.ok;
         const fullMixTemp = path.join(tempDir, "full.wav");
-        const fullMix = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, midiAbsolutePath, fullMixTemp, parsed.sampleRate, ctx.commandTimeoutMs);
+        const rawFullMix = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, midiAbsolutePath, fullMixTemp, parsed.sampleRate, ctx.commandTimeoutMs);
+        const fullMix = normalizeActive
+          ? await normalizeWavWithFfmpeg(fullMixTemp, path.join(tempDir, "full.norm.wav"), parsed.sampleRate, ctx.commandTimeoutMs)
+          : rawFullMix;
         const fullMixFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputAudioPath, fullMix, "audio/wav");
         const stemPaths: Record<string, string> = {};
         const stemValidations: Record<string, { rms: number; peak: number; ok: boolean }> = {};
@@ -5086,12 +5273,16 @@ export const musicWorkflowTools: ToolModule[] = [
             const stemMidiPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.mid`);
             const stemWavPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.wav`);
             await writeFile(stemMidiPath, midiBuffer(compositionWithSingleTrack(composition!, track), { channelMap: parsed.channelMap, programMap: parsed.programMap }));
-            const stemWav = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, stemMidiPath, stemWavPath, parsed.sampleRate, ctx.commandTimeoutMs);
+            const rawStemWav = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, stemMidiPath, stemWavPath, parsed.sampleRate, ctx.commandTimeoutMs);
+            // Validate the RAW stem (pre-normalize): loudnorm would otherwise amplify a near-silent
+            // stem's noise floor and let a missing instrument pass the silence guard.
+            const stemStats = audioStats(rawStemWav);
+            stemValidations[track] = { rms: stemStats.rms, peak: stemStats.peak, ok: stemStats.rms >= 0.0005 };
+            const stemWav = normalizeActive
+              ? await normalizeWavWithFfmpeg(stemWavPath, path.join(tempDir, `${slugifyMusicExportPart(track)}.norm.wav`), parsed.sampleRate, ctx.commandTimeoutMs)
+              : rawStemWav;
             const stemFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, `${parsed.outputStemDirectory}/${slugifyMusicExportPart(track)}.wav`, stemWav, "audio/wav");
             stemPaths[track] = stemFile.path;
-            // Per-stem validation so a silent/empty instrument stem is visible before publishing.
-            const stemStats = audioStats(stemWav);
-            stemValidations[track] = { rms: stemStats.rms, peak: stemStats.peak, ok: stemStats.rms >= 0.0005 };
           }
           // Fail closed (same contract as render_production_music): a production_candidate render
           // must not ship a silent/missing-instrument stem as a success. The surrounding catch turns
@@ -5113,6 +5304,7 @@ export const musicWorkflowTools: ToolModule[] = [
           },
           qualityTier: "production_candidate",
           productionReady: true,
+          normalized: normalizeActive,
           packSha256: soundfont.pack.computedSha256,
           packLicenseTextPath: soundfont.pack.licenseTextPath,
           packSourceUrl: soundfont.pack.sourceUrl,
@@ -5143,6 +5335,7 @@ export const musicWorkflowTools: ToolModule[] = [
             version: soundfont.pack.version
 	          },
 	          instrumentCoverage,
+	          ensembleQa: composition ? buildEnsembleQa(composition, composition.instruments) : undefined,
 	          channelMap: parsed.channelMap,
           channelMapApplied: hasChannelMap,
           renderReport: {
@@ -5159,7 +5352,12 @@ export const musicWorkflowTools: ToolModule[] = [
               return [artifact, bytes.length];
             })))
           },
-          warnings: ffmpegCapability.ok ? [] : ["FFmpeg is not available; downstream master/export encoding capability may be limited."]
+          warnings: [
+            ...(composition ? buildEnsembleQa(composition, composition.instruments).missingInstrumentWarnings : []),
+            ...(parsed.stems ? [] : ["Rendered full mix only (stems=false); per-instrument audio presence is not verified. Pass stems=true to validate each voice is audible."]),
+            ...(parsed.normalize && !ffmpegCapability.ok ? ["normalize=true was requested but FFmpeg is unavailable; shipped the raw (un-normalized, likely quiet) render instead."] : []),
+            ...(ffmpegCapability.ok ? [] : ["FFmpeg is not available; downstream master/export encoding capability may be limited."])
+          ]
         };
         const reportFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputReportPath, `${JSON.stringify(report, null, 2)}\n`);
         artifacts.push(reportFile.path);

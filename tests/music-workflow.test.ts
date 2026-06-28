@@ -5,7 +5,9 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getToolModule } from "../src/mcp/registry.js";
-import { createProject, getProjectStoredFilePath, readProjectFile, writeProjectAsset, writeProjectFile } from "../src/projects/store.js";
+import { pickJazzPackRegistryCandidatePaths, buildEnsembleQa, fluidSynthArgs } from "../src/mcp/tools/music-workflow.js";
+import { createProject, getProjectStoredFilePath, getProjectFilesDirectory, validateProject, readProjectFile, writeProjectAsset, writeProjectFile } from "../src/projects/store.js";
+import { mkdir as mkdirNode, truncate as truncateNode } from "node:fs/promises";
 import { skillRegistry } from "../src/skills/registry.js";
 import type { ToolContext } from "../src/mcp/types.js";
 
@@ -165,6 +167,17 @@ if (process.argv.includes("--version")) {
   console.log("FluidSynth fake 2.3.0");
   process.exit(0);
 }
+// Mimic FluidSynth 2.x: options after the first positional (SoundFont) file are illegal. This makes
+// the e2e suite fail closed if fluidSynthRender ever regresses to trailing -F/-r (issue: no WAV written).
+const fakeArgs = process.argv.slice(2);
+const sfIndex = fakeArgs.findIndex((a) => a.endsWith(".sf2") || a.endsWith(".sf3"));
+for (const opt of ["-F", "-r"]) {
+  const oi = fakeArgs.indexOf(opt);
+  if (oi !== -1 && sfIndex !== -1 && oi > sfIndex) {
+    console.error("error: '" + opt + "' is an illegal option at this place, only -b option is allowed here.");
+    process.exit(1);
+  }
+}
 const out = process.argv[process.argv.indexOf("-F") + 1];
 const midi = process.argv.find((arg) => arg.endsWith(".mid"));
 if (process.env.FAKE_FLUIDSYNTH_INVALID_RIFF) {
@@ -275,7 +288,21 @@ if (!out) {
   console.error("missing output");
   process.exit(2);
 }
-fs.writeFileSync(out, Buffer.concat([Buffer.from("ID3", "ascii"), Buffer.alloc(256, 1)]));
+// WAV outputs (e.g. the loudnorm finalize pass) need a real PCM WAV so assertPcmWav passes; only the
+// MP3 encode wants ID3. Emit the right container by output extension.
+if (out.toLowerCase().endsWith(".wav")) {
+  const frames = 2000;
+  const pcm = Buffer.alloc(frames * 2);
+  for (let i = 0; i < frames; i++) pcm.writeInt16LE(Math.round(Math.sin(i / 12) * 9000), i * 2);
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0); header.writeUInt32LE(36 + pcm.length, 4); header.write("WAVEfmt ", 8);
+  header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(44100, 24); header.writeUInt32LE(44100 * 2, 28); header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34); header.write("data", 36); header.writeUInt32LE(pcm.length, 40);
+  fs.writeFileSync(out, Buffer.concat([header, pcm]));
+} else {
+  fs.writeFileSync(out, Buffer.concat([Buffer.from("ID3", "ascii"), Buffer.alloc(256, 1)]));
+}
 `;
   await writeFile(scriptPath, script);
   await chmod(scriptPath, 0o755);
@@ -674,12 +701,15 @@ test("end-to-end: install GeneralUser GS -> compose cello+piano -> render covers
       publish: false
     }, ctx);
     assert.equal(render.ok, true, `render should succeed using the GM pack for both roles: ${JSON.stringify(render.errors)}`);
-    const payload = render.structuredContent as { stemPaths: Record<string, string>; stemRenderers: Record<string, { role: string; packId: string }>; instrumentCoverage: Array<{ covered: boolean }> };
+    const payload = render.structuredContent as { stemPaths: Record<string, string>; stemRenderers: Record<string, { role: string; packId: string }>; instrumentCoverage: Array<{ covered: boolean }>; loudnessFinalizedWithFfmpeg: boolean };
     assert.ok(payload.stemPaths.piano, "piano stem rendered");
     assert.ok(payload.stemPaths.cello, "cello stem rendered from the same GM pack");
     assert.equal(payload.stemRenderers.cello.packId, "generaluser_gs");
     assert.equal(payload.stemRenderers.piano.packId, "generaluser_gs");
     assert.ok(payload.instrumentCoverage.every((entry) => entry.covered), "all roles covered by the one GM pack");
+    // The built-in PCM master leaves levels ~-35 LUFS; production render must finish with a real
+    // ffmpeg loudnorm pass when ffmpeg is present (otherwise the "mastered" file ships too quiet).
+    assert.equal(payload.loudnessFinalizedWithFfmpeg, true, "production master is loudness-finalized via ffmpeg");
 
     // 4) The natural flow: render again with NO soundfontPackId and NO instrumentPackMap — the
     // auto-registered general_midi pack must be discovered as the fallback and still cover both roles.
@@ -3136,5 +3166,253 @@ test("music-workflow skill exposes music tools through dedicated, coding, and de
     assert.ok(music!.toolNames.includes(toolName), `${toolName} exposed in music-workflow`);
     assert.ok(coding?.toolNames.includes(toolName), `${toolName} exposed in coding`);
     assert.ok(debug?.toolNames.includes(toolName), `${toolName} exposed in debug`);
+  }
+});
+
+// issue_0146: read-side registry discovery. manage_jazz_instrument_packs' outputPath is a free
+// parameter; the render read path used to be a hardcoded constant. pickJazzPackRegistryCandidatePaths
+// is the pure bridge — default first, then any other *instrument-packs*.json the agent wrote.
+test("pickJazzPackRegistryCandidatePaths: default first, finds non-default name, excludes license", () => {
+  const out = pickJazzPackRegistryCandidatePaths([
+    "music/instrument-packs.json",
+    "music/jazz-instrument-license-manifest.json",
+    "music/jazz-instrument-packs.json",
+    "music/cue.json"
+  ]);
+  assert.equal(out[0], "music/jazz-instrument-packs.json", "default path is always tried first");
+  assert.ok(out.includes("music/instrument-packs.json"), "non-default registry name is discovered");
+  assert.ok(!out.some((p) => /license/i.test(p)), "license manifests are never registry candidates");
+  assert.ok(!out.includes("music/cue.json"), "unrelated json is not a candidate");
+  // Default is always present even when the listing is empty (it may exist without being listed).
+  assert.deepEqual(pickJazzPackRegistryCandidatePaths([]), ["music/jazz-instrument-packs.json"]);
+  // No duplicates when the default is also in the listing.
+  assert.equal(out.filter((p) => p === "music/jazz-instrument-packs.json").length, 1);
+});
+
+// issue_0146 end-to-end: a registry written to a NON-default filename must still be read by the
+// render tool. Before the fix this rendered as a misleading "No registered ready instrument pack".
+test("issue_0146: render_midi_with_soundfont reads a registry written under a non-default name", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-registry-discovery-"));
+  const oldPath = process.env.PATH;
+  let restoreFetch = () => {};
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Registry discovery", createdByClientId: "producer" });
+    const installer = getToolModule("install_free_soundfont_pack");
+    const compose = getToolModule("compose_music");
+    const render = getToolModule("render_midi_with_soundfont");
+    assert.ok(installer && compose && render);
+
+    restoreFetch = installMockFetch({ "GeneralUser-GS.sf2": fakeSoundfontBytes(), "LICENSE.txt": "GeneralUser GS license fixture\n", "README.md": "# GeneralUser GS fixture\n" });
+    const install = await installer!.handler({ projectId: project.id, packId: "generaluser_gs" }, ctx);
+    assert.equal(install.ok, true);
+
+    // Relocate the auto-registered registry to a non-default name and delete the default, simulating
+    // an agent that called manage_jazz_instrument_packs with a custom outputPath (the real 0146 case).
+    const registryJson = await readProjectFile(ctx.projectRoot, project.id, "music/jazz-instrument-packs.json", 1024 * 1024);
+    await writeProjectFile(ctx.projectRoot, project.id, "music/instrument-packs.json", registryJson);
+    await rm(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/jazz-instrument-packs.json"), { force: true });
+
+    await compose!.handler({
+      projectId: project.id,
+      instruments: ["piano", "cello"],
+      durationSeconds: 12,
+      outputManifestPath: "music/cue.json",
+      outputMidiPath: "music/cue.mid"
+    }, ctx);
+
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${await installFakeFfmpeg(root)}:${oldPath}`;
+    const result = await render!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/cue.json",
+      soundfontPackId: "generaluser_gs",
+      sampleRate: 16000,
+      outputReportPath: "music/render-report.json"
+    }, ctx);
+
+    const errorText = JSON.stringify(result.errors ?? []);
+    assert.ok(!/No registered ready instrument pack|No instrument-pack registry/i.test(errorText), `registry must resolve from the non-default path, got: ${errorText}`);
+    assert.equal(result.ok, true, `render should succeed once the non-default registry is read: ${errorText}`);
+    // Isolate the read-path fix from self-heal: if resolution had relied on re-discovering and
+    // re-registering the sf2, it would have rewritten the default registry path. It must stay absent,
+    // proving the render read the agent's non-default registry file directly.
+    await assert.rejects(
+      readProjectFile(ctx.projectRoot, project.id, "music/jazz-instrument-packs.json", 1024 * 1024),
+      "default registry must not be recreated — resolution came from reading the non-default path"
+    );
+  } finally {
+    process.env.PATH = oldPath;
+    restoreFetch();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// issue_0147: always-on ensemble QA. buildEnsembleQa is the pure transparency report (non-blocking)
+// that lets compose/render outputs prove which requested instruments carry notes, their
+// channel/program, first-note time, and whether they truly overlap.
+type EnsembleQaComposition = Parameters<typeof buildEnsembleQa>[0];
+function qaComposition(tracks: Record<string, Array<{ startBeat: number; durationBeats: number; midi: number; velocity: number }>>): EnsembleQaComposition {
+  return { tempo: 90, durationSeconds: 8, instruments: Object.keys(tracks), tracks } as unknown as EnsembleQaComposition;
+}
+
+test("buildEnsembleQa: real duet reports both voices, channel/program, and overlap from the top", () => {
+  const qa = buildEnsembleQa(qaComposition({
+    piano: [{ startBeat: 0, durationBeats: 4, midi: 60, velocity: 80 }],
+    cello: [{ startBeat: 0, durationBeats: 4, midi: 48, velocity: 70 }]
+  }), ["piano", "cello"]);
+  assert.deepEqual(qa.instrumentsRequested.sort(), ["cello", "piano"]);
+  assert.deepEqual(qa.instrumentsFound.sort(), ["cello", "piano"]);
+  assert.deepEqual(qa.missingInstruments, []);
+  assert.deepEqual(qa.missingInstrumentWarnings, []);
+  assert.equal(qa.overlapFromBeat0, true, "both voices sound together from the downbeat");
+  const cello = qa.tracks.find((t) => t.instrument === "cello");
+  assert.equal(cello?.gmProgram, 43, "cello maps to GM program 43");
+  assert.equal(cello?.channel, 5);
+  assert.equal(cello?.noteCount, 1);
+  assert.equal(cello?.firstBeat, 0);
+});
+
+test("buildEnsembleQa: a requested-but-empty voice is reported missing with a warning (no silent fake duet)", () => {
+  const qa = buildEnsembleQa(qaComposition({
+    piano: [{ startBeat: 0, durationBeats: 4, midi: 60, velocity: 80 }],
+    cello: []
+  }), ["piano", "cello"]);
+  assert.deepEqual(qa.instrumentsFound, ["piano"]);
+  assert.deepEqual(qa.missingInstruments, ["cello"]);
+  assert.equal(qa.missingInstrumentWarnings.length, 1);
+  assert.match(qa.missingInstrumentWarnings[0], /cello.*no notes/i);
+  assert.equal(qa.overlapFromBeat0, false, "a single sounding voice is not an overlap");
+});
+
+test("issue_0147: compose_music always surfaces ensembleQa proving both requested voices", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-ensemble-qa-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Ensemble QA", createdByClientId: "composer" });
+    const compose = getToolModule("compose_music");
+    assert.ok(compose);
+    // No ensembleRequirement passed — QA must appear by default, not only under the opt-in gate.
+    const result = await compose!.handler({
+      projectId: project.id,
+      instruments: ["piano", "cello"],
+      durationSeconds: 16,
+      outputManifestPath: "music/qa-cue.json",
+      outputMidiPath: "music/qa-cue.mid"
+    }, ctx);
+    assert.equal(result.ok, true);
+    const payload = result.structuredContent as { ensembleQa?: { instrumentsRequested: string[]; instrumentsFound: string[]; missingInstruments: string[]; overlapFromBeat0: boolean; tracks: Array<{ instrument: string; gmProgram: number | null; noteCount: number }> } };
+    assert.ok(payload.ensembleQa, "ensembleQa present without opting into ensembleRequirement");
+    assert.ok(payload.ensembleQa!.instrumentsRequested.includes("cello"));
+    assert.ok(payload.ensembleQa!.instrumentsFound.includes("cello"), "cello has notes (issue_0144 fix) and is reported found");
+    assert.ok(payload.ensembleQa!.instrumentsFound.includes("piano"));
+    assert.deepEqual(payload.ensembleQa!.missingInstruments, []);
+    assert.equal(payload.ensembleQa!.overlapFromBeat0, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// FluidSynth 2.x rejects -F/-r placed AFTER the SoundFont/MIDI positional args ("illegal option at
+// this place"), so the old `-ni <sf2> <midi> -F <out> -r <rate>` wrote no WAV on modern fluidsynth.
+// Options must precede the positional files. (The fake fluidsynth in installFakeFluidSynth enforces
+// this too, so the e2e renders double as a guard.)
+test("fluidSynthArgs: render options precede the SoundFont and MIDI positional args", () => {
+  const args = fluidSynthArgs("/packs/gm.sf2", "/tmp/song.mid", "/tmp/out.wav", 44100);
+  const sfIdx = args.indexOf("/packs/gm.sf2");
+  const midIdx = args.indexOf("/tmp/song.mid");
+  const fIdx = args.indexOf("-F");
+  const rIdx = args.indexOf("-r");
+  assert.ok(fIdx !== -1 && rIdx !== -1, "-F and -r are present");
+  assert.ok(fIdx < sfIdx && fIdx < midIdx, "-F precedes the positional files");
+  assert.ok(rIdx < sfIdx && rIdx < midIdx, "-r precedes the positional files");
+  assert.equal(args[fIdx + 1], "/tmp/out.wav", "-F is immediately followed by the output path");
+  assert.equal(args[rIdx + 1], "44100", "-r is immediately followed by the sample rate");
+  // SoundFont before MIDI (FluidSynth positional order).
+  assert.ok(sfIdx < midIdx, "SoundFont positional precedes the MIDI positional");
+});
+
+// A D-minor score: fifths=-1 with <mode>minor</mode>. Two parts so import is a real piano+cello duet.
+const dMinorDuetMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <work><work-title>Minor Duet</work-title></work>
+  <part-list>
+    <score-part id="P1"><part-name>Piano</part-name><midi-instrument id="P1-I1"><midi-program>1</midi-program></midi-instrument></score-part>
+    <score-part id="P2"><part-name>Violoncello</part-name><midi-instrument id="P2-I1"><midi-program>43</midi-program></midi-instrument></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>2</divisions><key><fifths>-1</fifths><mode>minor</mode></key><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>D</step><octave>3</octave></pitch><duration>4</duration><type>half</type></note>
+      <note><pitch><step>A</step><octave>3</octave></pitch><duration>4</duration><type>half</type></note>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="1">
+      <attributes><divisions>2</divisions><key><fifths>-1</fifths><mode>minor</mode></key><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <note><pitch><step>F</step><octave>4</octave></pitch><duration>8</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
+// Bug fix: a MusicXML <key> with <mode>minor</mode> must import as the minor key, not its relative
+// major (fifths=-1 + minor = D minor, previously mislabeled "F major").
+test("import_musicxml_score honors <mode>minor</mode> (fifths=-1 imports as D minor, not F major)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "musicxml-minor-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Minor key", createdByClientId: "composer" });
+    const importer = getToolModule("import_musicxml_score");
+    const result = await importer!.handler({ projectId: project.id, musicXmlString: dMinorDuetMusicXml, outputManifestPath: "music/minor.json", outputMidiPath: "music/minor.mid" }, ctx);
+    assert.equal(result.ok, true);
+    const payload = result.structuredContent as { key: string; tracks: Record<string, unknown[]> };
+    assert.equal(payload.key, "D minor");
+    assert.ok(payload.tracks.piano && payload.tracks.cello, "both parts import");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Bug fix: import_musicxml_score reads via the project file allowlist, which rejected .xml/.musicxml
+// (the standard MusicXML extensions) — so musicXmlPath was unusable and only musicXmlString worked.
+test("import_musicxml_score reads a score from a .xml project file path (extension allowlist)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "musicxml-ext-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Xml ext", createdByClientId: "composer" });
+    // write_project_file would previously reject .xml; the allowlist now permits it.
+    await writeProjectFile(ctx.projectRoot, project.id, "music/score.xml", dMinorDuetMusicXml);
+    const importer = getToolModule("import_musicxml_score");
+    const result = await importer!.handler({ projectId: project.id, musicXmlPath: "music/score.xml", outputManifestPath: "music/from-xml.json", outputMidiPath: "music/from-xml.mid" }, ctx);
+    assert.equal(result.ok, true, `import from .xml path should succeed: ${JSON.stringify(result.errors)}`);
+    const payload = result.structuredContent as { key: string; scoreSource: { sourcePath: string } };
+    assert.equal(payload.key, "D minor");
+    assert.equal(payload.scoreSource.sourcePath, "music/score.xml");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// A sampled SoundFont (e.g. a grand piano) is legitimately 100MB-1GB+. It is a render input, never a
+// web-served deliverable, and publishProject does not copy it — so an oversized .sf2 must WARN, not
+// ERROR, or the music project can never be published. (Regression for the YDP 118MB publish block.)
+test("validateProject warns (not errors) on an oversized instrument SoundFont asset", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-sf2-validate-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "SF2 size", createdByClientId: "composer" });
+    await writeProjectFile(ctx.projectRoot, project.id, "index.html", "<!doctype html><title>ok</title><p>player</p>");
+    // Create a sparse 130MB .sf2 (over the ~100MB asset cap) without writing real bytes.
+    const filesRoot = getProjectFilesDirectory(ctx.projectRoot, project.id);
+    await mkdirNode(path.join(filesRoot, "soundfonts"), { recursive: true });
+    const sf2 = path.join(filesRoot, "soundfonts", "grand.sf2");
+    await writeFile(sf2, Buffer.from("RIFF")); // valid-ish header byte; size set by truncate
+    await truncateNode(sf2, 130 * 1024 * 1024);
+
+    const result = await validateProject(ctx.projectRoot, project.id, "index.html");
+    assert.equal(result.errors.some((e) => /exceeds max size/i.test(e)), false, "oversized .sf2 must not be a blocking error");
+    assert.equal(result.ok, true, "project with a large render-only SoundFont still validates");
+    assert.ok(result.warnings.some((w) => /grand\.sf2/.test(w) && /render input/i.test(w)), "oversized SoundFont is surfaced as a warning");
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
