@@ -288,6 +288,10 @@ export const maxProjectImageAssetBytes = 10 * 1024 * 1024;
 export const maxProjectMediaAssetBytes = 100 * 1024 * 1024;
 export const maxProjectPresentationAssetBytes = 25 * 1024 * 1024;
 export const maxProjectArchiveAssetBytes = 50 * 1024 * 1024;
+// SoundFont instruments are legitimately large — a multi-velocity sampled grand piano is 100 MB to
+// ~1.3 GB. The generic 100 MiB media cap blocks installing them, so .sf2/.sf3 get a dedicated higher
+// ceiling. (Render sources, not publish payloads — large packs are removed before publishing.)
+export const maxProjectSoundfontAssetBytes = 1536 * 1024 * 1024;
 
 const metadataFilename = "project.json";
 const filesDirectoryName = "files";
@@ -488,6 +492,8 @@ export function validateProjectAssetBytes(relativePath: string, buffer: Buffer, 
     if (buffer.length > maxProjectArchiveAssetBytes) throw new Error("ZIP asset exceeds 50 MiB.");
   } else if (extension === ".pptx") {
     if (buffer.length > maxProjectPresentationAssetBytes) throw new Error("PPTX asset exceeds 25 MiB.");
+  } else if (extension === ".sf2" || extension === ".sf3") {
+    if (buffer.length > maxProjectSoundfontAssetBytes) throw new Error("SoundFont asset exceeds 1.5 GiB.");
   } else if (mediaAssetExtensions.has(extension)) {
     if (buffer.length > maxProjectMediaAssetBytes) throw new Error("Media/model asset exceeds 100 MiB.");
   } else if (buffer.length > maxProjectImageAssetBytes) {
