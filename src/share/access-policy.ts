@@ -49,7 +49,13 @@ export async function canViewLegacyShare(input: {
 
 export function setShareCacheHeaders(res: express.Response, shareAccess: ShareAccess, isPublicRoute: boolean): void {
   if (isPublicRoute || (shareAccess ?? "private") === "anyone_with_link") {
-    res.setHeader("Cache-Control", "public, max-age=300, stale-while-revalidate=86400");
+    // Published share URLs are STABLE but their content is MUTABLE — re-publishing overwrites a file
+    // in place at the same path. The previous `max-age=300, stale-while-revalidate=86400` let browsers
+    // serve the old bytes for up to 5 min outright, and stale for up to 24h while revalidating in the
+    // background — so a viewer could hear/see a superseded version long after the author re-published.
+    // `no-cache` keeps the response cacheable but forces revalidation on every use; Express's automatic
+    // ETag/Last-Modified make that a cheap 304 when the file is unchanged, and a fresh 200 once it changes.
+    res.setHeader("Cache-Control", "public, no-cache");
     return;
   }
   res.setHeader("Cache-Control", "private, no-store");
