@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getToolModule } from "../src/mcp/registry.js";
-import { pickJazzPackRegistryCandidatePaths, buildEnsembleQa, fluidSynthArgs } from "../src/mcp/tools/music-workflow.js";
+import { pickJazzPackRegistryCandidatePaths, buildEnsembleQa, fluidSynthArgs, midiBuffer } from "../src/mcp/tools/music-workflow.js";
 import { createProject, getProjectStoredFilePath, getProjectFilesDirectory, validateProject, readProjectFile, writeProjectAsset, writeProjectFile } from "../src/projects/store.js";
 import { mkdir as mkdirNode, truncate as truncateNode } from "node:fs/promises";
 import { skillRegistry } from "../src/skills/registry.js";
@@ -3474,4 +3474,99 @@ test("install_free_soundfont_pack fails closed for a sampled grand that is not b
     if (oldSoundfontDir === undefined) delete process.env.MUSIC_SOUNDFONT_DIR; else process.env.MUSIC_SOUNDFONT_DIR = oldSoundfontDir;
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// ---- auto bow-expression for bowed-string lines (CC11 swell + CC1 vibrato) ----
+function makeComposition(tracks: Record<string, Array<{ track: string; midi: number; startBeat: number; durationBeats: number; velocity: number }>>): any {
+  return {
+    title: "exp", style: "cinematic_background", mood: "calm", tempo: 66, key: "D minor",
+    durationSeconds: 16, loopable: false, instruments: Object.keys(tracks), sections: [],
+    chordProgression: [], tracks, license: { output: "generated_original", dependencies: [] }
+  };
+}
+// Count control-change events for (channel, controller) by walking the single MTrk. midiBuffer emits
+// a full status byte per event (no running status), but we still parse delta/status/data lengths so
+// a data byte that merely looks like a status byte cannot be miscounted.
+function countController(buf: Buffer, channel: number, controller: number): number {
+  let i = 14; // skip MThd
+  if (buf.subarray(i, i + 4).toString("ascii") !== "MTrk") return -1;
+  i += 8; // skip MTrk id + length
+  let count = 0;
+  let running = 0;
+  while (i < buf.length) {
+    while (i < buf.length && (buf[i] & 0x80)) i++; // delta varlen continuation bytes
+    i++;                                            // delta final byte
+    if (i >= buf.length) break;
+    let status = buf[i];
+    if (status & 0x80) { i++; running = status; } else { status = running; }
+    if (status === 0xff) {
+      i++; // meta type
+      let len = 0; while (buf[i] & 0x80) { len = (len << 7) | (buf[i] & 0x7f); i++; } len = (len << 7) | buf[i]; i++;
+      i += len;
+      continue;
+    }
+    const hi = status & 0xf0;
+    if (hi === 0xb0) {
+      const ctrl = buf[i]; i += 2;
+      if ((status & 0x0f) === channel && ctrl === controller) count++;
+      continue;
+    }
+    if (hi === 0xc0 || hi === 0xd0) { i += 1; continue; }
+    i += 2;
+  }
+  return count;
+}
+
+const longCelloLine = [
+  { track: "cello", midi: 62, startBeat: 0, durationBeats: 3, velocity: 64 },
+  { track: "cello", midi: 65, startBeat: 3, durationBeats: 1, velocity: 60 },
+  { track: "cello", midi: 64, startBeat: 4, durationBeats: 4, velocity: 70 },
+  { track: "cello", midi: 60, startBeat: 8, durationBeats: 2, velocity: 66 }
+];
+
+test("midiBuffer auto-authors CC11 swell + CC1 vibrato on a monophonic cello line", () => {
+  const buf = midiBuffer(makeComposition({ cello: longCelloLine })); // cello => channel 5
+  assert.ok(countController(buf, 5, 11) > 10, "expected many CC11 expression points on the cello channel");
+  assert.ok(countController(buf, 5, 1) > 5, "expected CC1 vibrato points on sustained cello notes");
+});
+
+test("midiBuffer leaves a POLYPHONIC bowed-string track flat (monophony guard — the discriminating case)", () => {
+  const doubleStops = [
+    { track: "cello", midi: 50, startBeat: 0, durationBeats: 4, velocity: 64 },
+    { track: "cello", midi: 57, startBeat: 0, durationBeats: 4, velocity: 60 },
+    { track: "cello", midi: 53, startBeat: 4, durationBeats: 4, velocity: 64 },
+    { track: "cello", midi: 60, startBeat: 4, durationBeats: 4, velocity: 60 }
+  ];
+  const buf = midiBuffer(makeComposition({ cello: doubleStops }));
+  assert.equal(countController(buf, 5, 11), 0, "polyphonic cello must stay flat (no CC11)");
+  assert.equal(countController(buf, 5, 1), 0, "polyphonic cello must stay flat (no CC1)");
+});
+
+test("midiBuffer does not author bow expression on a piano line", () => {
+  const buf = midiBuffer(makeComposition({ piano: [
+    { track: "piano", midi: 60, startBeat: 0, durationBeats: 4, velocity: 70 },
+    { track: "piano", midi: 64, startBeat: 4, durationBeats: 4, velocity: 70 }
+  ] })); // piano => channel 0
+  assert.equal(countController(buf, 0, 11), 0, "piano must not receive CC11 bow swells");
+});
+
+test("midiBuffer skips bow swells on short (detache) cello notes", () => {
+  const buf = midiBuffer(makeComposition({ cello: [
+    { track: "cello", midi: 62, startBeat: 0, durationBeats: 0.5, velocity: 64 },
+    { track: "cello", midi: 64, startBeat: 0.5, durationBeats: 0.5, velocity: 64 },
+    { track: "cello", midi: 65, startBeat: 1, durationBeats: 0.5, velocity: 64 }
+  ] }));
+  assert.equal(countController(buf, 5, 11), 0, "notes below the swell threshold must stay flat");
+});
+
+test("midiBuffer expressiveStrings:false renders strings exactly as written", () => {
+  const buf = midiBuffer(makeComposition({ cello: longCelloLine }), { expressiveStrings: false });
+  assert.equal(countController(buf, 5, 11), 0, "opt-out must suppress CC11");
+  assert.equal(countController(buf, 5, 1), 0, "opt-out must suppress CC1");
+});
+
+test("midiBuffer bow-expression output is deterministic", () => {
+  const a = midiBuffer(makeComposition({ cello: longCelloLine }));
+  const b = midiBuffer(makeComposition({ cello: longCelloLine }));
+  assert.deepEqual(a, b, "same composition must emit byte-identical MIDI");
 });
