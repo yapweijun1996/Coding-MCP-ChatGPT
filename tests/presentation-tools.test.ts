@@ -200,8 +200,13 @@ test("create_video_presentation stays private by default and publishes only when
 
     const indexPath = await getProjectStoredFilePath(ctx.projectRoot, result.jobId, "index.html");
     const indexHtml = await readFile(indexPath, "utf8");
-    assert.match(indexHtml, /Export MP4/);
-    assert.match(indexHtml, /audio preview only/i);
+    assert.match(indexHtml, /Export video-only MP4 preview/);
+    assert.match(indexHtml, /Storyboard preview/i);
+    assert.match(indexHtml, /no audio mix/i);
+
+    const sc = result.structuredContent as { qualityTier: string; productionReady: boolean };
+    assert.equal(sc.qualityTier, "storyboard_preview");
+    assert.equal(sc.productionReady, false);
 
     const scriptPath = await getProjectStoredFilePath(ctx.projectRoot, result.jobId, "video.js");
     const script = await readFile(scriptPath, "utf8");

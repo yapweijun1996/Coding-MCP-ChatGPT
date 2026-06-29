@@ -872,8 +872,8 @@ function renderVideoPresentationPage(input: VideoPresentationInput): string {
     scenes: input.scenes
   };
   const audio = input.audioPath
-    ? `<audio id="preview-audio" src="${escapeHtml(input.audioPath)}" preload="metadata"></audio><p class="audio-note">Audio preview only. MP4 export is video-only in this MIT-safe browser renderer.</p>`
-    : `<p class="audio-note">Audio preview only. MP4 export is video-only in this MIT-safe browser renderer.</p>`;
+    ? `<audio id="preview-audio" src="${escapeHtml(input.audioPath)}" preload="metadata"></audio><p class="audio-note">Storyboard preview — no audio mix, subtitles, or final encoding. MP4 export is video-only (browser-side WebCodecs).</p>`
+    : `<p class="audio-note">Storyboard preview — no audio mix, subtitles, or final encoding. MP4 export is video-only (browser-side WebCodecs).</p>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -889,7 +889,7 @@ function renderVideoPresentationPage(input: VideoPresentationInput): string {
     </section>
     <section class="controls-panel" aria-label="Video presentation controls">
       <div>
-        <p class="eyebrow">Browser-rendered presentation</p>
+        <p class="eyebrow">Storyboard preview</p>
         <h1>${escapeHtml(input.title)}</h1>
       </div>
       <div class="status-grid">
@@ -901,7 +901,7 @@ function renderVideoPresentationPage(input: VideoPresentationInput): string {
       <input id="timeline" type="range" min="0" max="${escapeHtml(String(duration))}" step="0.01" value="0" aria-label="Timeline">
       <div class="button-row">
         <button id="play-button" type="button">Play</button>
-        <button id="export-button" type="button">Export MP4</button>
+        <button id="export-button" type="button">Export video-only MP4 preview</button>
       </div>
       <p id="status" role="status">Ready.</p>
       ${audio}
@@ -1199,7 +1199,7 @@ renderAt(0);
 
 async function handleCreateVideoPresentation(input: VideoPresentationInput, ctx: ToolContext): Promise<ToolResult> {
   const duration = input.scenes.reduce((total, scene) => total + scene.durationSeconds, 0);
-  const project = await createBaseProject(ctx, input.title, "Generated browser-rendered video presentation.", "index.html");
+  const project = await createBaseProject(ctx, input.title, "Generated storyboard/video-preview (not a finished explainer video).", "index.html");
   const files = [
     await writeProjectFile(ctx.projectRoot, project.id, "index.html", renderVideoPresentationPage(input)),
     await writeProjectFile(ctx.projectRoot, project.id, "video.css", videoPresentationCss()),
@@ -1211,12 +1211,29 @@ async function handleCreateVideoPresentation(input: VideoPresentationInput, ctx:
   return {
     ok: true,
     summary: input.publish
-      ? `Created and published browser-rendered video presentation ${project.id}. MP4 export must be run in a browser via WebCodecs.`
-      : `Created browser-rendered video presentation ${project.id}. MP4 export must be run in a browser via WebCodecs.`,
+      ? `Created and published browser-rendered storyboard/video-preview ${project.id} (not a finished explainer video). MP4 export is video-only and runs in-browser via WebCodecs.`
+      : `Created browser-rendered storyboard/video-preview ${project.id} (not a finished explainer video). MP4 export is video-only and runs in-browser via WebCodecs.`,
     jobId: project.id,
     previewUrl: published.previewUrl,
     shareUrl: published.shareUrl,
     artifacts: [...files.map((file) => file.path), ...vendor],
+    structuredContent: {
+      qualityTier: "storyboard_preview",
+      productionReady: false,
+      limitations: [
+        "No audio mixing or voice-over in exported MP4",
+        "No subtitle/caption burn-in",
+        "No professional motion templates or server-side final render",
+        "Browser-side WebCodecs encoder only — quality and compatibility varies by browser"
+      ],
+      recommendedNextTools: [
+        "create_media_scene_timeline",
+        "add_media_captions",
+        "attach_media_voice_audio",
+        "preview_media_frames",
+        "export_media_project"
+      ]
+    },
     logs: [JSON.stringify({ projectId: project.id, files: manifest.files, publishedUrl: published.metadata?.publishedUrl, durationSeconds: duration, fps: input.fps, aspectRatio: input.aspectRatio, exportMode: "browser_webcodecs" }, null, 2)],
     errors: []
   };
@@ -1389,7 +1406,7 @@ export const presentationTools: ToolModule[] = [
   {
     definition: {
       name: "create_video_presentation",
-      description: "Create a browser-rendered video presentation with a WebCodecs MP4 export button. Stays private unless publish=true.",
+      description: "Create a browser-rendered storyboard/video-preview from scenes. Output is a preview page with a video-only MP4 export button (browser WebCodecs, no audio mix or subtitle burn-in). Not a finished explainer video — for production-ready video use the scripted media workflow. Stays private unless publish=true.",
       inputSchema: {
         type: "object",
         properties: {
