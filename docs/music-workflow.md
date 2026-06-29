@@ -341,6 +341,9 @@ and `LICENSE.txt` already exist under `<MUSIC_SOUNDFONT_DIR>/<pack>/`; otherwise
 returns `autoRegistered=true`. For manually managed packs, register with
 `manage_jazz_instrument_packs` (needs SHA-256, license sidecar, `instrumentRole: realistic_piano`,
 CC-BY attribution), then render by `soundfontPackId`.
+If GeneralUser GS is used because Salamander is unavailable, label the audio as GeneralUser GS
+fallback; `render_production_music` must fail closed for an explicit `salamander_grand` request
+instead of silently using the GM fallback.
 
 **Why bytes ≈ realism:** a real piano changes *timbre* (not just volume) from soft→hard; only
 multi-velocity sampling captures that. GM stretches a few samples; YDP/Salamander are real

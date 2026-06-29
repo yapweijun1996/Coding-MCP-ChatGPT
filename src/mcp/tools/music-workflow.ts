@@ -2885,6 +2885,39 @@ const sampledPianoPacks = {
 } as const;
 type SampledPianoPackId = keyof typeof sampledPianoPacks;
 
+async function sampledPianoPackAvailability(packId?: string) {
+  const pack = packId ? (sampledPianoPacks as Record<string, typeof sampledPianoPacks[SampledPianoPackId] | undefined>)[packId] : undefined;
+  if (!pack) return undefined;
+  const searchDirectories = bundledSoundfontDirectories(pack.dirName);
+  const checked = await Promise.all(searchDirectories.map(async (directory) => {
+    const soundfontPath = path.join(directory, pack.sf2File);
+    const licensePath = path.join(directory, pack.licenseFile);
+    return {
+      directory,
+      soundfontPath,
+      licensePath,
+      soundfontExists: await pathExists(soundfontPath),
+      licenseExists: await pathExists(licensePath)
+    };
+  }));
+  const runtimeFilesReady = checked.some((entry) => entry.soundfontExists && entry.licenseExists);
+  return {
+    requestedPackId: pack.packId,
+    displayName: pack.displayName,
+    sourceUrl: pack.sourceUrl,
+    requiredFiles: [pack.sf2File, pack.licenseFile],
+    searchDirectories,
+    checked,
+    runtimeFilesReady,
+    manualInstallRequired: !runtimeFilesReady,
+    installTool: "install_free_soundfont_pack",
+    fallbackPolicy: `Do not label fallback renders as ${pack.displayName}; only report this pack after install_free_soundfont_pack returns autoRegistered=true for ${pack.packId}.`,
+    nextAction: runtimeFilesReady
+      ? `Run install_free_soundfont_pack with packId="${pack.packId}" to copy, hash, license-record, and auto-register the bundled runtime files before rendering.`
+      : `Place ${pack.sf2File} and ${pack.licenseFile} under <MUSIC_SOUNDFONT_DIR>/${pack.dirName}/, then run install_free_soundfont_pack with packId="${pack.packId}".`
+  };
+}
+
 async function readBundledGeneralUserGsPack() {
   for (const directory of bundledGeneralUserGsDirectories()) {
     const soundfontPath = path.join(directory, generalUserGsPack.sf2File);
@@ -3467,6 +3500,7 @@ async function autoRegisterDiscoveredProductionPacks(ctx: ToolContext, parsed: z
 }
 
 async function resolveProductionSoundfont(ctx: ToolContext, parsed: z.infer<typeof renderMidiWithSoundfontInputSchema>) {
+  const requestedPackAvailability = await sampledPianoPackAvailability(parsed.soundfontPackId);
   const registry = await readJazzPackRegistry(ctx, parsed.projectId);
   let pack = findRegisteredPack(registry, parsed);
   let blockers = productionRenderBlockersForPack(pack, parsed.soundfontPath);
@@ -3488,15 +3522,21 @@ async function resolveProductionSoundfont(ctx: ToolContext, parsed: z.infer<type
     const searchDirs = discoverSoundfontPacksInputSchema.parse({ projectId: parsed.projectId }).projectSearchDirectories;
     const checked = registry.searchedPaths.length ? registry.searchedPaths.join(", ") : DEFAULT_JAZZ_PACK_REGISTRY_PATH;
     const diagnostic = `No instrument-pack registry with ready packs was found. Registry files checked: ${checked}. Directories scanned for an installable .sf2/.sfz: ${searchDirs.join(", ")}. Fix: register the pack with manage_jazz_instrument_packs (any music/*instrument-packs*.json is now read back automatically), or place the SoundFont under one of the scanned directories, then re-run.`;
-    return { ok: false as const, blockers: [diagnostic, ...auto.remediation], pack };
+    const sampledPianoBlockers = requestedPackAvailability
+      ? [`Requested ${requestedPackAvailability.displayName} is not registered. ${requestedPackAvailability.nextAction} ${requestedPackAvailability.fallbackPolicy}`]
+      : [];
+    return { ok: false as const, blockers: [diagnostic, ...sampledPianoBlockers, ...auto.remediation], pack, requestedPackAvailability };
   }
   // Registry exists but the requested pack id/path did not resolve to a ready pack. Surface the
   // registry path and what it actually contains instead of a generic "not registered".
   if (!pack) {
     const available = registry.packs.map((candidate) => `${candidate.packId} (${candidate.status})`).join(", ") || "none";
-    return { ok: false as const, blockers: [`No registered ready instrument pack matches soundfontPackId=${parsed.soundfontPackId ?? "—"} / soundfontPath=${parsed.soundfontPath ?? "—"}. Registry ${registry.registryPath ?? DEFAULT_JAZZ_PACK_REGISTRY_PATH} contains: ${available}. Pass soundfontPackId for one of these (a general_midi pack covers every role), or register the intended pack.`], pack };
+    const sampledPianoBlockers = requestedPackAvailability
+      ? [`Requested ${requestedPackAvailability.displayName} is unavailable as a ready registered pack. ${requestedPackAvailability.nextAction} ${requestedPackAvailability.fallbackPolicy}`]
+      : [];
+    return { ok: false as const, blockers: [`No registered ready instrument pack matches soundfontPackId=${parsed.soundfontPackId ?? "—"} / soundfontPath=${parsed.soundfontPath ?? "—"}. Registry ${registry.registryPath ?? DEFAULT_JAZZ_PACK_REGISTRY_PATH} contains: ${available}. Pass soundfontPackId for one of these (a general_midi pack covers every role), or register the intended pack.`, ...sampledPianoBlockers], pack, requestedPackAvailability };
   }
-  return { ok: false as const, blockers, pack };
+  return { ok: false as const, blockers, pack, requestedPackAvailability };
 }
 
 async function resolveProductionPackForRole(ctx: ToolContext, input: {
@@ -3539,6 +3579,7 @@ async function resolveProductionPackMap(ctx: ToolContext, parsed: z.infer<typeof
   const requiredRoles = requiredProductionRoles(composition);
   const packsByRole: Partial<Record<JazzInstrumentRole, Awaited<ReturnType<typeof resolveProductionPackForRole>> & { ok: true }>> = {};
   const blockers: string[] = [];
+  const requestedPackAvailability: unknown[] = [];
   // A registered general_midi pack (or an explicit top-level soundfontPackId) covers any role the
   // caller did not map explicitly, so one GeneralUser GS install renders the whole ensemble.
   const registry = await readJazzPackRegistry(ctx, parsed.projectId);
@@ -3557,12 +3598,13 @@ async function resolveProductionPackMap(ctx: ToolContext, parsed: z.infer<typeof
       packsByRole[role] = resolved;
     } else {
       blockers.push(...resolved.blockers);
+      if ("requestedPackAvailability" in resolved && resolved.requestedPackAvailability) requestedPackAvailability.push(resolved.requestedPackAvailability);
     }
   }
   const packRecords = Object.fromEntries(Object.entries(packsByRole).map(([role, resolved]) => [role, resolved.pack])) as Partial<Record<JazzInstrumentRole, JazzPackRecord>>;
   const instrumentCoverage = instrumentCoverageForPackMap(composition, packRecords);
   blockers.push(...instrumentCoverage.filter((entry) => !entry.covered).map((entry) => entry.reason));
-  return { ok: blockers.length === 0, requiredRoles, packsByRole, packRecords, instrumentCoverage, blockers: Array.from(new Set(blockers)) };
+  return { ok: blockers.length === 0, requiredRoles, packsByRole, packRecords, instrumentCoverage, blockers: Array.from(new Set(blockers)), requestedPackAvailability: Array.from(new Map(requestedPackAvailability.map((entry) => [JSON.stringify((entry as { requestedPackId?: string }).requestedPackId ?? entry), entry])).values()) };
 }
 
 async function writeSoundfontRenderFailure(ctx: ToolContext, parsed: z.infer<typeof renderMidiWithSoundfontInputSchema>, blockingReasons: string[], metadata: Record<string, unknown> = {}) {
@@ -5240,6 +5282,7 @@ export const musicWorkflowTools: ToolModule[] = [
 	          blockingReasons: blockers,
 	          requiredRoles: packResolution.requiredRoles,
 	          instrumentCoverage: packResolution.instrumentCoverage,
+	          requestedPackAvailability: packResolution.requestedPackAvailability,
 	          environment
 	        };
 	        const reportFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputReportPath, `${JSON.stringify(report, null, 2)}\n`);
@@ -5502,7 +5545,7 @@ export const musicWorkflowTools: ToolModule[] = [
 
 	      const soundfont = await resolveProductionSoundfont(ctx, parsed);
 	      if (!soundfont.ok) {
-	        return writeSoundfontRenderFailure(ctx, parsed, soundfont.blockers.map((reason) => `${reason} Output is preview_only until a ready commercial-safe SoundFont/SFZ pack is registered.`), { requestedSoundfontPackId: parsed.soundfontPackId, requestedSoundfontPath: parsed.soundfontPath });
+	        return writeSoundfontRenderFailure(ctx, parsed, soundfont.blockers.map((reason) => `${reason} Output is preview_only until a ready commercial-safe SoundFont/SFZ pack is registered.`), { requestedSoundfontPackId: parsed.soundfontPackId, requestedSoundfontPath: parsed.soundfontPath, requestedPackAvailability: soundfont.requestedPackAvailability });
 	      }
 	      let composition: Composition | undefined;
 	      let instrumentCoverage: ReturnType<typeof instrumentCoverageForSinglePack> = [];

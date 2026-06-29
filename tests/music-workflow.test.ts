@@ -2450,6 +2450,90 @@ test("render_production_music publishes MP3 when production WAV exceeds media as
   }
 });
 
+test("render_production_music does not relabel a GeneralUser fallback as requested Salamander", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-salamander-no-fallback-"));
+  const oldPath = process.env.PATH;
+  const oldSoundfontDir = process.env.MUSIC_SOUNDFONT_DIR;
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Salamander unavailable", createdByClientId: "producer" });
+    const compose = getToolModule("compose_music");
+    const packManager = getToolModule("manage_jazz_instrument_packs");
+    const productionRender = getToolModule("render_production_music");
+    assert.ok(compose);
+    assert.ok(packManager);
+    assert.ok(productionRender);
+
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${await installFakeFfmpeg(root)}:${oldPath}`;
+    process.env.MUSIC_SOUNDFONT_DIR = path.join(root, "empty-soundfonts");
+
+    await compose!.handler({
+      projectId: project.id,
+      title: "Requested Salamander Cue",
+      style: "smooth_piano",
+      durationSeconds: 30,
+      instruments: ["piano"],
+      outputManifestPath: "music/requested-salamander.json",
+      outputMidiPath: "music/requested-salamander.mid"
+    }, ctx);
+    await writeProjectAsset(ctx.projectRoot, project.id, "soundfonts/generaluser-gs/GeneralUser-GS.sf2", fakeSoundfontBytes(), "audio/soundfont");
+    await writeProjectFile(ctx.projectRoot, project.id, "soundfonts/generaluser-gs/LICENSE.txt", "GeneralUser GS license fixture\n");
+    await writeProjectFile(ctx.projectRoot, project.id, "soundfonts/generaluser-gs/README.md", "# GeneralUser GS fixture\n");
+    await packManager!.handler({
+      projectId: project.id,
+      packs: [{
+        packId: "generaluser_gs",
+        displayName: "GeneralUser GS",
+        instrumentRole: "general_midi",
+        format: "soundfont",
+        assetPaths: ["soundfonts/generaluser-gs/GeneralUser-GS.sf2"],
+        licenseType: "generaluser_gs_2_0",
+        source: "fixture",
+        sourceUrl: "https://example.test/generaluser",
+        licenseTextPath: "soundfonts/generaluser-gs/LICENSE.txt",
+        readmePath: "soundfonts/generaluser-gs/README.md",
+        commercialUseAllowed: true,
+        redistributionAllowed: true,
+        productionUseApproved: true,
+        qualityTier: "production_candidate"
+      }]
+    }, ctx);
+
+    const result = await productionRender!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/requested-salamander.json",
+      soundfontPackId: "salamander_grand",
+      publish: false
+    }, ctx);
+    assert.equal(result.ok, false);
+    assert.equal(result.previewUrl, undefined);
+    assert.ok(result.errors.some((error) => /Salamander Grand Piano/.test(error) && /autoRegistered=true|install_free_soundfont_pack/.test(error)));
+    const payload = result.structuredContent as {
+      productionReady: boolean;
+      requestedPackAvailability: Array<{
+        requestedPackId: string;
+        manualInstallRequired: boolean;
+        requiredFiles: string[];
+        fallbackPolicy: string;
+      }>;
+      instrumentCoverage: Array<{ selectedPackId?: string; covered: boolean }>;
+      previewMp3Path?: string;
+    };
+    assert.equal(payload.productionReady, false);
+    assert.equal(payload.previewMp3Path, undefined);
+    assert.ok(payload.instrumentCoverage.every((entry) => !entry.covered || entry.selectedPackId !== "generaluser_gs"));
+    const availability = payload.requestedPackAvailability.find((entry) => entry.requestedPackId === "salamander_grand");
+    assert.ok(availability);
+    assert.equal(availability.manualInstallRequired, true);
+    assert.deepEqual(availability.requiredFiles, ["Salamander.sf2", "LICENSE.txt"]);
+    assert.match(availability.fallbackPolicy, /Do not label fallback renders as Salamander Grand Piano/);
+  } finally {
+    process.env.PATH = oldPath;
+    if (oldSoundfontDir === undefined) delete process.env.MUSIC_SOUNDFONT_DIR; else process.env.MUSIC_SOUNDFONT_DIR = oldSoundfontDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("export_music_project creates a music package with README, playlist, checks, and license warnings", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "music-export-package-"));
   try {
