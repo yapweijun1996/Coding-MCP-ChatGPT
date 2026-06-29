@@ -44,7 +44,9 @@ const inspectWebpageSchema = z.object({
   waitUntil: waitUntilSchema.optional().default("networkidle"),
   screenshot: z.boolean().optional().default(true),
   fullPage: z.boolean().optional().default(false),
-  maxIssues: z.number().int().min(1).max(50).optional().default(12)
+  maxIssues: z.number().int().min(1).max(50).optional().default(12),
+  captureNetwork: z.boolean().optional().default(true),
+  slowRequestMs: z.number().int().min(100).max(60000).optional().default(2500)
 });
 
 const inspectWebpagePlusSchema = inspectWebpageSchema.extend({
@@ -455,8 +457,10 @@ function toolResult(summary: string, reportUrl: string, structured: Record<strin
 async function handleInspectWebpage(input: unknown, ctx: ToolContext, plus: boolean, allowPrivateNetwork = false): Promise<ToolResult> {
   const parsed = (plus ? inspectWebpagePlusSchema : inspectWebpageSchema).parse(input);
   await guardInspectionUrl(parsed.url, allowPrivateNetwork);
-  const options = plus ? parsed as InspectWebpagePlusOptions : { ...parsed, captureNetwork: false, captureTrace: false, slowRequestMs: 2500 };
-  const results = await inspectWithPlaywright(parsed.url, options, plus ? ctx : undefined, allowPrivateNetwork);
+  const options: InspectWebpagePlusOptions = plus
+    ? parsed as InspectWebpagePlusOptions
+    : { ...parsed, captureTrace: false };
+  const results = await inspectWithPlaywright(parsed.url, options, ctx, allowPrivateNetwork);
   const reportUrl = await createHtmlReport(ctx, plus ? "Webpage Debug Report" : "Webpage Inspection Report", `Inspected ${parsed.url}`, plus ? "web-debug" : "web-inspect", renderWebpageInspectionReport(parsed.url, results));
   const resultForLogs = results.map(resultWithoutImages);
   const inspection = { ...summarizeBrowserInspection(resultForLogs), reportUrl, inspectedAt: new Date().toISOString() };
@@ -1241,7 +1245,7 @@ const commonWebProperties = {
 
 export const webInspectTools: ToolModule[] = [
   {
-    definition: toolDefinition("inspect_webpage", "Render a URL in Chromium across desktop, tablet, and mobile viewports, then report screenshots, console errors, and responsive layout issues.", commonWebProperties),
+    definition: toolDefinition("inspect_webpage", "Render a URL in Chromium across desktop, tablet, and mobile viewports, then report screenshots, console errors, network failures (failed requests, asset errors, slow resources), and responsive layout issues.", { ...commonWebProperties, captureNetwork: { type: "boolean" }, slowRequestMs: { type: "number" } }),
     enabledByDefault: true,
     schema: inspectWebpageSchema,
     handler: (input, ctx) => handleInspectWebpage(input, ctx, false)

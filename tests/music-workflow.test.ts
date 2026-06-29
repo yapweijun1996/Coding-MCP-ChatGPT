@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getToolModule } from "../src/mcp/registry.js";
-import { pickJazzPackRegistryCandidatePaths, buildEnsembleQa, fluidSynthArgs, midiBuffer } from "../src/mcp/tools/music-workflow.js";
+import { pickJazzPackRegistryCandidatePaths, buildEnsembleQa, fluidSynthArgs, midiBuffer, renderProductionMusicHtml } from "../src/mcp/tools/music-workflow.js";
 import { createProject, getProjectStoredFilePath, getProjectFilesDirectory, validateProject, readProjectFile, writeProjectAsset, writeProjectFile } from "../src/projects/store.js";
 import { mkdir as mkdirNode, truncate as truncateNode } from "node:fs/promises";
 import { skillRegistry } from "../src/skills/registry.js";
@@ -281,6 +281,15 @@ async function installFakeFfmpeg(root: string) {
 const fs = require("fs");
 if (process.argv.includes("-version")) {
   console.log("ffmpeg fake 6.1");
+  process.exit(0);
+}
+// Two-pass loudnorm pass 1: emit fake measured stats to stderr so the caller can build the
+// linear=true pass 2 filter. No output file is written (null muxer, last arg is "-").
+if (process.argv.some(a => a.includes("print_format=json"))) {
+  process.stderr.write(JSON.stringify({
+    input_i: "-23.17", input_tp: "-12.41", input_lra: "7.40",
+    input_thresh: "-33.86", target_offset: "7.17"
+  }) + "\\n");
   process.exit(0);
 }
 const out = process.argv[process.argv.length - 1];
@@ -3974,4 +3983,385 @@ test("midiBuffer bow-expression output is deterministic", () => {
   const a = midiBuffer(makeComposition({ cello: longCelloLine }));
   const b = midiBuffer(makeComposition({ cello: longCelloLine }));
   assert.deepEqual(a, b, "same composition must emit byte-identical MIDI");
+});
+
+// Regression for issue_0153: when HTML is in a subdirectory, the MP3 src must be relative
+// to the HTML file, not the project root — otherwise the browser resolves the wrong URL.
+test("renderProductionMusicHtml: subdirectory HTML uses correct relative MP3 URL (issue_0153)", () => {
+  // Case 1: HTML at root, MP3 in music/ subdirectory — relative path is music/preview.mp3.
+  const rootHtml = renderProductionMusicHtml({
+    htmlPath: "music-project.html",
+    title: "Test",
+    statusLabel: "OK",
+    productionReady: true,
+    previewMp3Path: "music/preview.mp3",
+    licensesPath: "LICENSES.md",
+    reportPath: "music/report.json"
+  });
+  assert.ok(rootHtml.includes('src="music/preview.mp3"'), "root HTML must use project-relative MP3 path");
+  assert.ok(rootHtml.includes('href="music/preview.mp3"'), "root download link must use project-relative MP3 path");
+  assert.ok(rootHtml.includes('href="LICENSES.md"'), "root HTML licenses link must be correct");
+
+  // Case 2 (the bug): HTML at music/player.html, MP3 at music/preview.mp3 — both in same
+  // directory, so relative path from the HTML is just the filename: preview.mp3.
+  const subdirHtml = renderProductionMusicHtml({
+    htmlPath: "music/player.html",
+    title: "Test",
+    statusLabel: "OK",
+    productionReady: true,
+    previewMp3Path: "music/preview.mp3",
+    licensesPath: "LICENSES.md",
+    reportPath: "music/report.json"
+  });
+  assert.ok(subdirHtml.includes('src="preview.mp3"'), "subdirectory HTML must use filename-only MP3 src, not music/preview.mp3");
+  assert.ok(!subdirHtml.includes('src="music/preview.mp3"'), "subdirectory HTML must NOT use project-root-relative MP3 path in src");
+  assert.ok(subdirHtml.includes('href="../LICENSES.md"'), "subdirectory HTML must use ../LICENSES.md to reach the root");
+});
+
+// ── P1 Epic: Strict Handwritten Solo Piano Path ─────────────────────────────
+
+test("author_handwritten_music_score: writes MusicXML + manifest + MIDI with D minor key, RH/LH parts", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-handwritten-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Handwritten Piano", createdByClientId: "composer" });
+    const author = getToolModule("author_handwritten_music_score");
+    assert.ok(author, "author_handwritten_music_score must be registered");
+
+    const rhNotes = [
+      { track: "piano_right_hand", midi: 62, startBeat: 0, durationBeats: 1, velocity: 80 },
+      { track: "piano_right_hand", midi: 64, startBeat: 1, durationBeats: 1, velocity: 75 },
+      { track: "piano_right_hand", midi: 65, startBeat: 2, durationBeats: 1, velocity: 78 },
+      { track: "piano_right_hand", midi: 69, startBeat: 3, durationBeats: 1, velocity: 82 }
+    ];
+    const lhNotes = [
+      { track: "piano_left_hand", midi: 38, startBeat: 0, durationBeats: 2, velocity: 65 },
+      { track: "piano_left_hand", midi: 41, startBeat: 2, durationBeats: 2, velocity: 68 }
+    ];
+
+    const result = await author!.handler({
+      projectId: project.id,
+      title: "Nocturne in D Minor",
+      tempoBpm: 60,
+      key: "D minor",
+      durationSec: 8,
+      sections: [
+        { name: "A", bars: 2, intensity: 0.5 }
+      ],
+      parts: { piano_right_hand: rhNotes, piano_left_hand: lhNotes },
+      chordMap: [
+        { bar: 1, chord: "Dm" },
+        { bar: 2, chord: "A7" }
+      ],
+      outputMusicXmlPath: "music/score.xml",
+      outputManifestPath: "music/composition-manifest.json",
+      outputMidiPath: "music/score.mid"
+    }, ctx);
+
+    assert.equal(result.ok, true, `Expected ok:true but got errors: ${JSON.stringify(result.errors)}`);
+    assert.ok(result.artifacts.includes("music/score.xml"), "MusicXML file listed in artifacts");
+    assert.ok(result.artifacts.includes("music/composition-manifest.json"), "manifest listed in artifacts");
+    assert.ok(result.artifacts.includes("music/score.mid"), "MIDI listed in artifacts");
+
+    // Verify MusicXML is valid XML with correct structure
+    const xmlContent = await readProjectFile(ctx.projectRoot, project.id, "music/score.xml");
+    assert.ok(xmlContent.includes("score-partwise"), "MusicXML must have score-partwise root");
+    assert.ok(xmlContent.includes("Piano Right Hand"), "RH part name must appear");
+    assert.ok(xmlContent.includes("Piano Left Hand"), "LH part name must appear");
+    assert.ok(xmlContent.includes("<fifths>-1</fifths>"), "D minor must use fifths=-1");
+    assert.ok(xmlContent.includes("<mode>minor</mode>"), "key mode must be minor");
+
+    // Verify manifest metadata
+    const manifestJson = await readProjectFile(ctx.projectRoot, project.id, "music/composition-manifest.json");
+    const manifest = JSON.parse(manifestJson) as {
+      title: string; key: string; tempo: number;
+      authoringMode: string;
+      scoreSource: { scoreDriven: boolean; format: string };
+      compositionPlan: { form: Array<{ name: string; bars: number }>; motifs: Array<{ id: string }> };
+      performance: { humanized: boolean };
+      tracks: { piano_right_hand: unknown[]; piano_left_hand: unknown[] };
+      chordMap: Array<{ bar: number; chord: string }>;
+    };
+    assert.equal(manifest.title, "Nocturne in D Minor");
+    assert.equal(manifest.key, "D minor");
+    assert.equal(manifest.tempo, 60);
+    assert.equal(manifest.authoringMode, "strict_handwritten");
+    assert.equal(manifest.scoreSource.scoreDriven, true);
+    assert.equal(manifest.scoreSource.format, "handwritten");
+    assert.ok(manifest.compositionPlan.motifs.length > 0, "compositionPlan must have at least one motif");
+    assert.equal(manifest.performance.humanized, true, "performance.humanized must be true for handwritten scores");
+    assert.equal(manifest.tracks.piano_right_hand.length, rhNotes.length);
+    assert.equal(manifest.tracks.piano_left_hand.length, lhNotes.length);
+    assert.ok(Array.isArray(manifest.chordMap), "chordMap must be in manifest");
+
+    // Verify MIDI file is valid
+    const midiBytes = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/score.mid"));
+    assert.equal(midiBytes.subarray(0, 4).toString("ascii"), "MThd", "MIDI must start with MThd header");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("author_handwritten_music_score: fails closed when RH part is empty", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-handwritten-empty-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Empty RH", createdByClientId: "composer" });
+    const author = getToolModule("author_handwritten_music_score");
+    assert.ok(author);
+
+    // Zod min(1) on piano_right_hand should reject empty array
+    await assert.rejects(
+      () => author!.handler({
+        projectId: project.id,
+        title: "Bad Score",
+        tempoBpm: 60,
+        key: "C major",
+        durationSec: 4,
+        sections: [{ name: "A", bars: 1, intensity: 0.5 }],
+        parts: { piano_right_hand: [], piano_left_hand: [{ track: "piano_left_hand", midi: 48, startBeat: 0, durationBeats: 1, velocity: 60 }] },
+        chordMap: [{ bar: 1, chord: "C" }]
+      }, ctx),
+      (err) => err instanceof Error || (typeof err === "object" && err !== null),
+      "empty piano_right_hand must be rejected"
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("validate_music_audition_distinctness: fails near-identical versions, passes genuinely different ones", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-distinctness-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Distinctness Test", createdByClientId: "composer" });
+    const validator = getToolModule("validate_music_audition_distinctness");
+    assert.ok(validator, "validate_music_audition_distinctness must be registered");
+
+    // Build two near-identical manifests (same notes, same chords)
+    const makeManifest = (filename: string, transpose = 0) => writeProjectFile(ctx.projectRoot, project.id, filename, JSON.stringify({
+      title: "Test", style: "score_import", mood: "test", tempo: 90, key: "C major",
+      durationSeconds: 8, loopable: false, instruments: ["piano_right_hand", "piano_left_hand"],
+      sections: [{ name: "A", bars: 2, intensity: 0.5 }],
+      chordProgression: ["Cmaj7", "Am7", "Dm7", "G7"],
+      tracks: {
+        piano_right_hand: [
+          { track: "piano_right_hand", midi: 60 + transpose, startBeat: 0, durationBeats: 1, velocity: 80 },
+          { track: "piano_right_hand", midi: 62 + transpose, startBeat: 1, durationBeats: 1, velocity: 78 },
+          { track: "piano_right_hand", midi: 64 + transpose, startBeat: 2, durationBeats: 1, velocity: 76 },
+          { track: "piano_right_hand", midi: 65 + transpose, startBeat: 3, durationBeats: 1, velocity: 74 }
+        ],
+        piano_left_hand: [
+          { track: "piano_left_hand", midi: 48 + transpose, startBeat: 0, durationBeats: 2, velocity: 65 },
+          { track: "piano_left_hand", midi: 52 + transpose, startBeat: 2, durationBeats: 2, velocity: 65 }
+        ]
+      },
+      compositionPlan: { form: [{ name: "A", bars: 2, role: "main", targetIntensity: 0.5 }], motifs: [{ id: "m1", contour: "test", rhythm: "q", development: [] }], energyCurve: [0.5, 0.5], arrangementIntent: [] },
+      performance: { humanized: true, timingJitterBeats: 0, velocityJitter: 0, sustainPedal: [], rubatoMap: [] },
+      license: { output: "generated_from_user_or_project_score", dependencies: [] },
+      scoreSource: { format: "handwritten", scoreDriven: true, partCount: 2, noteCount: 6, trackInstruments: {} },
+      authoringMode: "strict_handwritten"
+    }, null, 2) + "\n");
+
+    // Near-identical pair (transpose=0 vs 0)
+    await makeManifest("music/v1.json", 0);
+    await makeManifest("music/v2-same.json", 0);
+
+    const failResult = await validator!.handler({
+      projectId: project.id,
+      manifestPaths: ["music/v1.json", "music/v2-same.json"],
+      minDistinctnessScore: 0.65,
+      requireDifferentMelody: true,
+      requireDifferentChordMap: true
+    }, ctx);
+    assert.equal(failResult.ok, false, "identical manifests must fail distinctness check");
+    const failPayload = failResult.structuredContent as { pairs: Array<{ ok: boolean; distinctnessScore: number }> };
+    assert.ok(failPayload.pairs.length >= 1);
+    assert.equal(failPayload.pairs[0].ok, false);
+    assert.ok(failPayload.pairs[0].distinctnessScore < 0.65, `distinctness score ${failPayload.pairs[0].distinctnessScore} should be < 0.65 for identical versions`);
+
+    // Genuinely different pair: v1 vs v3 with 12 semitone transpose (octave) AND different chord map
+    await writeProjectFile(ctx.projectRoot, project.id, "music/v3-different.json", JSON.stringify({
+      title: "Variation B", style: "score_import", mood: "test", tempo: 120, key: "G minor",
+      durationSeconds: 8, loopable: false, instruments: ["piano_right_hand", "piano_left_hand"],
+      sections: [{ name: "intro", bars: 1, intensity: 0.3 }, { name: "B", bars: 1, intensity: 0.7 }],
+      chordProgression: ["Gm", "Eb", "F", "Bb"],
+      tracks: {
+        piano_right_hand: [
+          { track: "piano_right_hand", midi: 74, startBeat: 0, durationBeats: 2, velocity: 90 },
+          { track: "piano_right_hand", midi: 79, startBeat: 2, durationBeats: 0.5, velocity: 85 },
+          { track: "piano_right_hand", midi: 77, startBeat: 2.5, durationBeats: 0.5, velocity: 82 }
+        ],
+        piano_left_hand: [
+          { track: "piano_left_hand", midi: 43, startBeat: 0, durationBeats: 4, velocity: 60 }
+        ]
+      },
+      compositionPlan: { form: [{ name: "B", bars: 2, role: "contrast", targetIntensity: 0.7 }], motifs: [{ id: "m2", contour: "ascending", rhythm: "e.e", development: [] }], energyCurve: [0.3, 0.7], arrangementIntent: [] },
+      performance: { humanized: true, timingJitterBeats: 0.02, velocityJitter: 8, sustainPedal: [], rubatoMap: [] },
+      license: { output: "generated_from_user_or_project_score", dependencies: [] },
+      scoreSource: { format: "handwritten", scoreDriven: true, partCount: 2, noteCount: 4, trackInstruments: {} },
+      authoringMode: "strict_handwritten"
+    }, null, 2) + "\n");
+
+    const passResult = await validator!.handler({
+      projectId: project.id,
+      manifestPaths: ["music/v1.json", "music/v3-different.json"],
+      minDistinctnessScore: 0.65,
+      requireDifferentMelody: true,
+      requireDifferentChordMap: true
+    }, ctx);
+    assert.equal(passResult.ok, true, `Different manifests should pass distinctness: errors=${JSON.stringify(passResult.errors)}`);
+    const passPayload = passResult.structuredContent as { pairs: Array<{ ok: boolean; distinctnessScore: number }> };
+    assert.ok(passPayload.pairs[0].distinctnessScore >= 0.65, `distinctness score ${passPayload.pairs[0].distinctnessScore} should be >= 0.65`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("render_midi_with_soundfont: renderProfile=clean_dry reports noiseBedApplied=false and cleanRender=true", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-clean-dry-"));
+  const oldPath = process.env.PATH;
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Clean Dry Render", createdByClientId: "composer" });
+    const compose = getToolModule("compose_music");
+    const packManager = getToolModule("manage_jazz_instrument_packs");
+    const soundfontRender = getToolModule("render_midi_with_soundfont");
+    assert.ok(compose && packManager && soundfontRender);
+
+    await compose!.handler({
+      projectId: project.id,
+      instruments: ["piano"],
+      durationSeconds: 8,
+      outputManifestPath: "music/cue.json",
+      outputMidiPath: "music/cue.mid"
+    }, ctx);
+
+    const sf2 = fakeSoundfontBytes();
+    const soundfontPath = "soundfonts/generaluser-gs/GeneralUser-GS.sf2";
+    await writeProjectAsset(ctx.projectRoot, project.id, soundfontPath, sf2, "audio/soundfont");
+    await writeProjectFile(ctx.projectRoot, project.id, "soundfonts/generaluser-gs/LICENSE.txt", "GeneralUser GS license fixture\n");
+    await writeProjectFile(ctx.projectRoot, project.id, "soundfonts/generaluser-gs/README.md", "# GeneralUser GS fixture\n");
+
+    await packManager!.handler({
+      projectId: project.id,
+      packs: [{
+        packId: "generaluser_gs",
+        displayName: "GeneralUser GS",
+        instrumentRole: "general_midi",
+        format: "soundfont",
+        assetPaths: [soundfontPath],
+        declaredSha256: createHash("sha256").update(sf2).digest("hex"),
+        licenseType: "generaluser_gs_2_0",
+        source: "https://github.com/mrbumpy409/GeneralUser-GS",
+        sourceUrl: "https://github.com/mrbumpy409/GeneralUser-GS",
+        licenseTextPath: "soundfonts/generaluser-gs/LICENSE.txt",
+        readmePath: "soundfonts/generaluser-gs/README.md",
+        commercialUseAllowed: true,
+        redistributionAllowed: true,
+        productionUseApproved: true,
+        qualityTier: "production_candidate"
+      }]
+    }, ctx);
+
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${oldPath}`;
+    const cleanDryResult = await soundfontRender!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/cue.json",
+      soundfontPackId: "generaluser_gs",
+      renderProfile: "clean_dry",
+      outputAudioPath: "music/clean-dry.wav",
+      outputReportPath: "music/clean-dry-report.json"
+    }, ctx);
+
+    assert.equal(cleanDryResult.ok, true, `clean_dry render should succeed: ${JSON.stringify(cleanDryResult.errors)}`);
+    const cleanPayload = cleanDryResult.structuredContent as {
+      noiseBedApplied: boolean; cleanRender: boolean; renderProfile: string; normalized: boolean;
+    };
+    assert.equal(cleanPayload.noiseBedApplied, false, "clean_dry must report noiseBedApplied=false");
+    assert.equal(cleanPayload.cleanRender, true, "clean_dry must report cleanRender=true");
+    assert.equal(cleanPayload.renderProfile, "clean_dry");
+    assert.equal(cleanPayload.normalized, false, "clean_dry must not apply loudnorm");
+  } finally {
+    process.env.PATH = oldPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("inspect_audio_quality: accepts strict_handwritten manifest without plan/performance penalty (scoreSource.scoreDriven=true)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-qa-scoredrive-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "QA ScoreDriven", createdByClientId: "composer" });
+    const inspect = getToolModule("inspect_audio_quality");
+    assert.ok(inspect, "inspect_audio_quality must be registered");
+
+    // Write a manifest that simulates an author_handwritten_music_score output
+    // (has scoreSource.scoreDriven=true and authoringMode=strict_handwritten, with plan+performance)
+    const manifest = {
+      title: "Test Score", style: "strict_handwritten_solo_piano", mood: "test", tempo: 80, key: "D minor",
+      durationSeconds: 8, loopable: false, instruments: ["piano_right_hand", "piano_left_hand"],
+      sections: [{ name: "A", bars: 2, intensity: 0.5 }],
+      chordProgression: ["Dm", "A7", "Dm", "A7"],
+      tracks: {
+        piano_right_hand: [
+          { track: "piano_right_hand", midi: 62, startBeat: 0, durationBeats: 1, velocity: 80 },
+          { track: "piano_right_hand", midi: 64, startBeat: 1, durationBeats: 1, velocity: 75 },
+          { track: "piano_right_hand", midi: 65, startBeat: 2, durationBeats: 1, velocity: 78 },
+          { track: "piano_right_hand", midi: 69, startBeat: 3, durationBeats: 1, velocity: 82 }
+        ],
+        piano_left_hand: [
+          { track: "piano_left_hand", midi: 38, startBeat: 0, durationBeats: 2, velocity: 65 },
+          { track: "piano_left_hand", midi: 41, startBeat: 2, durationBeats: 2, velocity: 68 }
+        ]
+      },
+      compositionPlan: {
+        form: [{ name: "A", bars: 2, role: "main", targetIntensity: 0.5 }],
+        motifs: [{ id: "rh_melody", contour: "handwritten", rhythm: "score-notated", development: ["as authored"] }],
+        energyCurve: [0.5, 0.5],
+        arrangementIntent: ["render as notated"]
+      },
+      performance: { humanized: true, timingJitterBeats: 0.01, velocityJitter: 5, sustainPedal: [], rubatoMap: [] },
+      license: { output: "generated_from_user_or_project_score", dependencies: [] },
+      scoreSource: { format: "handwritten", scoreDriven: true, partCount: 2, noteCount: 6, trackInstruments: {} },
+      authoringMode: "strict_handwritten"
+    };
+    await writeProjectFile(ctx.projectRoot, project.id, "music/handwritten-manifest.json", JSON.stringify(manifest, null, 2) + "\n");
+
+    const qaResult = await inspect!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/handwritten-manifest.json",
+      useCase: "solo piano audition",
+      checkLoop: false,
+      outputPath: "music/qa-report.json"
+    }, ctx);
+
+    // Should not have "high" severity findings for missing plan/performance (those are injected for score-driven)
+    const qaPayload = qaResult.structuredContent as {
+      findings: Array<{ severity: string; category: string; message: string }>;
+      musicalityReport: { hasPlan: boolean; hasHumanizedPerformance: boolean };
+    };
+    assert.equal(qaPayload.musicalityReport.hasPlan, true, "hasPlan must be true when compositionPlan is present");
+    assert.equal(qaPayload.musicalityReport.hasHumanizedPerformance, true, "hasHumanizedPerformance must be true when performance.humanized=true");
+    const highPerfFindings = qaPayload.findings.filter((f) => f.severity === "high" && f.category === "performance");
+    assert.equal(highPerfFindings.length, 0, `No high-severity performance finding expected for strict_handwritten: ${JSON.stringify(highPerfFindings)}`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("music-workflow skill exposes author_handwritten_music_score and validate_music_audition_distinctness; compose_music no longer recommended for professional solo piano", () => {
+  const music = skillRegistry.find((skill) => skill.id === "music-workflow");
+  assert.ok(music, "music-workflow skill must exist in registry");
+  assert.ok(music!.toolNames.includes("author_handwritten_music_score"), "author_handwritten_music_score must be in toolNames");
+  assert.ok(music!.toolNames.includes("validate_music_audition_distinctness"), "validate_music_audition_distinctness must be in toolNames");
+  assert.ok(music!.toolNames.includes("validate_music_ensemble"), "validate_music_ensemble must be in toolNames");
+  // compose_music must still be registered (for sketch use), but NOT promoted as the professional path
+  assert.ok(music!.toolNames.includes("compose_music"), "compose_music must remain in toolNames for rough sketch use");
+  const protocol = music!.protocolMarkdown;
+  assert.ok(protocol.includes("author_handwritten_music_score"), "protocolMarkdown must mention author_handwritten_music_score");
+  assert.ok(protocol.includes("validate_music_audition_distinctness"), "protocolMarkdown must mention validate_music_audition_distinctness");
+  // The default professional path must reference the strict handwritten tool, not compose_music
+  assert.ok(protocol.includes("Rough sketch") || protocol.includes("rough sketch"), "compose_music must be demoted to rough sketch in protocol");
+  assert.ok(!protocol.includes("default to the score-first path: `import_musicxml_score` or `compose_music`"), "compose_music must NOT be in the professional default path");
 });

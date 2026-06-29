@@ -5,6 +5,7 @@ import { mockApiTools } from "./mock-api.js";
 import { mockDataTools } from "./mock-data.js";
 import { securityScanTools } from "./security-scan.js";
 import { projectReviewCommentTools } from "./project-review-comments.js";
+import { projectCodeReviewTools } from "./project-code-review.js";
 import { designSystemAuditTools } from "./design-system-audit.js";
 import { i18nAuditTools } from "./i18n-audit.js";
 import { seoMetaAuditTools } from "./seo-meta-audit.js";
@@ -133,6 +134,7 @@ export const allToolModules: ToolModule[] = [
   ...mockDataTools,
   ...securityScanTools,
   ...projectReviewCommentTools,
+  ...projectCodeReviewTools,
   ...designSystemAuditTools,
   ...i18nAuditTools,
   ...seoMetaAuditTools,

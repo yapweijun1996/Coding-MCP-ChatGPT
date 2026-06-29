@@ -431,8 +431,8 @@ The following command and network/process helpers are disabled by default and mu
 Browser QA tools:
 
 - `check_url`: fast HTTP reachability and response preview.
-- `inspect_webpage`: lightweight Chromium responsive screenshot and layout check.
-- `inspect_webpage_plus`: deeper browser debugging with console, page, network, screenshot, and optional trace artifacts.
+- `inspect_webpage`: Chromium responsive QA across desktop/tablet/mobile — reports screenshots, console errors, layout issues, and network signals (failed requests, asset failures, slow resources) by default.
+- `inspect_webpage_plus`: deeper browser debugging with console, page, network, screenshot, and optional Playwright trace artifacts.
 - `audit_accessibility`: axe-powered WCAG-style accessibility scan.
 - `audit_lighthouse`: Lighthouse quality audit for performance, accessibility, best practices, SEO, and PWA.
 - `inspect_interaction_flow`: safe declarative browser flow test without arbitrary JavaScript execution.

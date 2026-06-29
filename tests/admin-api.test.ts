@@ -639,3 +639,47 @@ test("favicon is served on both app and content hosts (no 404 console noise)", a
     }
   });
 });
+
+// Regression for issue_0153: MP3 at music/preview.mp3 must be served when player HTML is
+// at music/player.html — both live in the same project subdirectory.
+// Uses the global PROJECT_ROOT (always registered) to avoid the rate-limited login path.
+test("share route serves MP3 asset in subdirectory (issue_0153 regression)", async () => {
+  await withServer(async (baseUrl) => {
+    // Minimal valid ID3v2 tag so the browser recognizes the asset as MP3.
+    const fakeId3Header = Buffer.from([
+      0x49, 0x44, 0x33,       // "ID3"
+      0x03, 0x00,             // version 2.3.0
+      0x00,                   // flags
+      0x00, 0x00, 0x00, 0x00  // size (0 frames)
+    ]);
+
+    // Use the global project root so resolveProjectAcrossRoots can find the project
+    // without needing an authenticated user session (avoids the login rate-limit window
+    // that the preceding test leaves locked).
+    const globalProjectRoot = process.env.PROJECT_ROOT!;
+    const project = await createProject(globalProjectRoot, {
+      title: "Music Player Test",
+      createdByClientId: "test-client"
+    });
+
+    // Write player HTML in the music/ subdirectory. The MP3 src should be relative to this
+    // HTML file, so the correct URL is just the filename — not the full project-relative path.
+    const playerHtml = `<!doctype html><html><head><title>Player</title></head><body><audio src="preview.mp3" controls></audio></body></html>`;
+    await writeProjectFile(globalProjectRoot, project.id, "music/player.html", playerHtml);
+    await writeProjectAsset(globalProjectRoot, project.id, "music/preview.mp3", fakeId3Header, "audio/mpeg");
+
+    await publishProject(globalProjectRoot, project.id, "https://content.example.test", "music/player.html", {
+      privateBaseUrl: "https://example.test",
+      shareAccess: "anyone_with_link"
+    });
+
+    const htmlRes = await fetch(`${baseUrl}/share/${project.id}/music/player.html`);
+    assert.equal(htmlRes.status, 200, "player HTML must be 200");
+
+    const mp3Res = await fetch(`${baseUrl}/share/${project.id}/music/preview.mp3`);
+    assert.equal(mp3Res.status, 200, "MP3 asset in subdirectory must be 200 (not 404)");
+    assert.match(mp3Res.headers.get("content-type") ?? "", /^audio\/mpeg\b/, "content-type must be audio/mpeg");
+    const mp3Bytes = Buffer.from(await mp3Res.arrayBuffer());
+    assert.equal(mp3Bytes.subarray(0, 3).toString("ascii"), "ID3", "MP3 response must start with ID3 header");
+  });
+});

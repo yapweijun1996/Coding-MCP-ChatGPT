@@ -399,6 +399,7 @@ Use this skill to discover the available workspace/project context before taking
       "submit_review_feedback",
       "get_review_feedback",
       "resolve_review_feedback",
+      "review_project_code",
       "add_project_review_comment",
       "list_project_review_comments",
       "reply_project_review_comment",
@@ -652,6 +653,7 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
 - For old single-file or messy static demos, run \`modernize_legacy_project\` to analyze legacy patterns, split inline CSS/JS into modular files, preserve the original entry, produce a migration report, and validate the modernized entry before continuing feature work.
 - After publishing a demo, run \`monitor_published_demo_health\` to collect production-style health evidence: HTTP uptime, runtime/page errors, console errors, failed requests, broken assets, slow loads, slow requests, and recent deploy health history.
 - For admin/PWA forms, drafts, filters, theme/language preferences, or local persistence, run \`test_form_persistence\` to seed/reset storage, fill fields, reload, assert form values, localStorage/sessionStorage, IndexedDB databases, and same-context page reopen behavior.
+- After project generation, refactor, or publish, run \`review_project_code\` to get a structured static code review covering accessibility, performance, maintainability, security, duplication, and naming — with file/line references and severity tags. Use \`syncComments=true\` (default) to automatically write findings as project review comments, then use \`resolve_project_review_comment\` to close each finding and \`export_project_review_summary\` for the final handoff report.
 - For larger human reviews, use \`add_project_review_comment\` to attach file/line, screenshot region, UI selector, issue, or project-level comments; use \`reply_project_review_comment\`, \`resolve_project_review_comment\`, and \`export_project_review_summary\` to close the review loop.
 - For project task queues with competing work, call \`rank_project_tasks\` or \`list_project_tasks\` with default rank sorting to choose by dependency readiness, priority, inferred risk, dependency impact, progress, and recency.
 - When a task is blocked, use \`set_project_task_blocker\` or \`upsert_project_task\` with \`blockedReason\` and \`unblockRequirement\` so resume, board, dependency, and ranking views explain why it is blocked and what must happen next.
@@ -1002,6 +1004,7 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "generate_component_library",
       "modernize_legacy_project",
       "monitor_published_demo_health",
+      "review_project_code",
       "add_project_review_comment",
       "list_project_review_comments",
       "reply_project_review_comment",
@@ -1023,6 +1026,7 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
 Use this skill to reproduce a failure, collect evidence, identify the root cause, and verify the repair.
 
 - Start with the failing command, validation result, activity history, or browser inspection output.
+- Use \`review_project_code\` for a structured static code review with severity-tagged findings across accessibility, performance, maintainability, security, duplication, and naming. It integrates \`validate_project\` results and can sync findings as project review comments for the resolve/export workflow.
 - Use sandbox execution tools for bounded reproductions that need isolated input files, output limits, artifact capture, and cleanup.
 - Use backup/recovery tools to compare against or restore from known-good project recovery points.
 - Explain the root cause before changing behavior.
@@ -1356,16 +1360,20 @@ Use this skill for project-local 3D assets, game scene planning, gameplay QA, an
       "build_music_license_manifest",
       "manage_jazz_instrument_packs",
       "export_music_assets",
-      "audition_music_variations"
+      "audition_music_variations",
+      "author_handwritten_music_score",
+      "validate_music_audition_distinctness",
+      "validate_music_ensemble"
     ],
     protocolMarkdown: `# Music Workflow
 
-Use this skill for score-driven MusicXML import, original background music, MIDI sketches, professional SoundFont/SFZ rendering, jazz harmony, grooves, and export handoff.
+Use this skill for score-driven MusicXML import, strict handwritten solo piano, original background music, MIDI sketches, professional SoundFont/SFZ rendering, jazz harmony, grooves, and export handoff.
 
 - Start with \`create_music_style_brief\` when the user references a venue, brand, artist, or vibe; convert it into broad non-copying musical traits.
-- For any user-facing request to make music, a song, professional audio, cafe/venue background music, client-ready music, or a public demo, default to the score-first path: \`import_musicxml_score\` or \`compose_music\` -> \`edit_midi\`/humanize as needed -> \`check_music_render_environment\` -> \`render_production_music\` with a ready commercial-safe SoundFont/SFZ pack -> \`inspect_audio_quality\` -> \`export_music_project\`.
+- **Professional / client-ready solo piano (default path):** use \`author_handwritten_music_score\` to supply explicit RH/LH note arrays, sections, chord map, and performance metadata → \`validate_music_audition_distinctness\` when producing multiple versions → \`render_midi_with_soundfont(renderProfile=clean_dry)\` → \`inspect_audio_quality\`. This is the only path for audition-grade solo piano deliverables. \`compose_music\` is NOT recommended for this use case.
+- **MusicXML import path:** use \`import_musicxml_score\` when the user provides a MusicXML file; it writes a composition manifest + MIDI with \`scoreSource.scoreDriven=true\`, \`compositionPlan\`, and \`performance\` already populated so \`inspect_audio_quality\` does not reject it.
+- **Rough sketch / idea generation only:** \`compose_music\` is suitable for quick structural ideas and internal previews. Do NOT use it for production, audition, or client-ready solo piano — it produces a generic arrangement without strict RH/LH voice separation or audition-grade expressiveness.
 - Use \`import_musicxml_score\` when the user provides MusicXML or wants score-first generation; it writes the normal composition manifest plus standard MIDI, defaults missing tempo/instrument metadata conservatively, and records warnings in the manifest.
-- Use \`compose_music\` to generate the structured composition manifest and MIDI.
 - Use \`validate_music_ensemble\` before publishing duet/ensemble requests to fail closed when a requested instrument is silent, only sequential, or missing meaningful overlap.
 - Use \`edit_midi\` for quantize, transpose, humanize, swing, and velocity shaping.
 - Use \`install_free_soundfont_pack\` for the v1 free GeneralUser GS candidate. Docker images bundle it under \`/app/soundfonts/generaluser-gs/\`, so this tool copies the runtime cache into project assets before falling back to upstream download. Then call \`manage_jazz_instrument_packs\` with retained license text, README, source URL, SHA-256, \`productionUseApproved=true\`, and \`qualityTier=production_candidate\`. GeneralUser GS is free/commercial-friendly, not MIT.

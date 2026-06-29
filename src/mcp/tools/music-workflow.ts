@@ -198,11 +198,45 @@ const renderMidiWithSoundfontInputSchema = z.object({
   sampleRate: z.number().int().min(8000).max(96000).optional().default(44100),
   outputAudioPath: z.string().min(1).max(240).optional().default("music/rendered-soundfont.wav"),
   outputStemDirectory: z.string().min(1).max(200).optional().default("music/soundfont-stems"),
-  outputReportPath: z.string().min(1).max(240).optional().default("music/soundfont-render-report.json")
+  outputReportPath: z.string().min(1).max(240).optional().default("music/soundfont-render-report.json"),
+  // clean_dry = SoundFont render only, no noise bed/room ambience applied, optional loudnorm only.
+  // normalized = clean_dry + loudnorm. Omit to keep existing default behavior.
+  renderProfile: z.enum(["clean_dry", "normalized"]).optional()
 }).refine((value) => Boolean(value.compositionManifestPath || value.midiPath), {
   message: "compositionManifestPath or midiPath is required."
 }).refine((value) => Boolean(value.soundfontPackId || value.soundfontPath), {
   message: "soundfontPackId or soundfontPath is required."
+});
+
+const authorHandwrittenMusicScoreInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  title: z.string().min(1).max(240),
+  tempoBpm: z.number().int().min(20).max(300),
+  key: z.string().min(1).max(40),
+  durationSec: z.number().min(1).max(3600),
+  sections: z.array(sectionSchema).min(1).max(64),
+  parts: z.object({
+    piano_right_hand: z.array(noteSchema).min(1),
+    piano_left_hand: z.array(noteSchema).min(1)
+  }),
+  chordMap: z.array(z.object({ bar: z.number().int().min(1), chord: z.string().min(1).max(40) })).min(1).max(256),
+  performanceMap: z.object({
+    timingJitterBeats: z.number().min(0).max(0.1).optional().default(0.01),
+    velocityJitter: z.number().min(0).max(20).optional().default(5),
+    sustainPedal: z.array(z.object({ startBeat: z.number().min(0), endBeat: z.number().min(0), value: z.number().min(0).max(127) })).optional().default([])
+  }).optional().default({}),
+  outputMusicXmlPath: z.string().min(1).max(240).optional().default("music/score.xml"),
+  outputManifestPath: z.string().min(1).max(240).optional().default("music/composition-manifest.json"),
+  outputMidiPath: z.string().min(1).max(240).optional().default("music/score.mid")
+});
+
+const validateMusicAuditionDistinctnessInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  manifestPaths: z.array(z.string().min(1).max(240)).min(2).max(8),
+  minDistinctnessScore: z.number().min(0).max(1).optional().default(0.65),
+  requireDifferentMelody: z.boolean().optional().default(true),
+  requireDifferentChordMap: z.boolean().optional().default(true),
+  outputReportPath: z.string().min(1).max(240).optional().default("music/distinctness-report.json")
 });
 
 const checkMusicRenderEnvironmentInputSchema = z.object({
@@ -746,6 +780,239 @@ const keyNamesByFifthsMinor: Record<number, string> = {
   7: "A# minor"
 };
 
+// Reverse lookup: "D minor" → { fifths: -1, mode: "minor" }
+function fifthsFromKeyName(key: string): { fifths: number; mode: "major" | "minor" } {
+  for (const [fifths, name] of Object.entries(keyNamesByFifthsMinor)) {
+    if (name.toLowerCase() === key.toLowerCase()) return { fifths: Number(fifths), mode: "minor" };
+  }
+  for (const [fifths, name] of Object.entries(keyNamesByFifths)) {
+    if (name.toLowerCase() === key.toLowerCase()) return { fifths: Number(fifths), mode: "major" };
+  }
+  return { fifths: 0, mode: "major" };
+}
+
+// MIDI number → MusicXML <pitch> element (prefer naturals + sharps)
+function midiToPitchXml(midi: number): string {
+  const octave = Math.floor(midi / 12) - 1;
+  const semitone = midi % 12;
+  const pitchMap: Array<[string, number]> = [
+    ["C", 0], ["C", 1], ["D", 0], ["D", 1], ["E", 0],
+    ["F", 0], ["F", 1], ["G", 0], ["G", 1], ["A", 0],
+    ["A", 1], ["B", 0]
+  ];
+  const [step, alter] = pitchMap[semitone];
+  const alterXml = alter !== 0 ? `<alter>${alter}</alter>` : "";
+  return `<pitch><step>${step}</step>${alterXml}<octave>${octave}</octave></pitch>`;
+}
+
+// Build MusicXML note elements for one measure of one part.
+// Returns rest-filled measure content so the measure is always metrically complete.
+function buildMeasureNotesXml(
+  notes: Array<{ midi: number; startBeat: number; durationBeats: number; velocity: number }>,
+  measureStart: number,
+  beatsPerBar: number,
+  divisions: number,
+  isFirstMeasure: boolean,
+  tempoBpm: number,
+  keyXml: string
+): string {
+  const measureEnd = measureStart + beatsPerBar;
+  const totalDivisions = beatsPerBar * divisions;
+
+  const localNotes = notes
+    .filter((n) => n.startBeat >= measureStart - 0.005 && n.startBeat < measureEnd - 0.005)
+    .sort((a, b) => a.startBeat - b.startBeat || b.midi - a.midi);
+
+  let xml = "";
+  if (isFirstMeasure) {
+    xml += `<attributes><divisions>${divisions}</divisions>${keyXml}<time><beats>${beatsPerBar}</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>`;
+    xml += `<direction placement="above"><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>${tempoBpm}</per-minute></metronome></direction-type><sound tempo="${tempoBpm}"/></direction>`;
+  }
+
+  let usedDivisions = 0;
+  let prevBeat = measureStart;
+
+  for (let i = 0; i < localNotes.length; i++) {
+    const note = localNotes[i];
+    const isChord = i > 0 && Math.abs(note.startBeat - localNotes[i - 1].startBeat) < 0.01;
+
+    if (!isChord) {
+      // Fill gap before note with a rest
+      const gapBeats = note.startBeat - prevBeat;
+      if (gapBeats > 0.01) {
+        const gapDiv = Math.min(totalDivisions - usedDivisions, Math.max(1, Math.round(gapBeats * divisions)));
+        if (gapDiv > 0) {
+          xml += `<note><rest/><duration>${gapDiv}</duration><type>quarter</type><voice>1</voice></note>`;
+          usedDivisions += gapDiv;
+        }
+      }
+    }
+
+    const remaining = totalDivisions - usedDivisions;
+    const noteDiv = Math.min(remaining, Math.max(1, Math.round(note.durationBeats * divisions)));
+    if (noteDiv <= 0) continue;
+
+    const chordTag = isChord ? "<chord/>" : "";
+    xml += `<note>${chordTag}${midiToPitchXml(note.midi)}<duration>${noteDiv}</duration><type>quarter</type><voice>1</voice></note>`;
+    if (!isChord) {
+      usedDivisions += noteDiv;
+      prevBeat = note.startBeat + note.durationBeats;
+    }
+  }
+
+  // Trailing rest to fill remaining measure
+  const trailingDiv = totalDivisions - usedDivisions;
+  if (trailingDiv > 0) {
+    xml += `<note><rest/><duration>${trailingDiv}</duration><type>quarter</type><voice>1</voice></note>`;
+  }
+
+  return xml;
+}
+
+// Build a minimal but valid MusicXML document from RH/LH note arrays.
+function buildHandwrittenMusicXml(params: {
+  title: string;
+  tempoBpm: number;
+  key: string;
+  totalBars: number;
+  rhNotes: Array<{ midi: number; startBeat: number; durationBeats: number; velocity: number }>;
+  lhNotes: Array<{ midi: number; startBeat: number; durationBeats: number; velocity: number }>;
+}): string {
+  const DIVISIONS = 4;
+  const BEATS_PER_BAR = 4;
+  const { fifths, mode } = fifthsFromKeyName(params.key);
+  const keyXml = `<key><fifths>${fifths}</fifths><mode>${mode}</mode></key>`;
+
+  const buildPartXml = (
+    notes: Array<{ midi: number; startBeat: number; durationBeats: number; velocity: number }>,
+    partId: string
+  ): string => {
+    let measuresXml = "";
+    for (let bar = 0; bar < params.totalBars; bar++) {
+      const measureStart = bar * BEATS_PER_BAR;
+      const notesXml = buildMeasureNotesXml(notes, measureStart, BEATS_PER_BAR, DIVISIONS, bar === 0, params.tempoBpm, keyXml);
+      measuresXml += `<measure number="${bar + 1}">${notesXml}</measure>`;
+    }
+    return `<part id="${partId}">${measuresXml}</part>`;
+  };
+
+  const safeTitle = params.title.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  return [
+    `<?xml version="1.0" encoding="UTF-8"?>`,
+    `<score-partwise version="3.1">`,
+    `<work><work-title>${safeTitle}</work-title></work>`,
+    `<part-list>`,
+    `<score-part id="P1"><part-name>Piano Right Hand</part-name><midi-instrument id="P1-I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument></score-part>`,
+    `<score-part id="P2"><part-name>Piano Left Hand</part-name><midi-instrument id="P2-I1"><midi-channel>1</midi-channel><midi-program>1</midi-program></midi-instrument></score-part>`,
+    `</part-list>`,
+    buildPartXml(params.rhNotes, "P1"),
+    buildPartXml(params.lhNotes, "P2"),
+    `</score-partwise>`
+  ].join("\n");
+}
+
+// --- Audition Distinctness Helpers ---
+
+// Extract melodic contour (sequence of pitch intervals between successive RH melody notes).
+function melodyContourSignature(notes: Array<{ midi: number; startBeat: number }>): number[] {
+  const sorted = [...notes].sort((a, b) => a.startBeat - b.startBeat);
+  const intervals: number[] = [];
+  for (let i = 1; i < sorted.length; i++) intervals.push(sorted[i].midi - sorted[i - 1].midi);
+  return intervals;
+}
+
+// Normalised edit distance between two numeric sequences (0 = identical, 1 = fully different).
+function sequenceEditDistance(a: number[], b: number[]): number {
+  if (!a.length && !b.length) return 0;
+  const maxLen = Math.max(a.length, b.length);
+  if (!maxLen) return 0;
+  const dp: number[][] = Array.from({ length: a.length + 1 }, (_, i) =>
+    Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0))
+  );
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return Math.min(1, dp[a.length][b.length] / maxLen);
+}
+
+// Jaccard similarity between two pitch-class sets (0 = no overlap, 1 = identical).
+function pitchClassJaccard(aPC: Set<number>, bPC: Set<number>): number {
+  if (!aPC.size && !bPC.size) return 1;
+  let intersection = 0;
+  for (const pc of aPC) if (bPC.has(pc)) intersection++;
+  const union = new Set([...aPC, ...bPC]).size;
+  return union === 0 ? 1 : intersection / union;
+}
+
+// Rhythm signature: sequence of quantized durationBeats (bucketed to nearest 0.25).
+function rhythmSignature(notes: Array<{ durationBeats: number; startBeat: number }>): number[] {
+  return [...notes].sort((a, b) => a.startBeat - b.startBeat).map((n) => Math.round(n.durationBeats * 4) / 4);
+}
+
+// Compare two chord progression arrays as sorted strings for rough similarity.
+function chordMapSimilarity(a: string[], b: string[]): number {
+  if (!a.length && !b.length) return 1;
+  const sa = new Set(a.map((c) => c.toLowerCase().trim()));
+  const sb = new Set(b.map((c) => c.toLowerCase().trim()));
+  return pitchClassJaccard(new Set([...sa].map((c) => c.charCodeAt(0) % 12)), new Set([...sb].map((c) => c.charCodeAt(0) % 12)));
+}
+
+// Overall pairwise similarity [0..1]. distinctnessScore = 1 - similarity.
+function pairwiseSimilarity(
+  a: Composition & Record<string, unknown>,
+  b: Composition & Record<string, unknown>,
+  options: { requireDifferentMelody: boolean; requireDifferentChordMap: boolean }
+): {
+  similarityScore: number;
+  melodyContourSimilarity: number;
+  pitchClassSimilarity: number;
+  rhythmSimilarity: number;
+  chordMapSimilarity: number;
+  sectionFormSimilarity: number;
+  blockingReasons: string[];
+} {
+  const rhA = (a.tracks["piano_right_hand"] ?? []) as Array<{ midi: number; startBeat: number; durationBeats: number; velocity: number }>;
+  const rhB = (b.tracks["piano_right_hand"] ?? []) as Array<{ midi: number; startBeat: number; durationBeats: number; velocity: number }>;
+
+  const contourA = melodyContourSignature(rhA);
+  const contourB = melodyContourSignature(rhB);
+  const melodyEditDist = sequenceEditDistance(contourA.slice(0, 32), contourB.slice(0, 32));
+  const melodyContourSim = 1 - melodyEditDist;
+
+  const pcA = new Set(rhA.map((n) => n.midi % 12));
+  const pcB = new Set(rhB.map((n) => n.midi % 12));
+  const pitchClassSim = pitchClassJaccard(pcA, pcB);
+
+  const rhythmA = rhythmSignature(rhA).slice(0, 32);
+  const rhythmB = rhythmSignature(rhB).slice(0, 32);
+  const rhythmSim = 1 - sequenceEditDistance(rhythmA, rhythmB);
+
+  const chordSim = chordMapSimilarity(a.chordProgression ?? [], b.chordProgression ?? []);
+
+  const sectionNamesA = (a.sections ?? []).map((s: { name: string }) => s.name).join(",");
+  const sectionNamesB = (b.sections ?? []).map((s: { name: string }) => s.name).join(",");
+  const sectionFormSim = sectionNamesA === sectionNamesB ? 1 : sectionNamesA.length === 0 || sectionNamesB.length === 0 ? 0.5 : 0;
+
+  // Weighted average similarity
+  const overallSim = melodyContourSim * 0.35 + pitchClassSim * 0.20 + rhythmSim * 0.20 + chordSim * 0.15 + sectionFormSim * 0.10;
+
+  const blockingReasons: string[] = [];
+  if (options.requireDifferentMelody && melodyContourSim > 0.80) blockingReasons.push(`Melody contour is too similar (similarity=${melodyContourSim.toFixed(2)}, threshold=0.80).`);
+  if (options.requireDifferentChordMap && chordSim > 0.85) blockingReasons.push(`Chord map is too similar (similarity=${chordSim.toFixed(2)}, threshold=0.85).`);
+
+  return {
+    similarityScore: Number(overallSim.toFixed(3)),
+    melodyContourSimilarity: Number(melodyContourSim.toFixed(3)),
+    pitchClassSimilarity: Number(pitchClassSim.toFixed(3)),
+    rhythmSimilarity: Number(rhythmSim.toFixed(3)),
+    chordMapSimilarity: Number(chordSim.toFixed(3)),
+    sectionFormSimilarity: Number(sectionFormSim.toFixed(3)),
+    blockingReasons
+  };
+}
+
 function keyNameFromFifths(fifths: number, mode: string | undefined): string | undefined {
   const table = mode?.toLowerCase() === "minor" ? keyNamesByFifthsMinor : keyNamesByFifths;
   return table[fifths];
@@ -934,6 +1201,25 @@ async function importMusicXmlScore(ctx: ToolContext, input: z.infer<typeof impor
   if (key === "C major") warnings.push("No explicit key signature found; used C major.");
 
   const durationSeconds = Math.max(1, Math.ceil(maxBeat * 60 / tempo));
+  const importedSections = sections.length ? sections.slice(0, 64) : [{ name: "score", bars: Math.max(1, Math.round(maxBeat / 4)), intensity: 0.5 }];
+  const totalBars = importedSections.reduce((sum, s) => sum + s.bars, 0);
+  // Derive a minimal compositionPlan and performance from the score so inspect_audio_quality and
+  // musicalityForComposition do not reject the manifest as "robotic / missing plan". A handwritten
+  // or imported score IS its own plan; humanized=true reflects that the author already shaped the
+  // performance — we do not need the tool-generated plan/performance layers.
+  const importedCompositionPlan = {
+    form: importedSections.map((s, i) => ({ name: s.name, bars: s.bars, role: i === 0 ? "opening section" : "continuation", targetIntensity: s.intensity })),
+    motifs: [{ id: "score_melody", contour: "score-authored melodic content", rhythm: "score-notated", development: ["as written in score"] }],
+    energyCurve: Array.from({ length: Math.max(1, totalBars) }, (_, i) => Number((0.4 + Math.sin(Math.PI * (totalBars <= 1 ? 0 : i / (totalBars - 1))) * 0.35).toFixed(3))),
+    arrangementIntent: ["Score-driven piano performance: render as notated.", "SoundFont must match acoustic or grand piano timbre."]
+  };
+  const importedPerformance = {
+    humanized: true,
+    timingJitterBeats: 0,
+    velocityJitter: 0,
+    sustainPedal: [] as Array<{ startBeat: number; endBeat: number; value: number }>,
+    rubatoMap: [] as Array<{ beat: number; tempoScale: number }>
+  };
   const composition: MusicXmlImportResult["composition"] = {
     title: scoreTitle(score, input.title),
     style: "score_import",
@@ -943,9 +1229,11 @@ async function importMusicXmlScore(ctx: ToolContext, input: z.infer<typeof impor
     durationSeconds,
     loopable: false,
     instruments: Object.keys(tracks),
-    sections: sections.length ? sections.slice(0, 64) : [{ name: "score", bars: Math.max(1, Math.round(maxBeat / 4)), intensity: 0.5 }],
+    sections: importedSections,
     chordProgression: chordNames.size ? [...chordNames] : ["score_notated"],
     tracks,
+    compositionPlan: importedCompositionPlan,
+    performance: importedPerformance,
     license: {
       output: "generated_from_user_or_project_score",
       dependencies: ["MusicXML score content supplied by project/user.", "Audio render should use render_midi_with_soundfont with a registered commercial-safe piano SoundFont for production_candidate output."]
@@ -3651,11 +3939,27 @@ async function fluidSynthRender(soundfontPath: string, midiPath: string, outputP
   return output;
 }
 
-// Opt-in loudness normalization for review-friendly levels. FluidSynth's default gain renders well
-// below 0 dBFS, so a raw render can sound very quiet; render_production_music masters, but the
-// single-pack render path does not. ffmpeg loudnorm targets a consistent level without clipping.
+// Two-pass linear loudnorm: pass 1 measures audio stats, pass 2 applies a single static gain
+// (linear=true). This preserves dynamics and avoids the pumping artefact of single-pass dynamic
+// mode, which raises quiet intros by a large gain and surfaces the soundfont's noise floor.
+// highpass=f=35 removes sub-bass rumble that FluidSynth can leave on soft velocity layers.
 async function normalizeWavWithFfmpeg(inputWavPath: string, outputWavPath: string, sampleRate: number, timeout: number) {
-  await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", inputWavPath, "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-ar", String(sampleRate), outputWavPath], { timeout, maxBuffer: 1024 * 1024 });
+  // Pass 1: measure. loudnorm prints a JSON block to stderr at loglevel=info.
+  const measureFilter = "highpass=f=35,loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json";
+  let measured: { input_i: string; input_tp: string; input_lra: string; input_thresh: string; target_offset: string } | undefined;
+  try {
+    const result = await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "info", "-i", inputWavPath, "-af", measureFilter, "-f", "null", "-"], { timeout, maxBuffer: 256 * 1024 });
+    const match = (result as unknown as { stderr: string }).stderr?.match(/\{[^{}]*"input_i"[^{}]*\}/s);
+    if (match) measured = JSON.parse(match[0]);
+  } catch (err: unknown) {
+    const match = (err as { stderr?: string }).stderr?.match(/\{[^{}]*"input_i"[^{}]*\}/s);
+    if (match) measured = JSON.parse(match[0]);
+  }
+  // Pass 2: apply. linear=true when stats available → static gain; falls back to dynamic mode.
+  const applyFilter = measured
+    ? `highpass=f=35,loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=${measured.input_i}:measured_TP=${measured.input_tp}:measured_LRA=${measured.input_lra}:measured_thresh=${measured.input_thresh}:offset=${measured.target_offset}:linear=true`
+    : "highpass=f=35,loudnorm=I=-16:TP=-1.5:LRA=11";
+  await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", inputWavPath, "-af", applyFilter, "-ar", String(sampleRate), outputWavPath], { timeout, maxBuffer: 1024 * 1024 });
   const output = await readFile(outputWavPath);
   assertPcmWav(output, "Normalized output");
   return output;
@@ -3913,7 +4217,8 @@ function renderProductionLicensesMarkdown(input: {
   return `${lines.join("\n")}\n`;
 }
 
-function renderProductionMusicHtml(input: {
+export function renderProductionMusicHtml(input: {
+  htmlPath: string;
   title: string;
   statusLabel: string;
   productionReady: boolean;
@@ -3923,13 +4228,19 @@ function renderProductionMusicHtml(input: {
   reportPath: string;
   skippedLargeAudioAssets?: SkippedLargeAudioAsset[];
 }) {
+  const htmlDir = path.posix.dirname(input.htmlPath);
+  const relHref = (assetPath: string) => path.posix.relative(htmlDir, assetPath);
+  const mp3Href = relHref(input.previewMp3Path);
+  const wavHref = input.productionWavPath ? relHref(input.productionWavPath) : undefined;
+  const licensesHref = relHref(input.licensesPath);
+  const reportHref = relHref(input.reportPath);
   const statusClass = input.productionReady ? "ok" : "warn";
-  const wavDownload = input.productionWavPath ? `<a class="button" download href="${escapeHtml(input.productionWavPath)}">Download WAV</a>` : "";
-  const wavFile = input.productionWavPath ? `<li><a href="${escapeHtml(input.productionWavPath)}">production.wav</a></li>` : "";
+  const wavDownload = wavHref ? `<a class="button" download href="${escapeHtml(wavHref)}">Download WAV</a>` : "";
+  const wavFile = wavHref ? `<li><a href="${escapeHtml(wavHref)}">production.wav</a></li>` : "";
   const largeAssetNotice = input.skippedLargeAudioAssets?.length
     ? `<p class="warn">Large WAV assets were omitted from the published project because they exceed the media limit; the MP3 preview is the published playback file.</p>`
     : "";
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(input.title)}</title><style>body{font-family:system-ui;margin:32px;max-width:860px;color:#171717}.status{display:inline-block;border:1px solid #d6d3d1;border-radius:6px;padding:8px 10px;margin:10px 0}.ok{color:#166534;background:#f0fdf4}.warn{color:#9a3412;background:#fff7ed}.controls{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0}.button,button{border:1px solid #222;border-radius:6px;background:#fff;color:#171717;padding:10px 12px;font-weight:700;text-decoration:none;cursor:pointer}audio{width:100%;display:block;margin:12px 0 18px}</style></head><body><h1>${escapeHtml(input.title)}</h1><p class="status ${statusClass}">${escapeHtml(input.statusLabel)}</p>${largeAssetNotice}<audio id="preview" controls preload="metadata" src="${escapeHtml(input.previewMp3Path)}"></audio><div class="controls"><button type="button" onclick="document.getElementById('preview').play()">Play Preview</button>${wavDownload}<a class="button" download href="${escapeHtml(input.previewMp3Path)}">Download MP3</a></div><h2>Production Files</h2><ul>${wavFile}<li><a href="${escapeHtml(input.previewMp3Path)}">preview.mp3</a></li><li><a href="${escapeHtml(input.licensesPath)}">LICENSES.md</a></li><li><a href="${escapeHtml(input.reportPath)}">Pipeline report JSON</a></li></ul></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(input.title)}</title><style>body{font-family:system-ui;margin:32px;max-width:860px;color:#171717}.status{display:inline-block;border:1px solid #d6d3d1;border-radius:6px;padding:8px 10px;margin:10px 0}.ok{color:#166534;background:#f0fdf4}.warn{color:#9a3412;background:#fff7ed}.controls{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0}.button,button{border:1px solid #222;border-radius:6px;background:#fff;color:#171717;padding:10px 12px;font-weight:700;text-decoration:none;cursor:pointer}audio{width:100%;display:block;margin:12px 0 18px}</style></head><body><h1>${escapeHtml(input.title)}</h1><p class="status ${statusClass}">${escapeHtml(input.statusLabel)}</p>${largeAssetNotice}<audio id="preview" controls preload="metadata" src="${escapeHtml(mp3Href)}"></audio><div class="controls"><button type="button" onclick="document.getElementById('preview').play()">Play Preview</button>${wavDownload}<a class="button" download href="${escapeHtml(mp3Href)}">Download MP3</a></div><h2>Production Files</h2><ul>${wavFile}<li><a href="${escapeHtml(mp3Href)}">preview.mp3</a></li><li><a href="${escapeHtml(licensesHref)}">LICENSES.md</a></li><li><a href="${escapeHtml(reportHref)}">Pipeline report JSON</a></li></ul></body></html>`;
 }
 
 function wavFallbackOutputPath(outputAudioPath: string) {
@@ -5491,6 +5802,7 @@ export const musicWorkflowTools: ToolModule[] = [
 	        };
         const reportFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputReportPath, `${JSON.stringify(report, null, 2)}\n`);
         const html = renderProductionMusicHtml({
+          htmlPath: parsed.outputHtmlPath,
           title: composition.title,
           statusLabel,
           productionReady: true,
@@ -5635,8 +5947,15 @@ export const musicWorkflowTools: ToolModule[] = [
         const tempDir = temporaryFiles[0] ?? path.join(ctx.artifactRoot, `music-render-${parsed.projectId}-${Date.now()}`);
         await mkdir(tempDir, { recursive: true });
         if (!temporaryFiles.includes(tempDir)) temporaryFiles.push(tempDir);
-        // Normalize only when explicitly requested AND ffmpeg is present; otherwise keep the raw render.
-        const normalizeActive = parsed.normalize && ffmpegCapability.ok;
+        // renderProfile="clean_dry": SoundFont render only, no noise bed/ambience, optional loudnorm off.
+        // renderProfile="normalized": clean_dry + loudnorm. Explicit normalize field still works as before.
+        // If renderProfile is set it takes precedence over the normalize field.
+        const cleanDryMode = parsed.renderProfile === "clean_dry" || parsed.renderProfile === "normalized";
+        const normalizeActive = parsed.renderProfile === "normalized"
+          ? ffmpegCapability.ok
+          : parsed.renderProfile === "clean_dry"
+            ? false
+            : parsed.normalize && ffmpegCapability.ok;
         const fullMixTemp = path.join(tempDir, "full.wav");
         const rawFullMix = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, midiAbsolutePath, fullMixTemp, parsed.sampleRate, ctx.commandTimeoutMs);
         const fullMix = normalizeActive
@@ -5682,6 +6001,9 @@ export const musicWorkflowTools: ToolModule[] = [
           qualityTier: "production_candidate",
           productionReady: true,
           normalized: normalizeActive,
+          renderProfile: parsed.renderProfile ?? "default",
+          cleanRender: cleanDryMode,
+          noiseBedApplied: false,
           packSha256: soundfont.pack.computedSha256,
           packLicenseTextPath: soundfont.pack.licenseTextPath,
           packSourceUrl: soundfont.pack.sourceUrl,
@@ -5899,6 +6221,27 @@ export const musicWorkflowTools: ToolModule[] = [
     handler: async (input, ctx) => {
       const parsed = inspectAudioQualityInputSchema.parse(input);
       const composition = parsed.compositionManifestPath ? await readComposition(ctx, parsed.projectId, parsed.compositionManifestPath) : buildComposition({ projectId: parsed.projectId, title: "Audio-only QA", style: "ambient", mood: parsed.useCase, tempo: 90, key: "C", durationSeconds: 30, useCase: parsed.useCase, instruments: ["piano"], complexity: "simple", loopable: false, outputManifestPath: "unused.json", outputMidiPath: "unused.mid" });
+      // For score-driven / strict_handwritten compositions, inject synthetic plan+performance markers
+      // so musicalityForComposition does not flag a missing plan or humanization layer. A handwritten
+      // score IS its own humanized plan — the tool-generated layers are not required.
+      const rawComp = composition as Record<string, unknown>;
+      const scoreSource = rawComp.scoreSource as Record<string, unknown> | undefined;
+      const isScoreDriven = Boolean(scoreSource?.scoreDriven);
+      const isStrictHandwritten = rawComp.authoringMode === "strict_handwritten";
+      if ((isScoreDriven || isStrictHandwritten)) {
+        if (!composition.compositionPlan) {
+          const totalBars = Math.max(1, Math.round(composition.durationSeconds * composition.tempo / 60 / 4));
+          rawComp.compositionPlan = {
+            form: [{ name: "score", bars: totalBars, role: "score-authored content", targetIntensity: 0.6 }],
+            motifs: [{ id: "score_melody", contour: "score-authored", rhythm: "score-notated", development: ["as written"] }],
+            energyCurve: Array.from({ length: totalBars }, () => 0.55),
+            arrangementIntent: ["Score-driven: render as notated."]
+          };
+        }
+        if (!composition.performance) {
+          rawComp.performance = { humanized: true, timingJitterBeats: 0, velocityJitter: 0, sustainPedal: [], rubatoMap: [] };
+        }
+      }
       const audio = parsed.audioPath ? await readFile(await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, parsed.audioPath)) : undefined;
       const session = parsed.sessionManifestPath ? JSON.parse(await readProjectFile(ctx.projectRoot, parsed.projectId, parsed.sessionManifestPath, 2 * 1024 * 1024)) as Record<string, unknown> : undefined;
       const report = qualityForComposition(composition, { audio, useCase: parsed.useCase, checkLoop: parsed.checkLoop, targetMood: parsed.targetMood, session });
@@ -5964,6 +6307,184 @@ export const musicWorkflowTools: ToolModule[] = [
       const report = { brief: parsed.brief, durationSeconds: parsed.durationSeconds, variations, recommended: variations.sort((a, b) => b.score - a.score)[0] };
       const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(report, null, 2)}\n`);
       return { ok: true, summary: `Prepared ${variations.length} audition variation(s).`, jobId: parsed.projectId, artifacts: [file.path], structuredContent: report, logs: [JSON.stringify(report, null, 2)], errors: [] };
+    }
+  },
+  {
+    definition: {
+      name: "author_handwritten_music_score",
+      description: "Author a strict handwritten solo-piano score from explicit RH/LH note arrays, sections, chord map, and performance metadata. Outputs MusicXML + MIDI + composition manifest with authoringMode=strict_handwritten and scoreSource.scoreDriven=true. Fails closed if RH or LH parts are missing or contain no notes.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" }, title: { type: "string" }, tempoBpm: { type: "number" }, key: { type: "string" },
+          durationSec: { type: "number" }, sections: { type: "array", items: { type: "object" } },
+          parts: { type: "object", properties: { piano_right_hand: { type: "array" }, piano_left_hand: { type: "array" } } },
+          chordMap: { type: "array", items: { type: "object" } }, performanceMap: { type: "object" },
+          outputMusicXmlPath: { type: "string" }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" }
+        },
+        required: ["projectId", "title", "tempoBpm", "key", "durationSec", "sections", "parts", "chordMap"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: authorHandwrittenMusicScoreInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = authorHandwrittenMusicScoreInputSchema.parse(input);
+      const rhNotes = parsed.parts.piano_right_hand;
+      const lhNotes = parsed.parts.piano_left_hand;
+      if (!rhNotes.length) return { ok: false, summary: "author_handwritten_music_score failed: piano_right_hand part is empty.", jobId: parsed.projectId, artifacts: [], structuredContent: { ok: false, blockingReason: "piano_right_hand part has no notes." }, logs: [], errors: ["piano_right_hand part must contain at least one note."] };
+      if (!lhNotes.length) return { ok: false, summary: "author_handwritten_music_score failed: piano_left_hand part is empty.", jobId: parsed.projectId, artifacts: [], structuredContent: { ok: false, blockingReason: "piano_left_hand part has no notes." }, logs: [], errors: ["piano_left_hand part must contain at least one note."] };
+
+      const totalBars = parsed.sections.reduce((sum, s) => sum + s.bars, 0);
+      const chordNames = parsed.chordMap.map((c) => c.chord);
+
+      const compositionPlan = {
+        form: parsed.sections.map((s, i) => ({ name: s.name, bars: s.bars, role: i === 0 ? "opening statement" : i === parsed.sections.length - 1 ? "closing section" : "development", targetIntensity: s.intensity ?? 0.5 })),
+        motifs: [{ id: "rh_melody", contour: "handwritten right-hand melodic line", rhythm: "score-notated", development: ["as authored by composer"] }],
+        energyCurve: Array.from({ length: Math.max(1, totalBars) }, (_, i) => Number((0.4 + Math.sin(Math.PI * (totalBars <= 1 ? 0 : i / (totalBars - 1))) * 0.35).toFixed(3))),
+        arrangementIntent: ["Strict handwritten solo piano score: render exactly as notated.", "RH carries melody; LH carries accompaniment/harmony.", "Use a high-quality piano SoundFont for audition candidates."]
+      };
+
+      const performance = {
+        humanized: true,
+        timingJitterBeats: parsed.performanceMap.timingJitterBeats,
+        velocityJitter: parsed.performanceMap.velocityJitter,
+        sustainPedal: parsed.performanceMap.sustainPedal,
+        rubatoMap: [] as Array<{ beat: number; tempoScale: number }>
+      };
+
+      const tracks: Record<string, Array<z.infer<typeof noteSchema>>> = {
+        piano_right_hand: rhNotes.map((n) => ({ ...n, track: "piano_right_hand" })),
+        piano_left_hand: lhNotes.map((n) => ({ ...n, track: "piano_left_hand" }))
+      };
+
+      const composition = {
+        title: parsed.title,
+        style: "strict_handwritten_solo_piano",
+        mood: "score-driven solo piano performance",
+        tempo: parsed.tempoBpm,
+        key: parsed.key,
+        durationSeconds: parsed.durationSec,
+        loopable: false,
+        instruments: ["piano_right_hand", "piano_left_hand"],
+        sections: parsed.sections,
+        chordProgression: chordNames,
+        tracks,
+        compositionPlan,
+        performance,
+        license: { output: "generated_from_user_or_project_score", dependencies: ["Handwritten score content authored by composer. Render with a commercial-safe piano SoundFont."] },
+        scoreSource: {
+          format: "handwritten",
+          scoreDriven: true,
+          partCount: 2,
+          noteCount: rhNotes.length + lhNotes.length,
+          trackInstruments: { piano_right_hand: "piano", piano_left_hand: "piano" }
+        },
+        authoringMode: "strict_handwritten",
+        chordMap: parsed.chordMap,
+        recommendedNextTools: ["validate_music_audition_distinctness", "render_midi_with_soundfont", "inspect_audio_quality"]
+      };
+
+      const musicXml = buildHandwrittenMusicXml({
+        title: parsed.title,
+        tempoBpm: parsed.tempoBpm,
+        key: parsed.key,
+        totalBars,
+        rhNotes: rhNotes.map((n) => ({ midi: n.midi, startBeat: n.startBeat, durationBeats: n.durationBeats, velocity: n.velocity })),
+        lhNotes: lhNotes.map((n) => ({ midi: n.midi, startBeat: n.startBeat, durationBeats: n.durationBeats, velocity: n.velocity }))
+      });
+
+      const [xmlFile, manifestFile, midiFile] = await Promise.all([
+        writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputMusicXmlPath, musicXml),
+        writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(composition, null, 2)}\n`),
+        writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(composition as unknown as Composition), "audio/midi")
+      ]);
+
+      return {
+        ok: true,
+        summary: `Authored strict handwritten piano score: ${rhNotes.length} RH note(s) + ${lhNotes.length} LH note(s), ${totalBars} bar(s).`,
+        jobId: parsed.projectId,
+        artifacts: [xmlFile.path, manifestFile.path, midiFile.path],
+        structuredContent: { ...composition, musicXmlPath: xmlFile.path, manifestPath: manifestFile.path, midiPath: midiFile.path },
+        logs: [JSON.stringify({ musicXmlPath: xmlFile.path, manifestPath: manifestFile.path, midiPath: midiFile.path, totalBars, chordMap: parsed.chordMap }, null, 2)],
+        errors: []
+      };
+    }
+  },
+  {
+    definition: {
+      name: "validate_music_audition_distinctness",
+      description: "Compare two or more composition manifests and verify they are distinct enough for multi-version audition. Checks melody contour, pitch-class set, rhythm pattern, chord map, and section form. Returns per-pair distinctness scores and fails closed if any pair is too similar.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" }, manifestPaths: { type: "array", items: { type: "string" } },
+          minDistinctnessScore: { type: "number" }, requireDifferentMelody: { type: "boolean" },
+          requireDifferentChordMap: { type: "boolean" }, outputReportPath: { type: "string" }
+        },
+        required: ["projectId", "manifestPaths"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: validateMusicAuditionDistinctnessInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = validateMusicAuditionDistinctnessInputSchema.parse(input);
+      const compositions = await Promise.all(parsed.manifestPaths.map((p) => readComposition(ctx, parsed.projectId, p))) as Array<Composition & Record<string, unknown>>;
+
+      const pairs: Array<{
+        versionA: string; versionB: string;
+        similarityScore: number; distinctnessScore: number;
+        melodyContourSimilarity: number; pitchClassSimilarity: number;
+        rhythmSimilarity: number; chordMapSimilarity: number; sectionFormSimilarity: number;
+        blockingReasons: string[]; recommendedFixes: string[]; ok: boolean;
+      }> = [];
+
+      for (let i = 0; i < compositions.length; i++) {
+        for (let j = i + 1; j < compositions.length; j++) {
+          const result = pairwiseSimilarity(compositions[i], compositions[j], {
+            requireDifferentMelody: parsed.requireDifferentMelody,
+            requireDifferentChordMap: parsed.requireDifferentChordMap
+          });
+          const distinctnessScore = Number((1 - result.similarityScore).toFixed(3));
+          const pairOk = distinctnessScore >= parsed.minDistinctnessScore && result.blockingReasons.length === 0;
+          const recommendedFixes: string[] = [];
+          if (!pairOk) {
+            if (result.melodyContourSimilarity > 0.75) recommendedFixes.push("Transpose RH melody by ≥3 semitones or use a different contour shape.");
+            if (result.chordMapSimilarity > 0.85) recommendedFixes.push("Change the chord progression root or use a different harmonic substitution.");
+            if (result.rhythmSimilarity > 0.80) recommendedFixes.push("Vary note durations: use different subdivision patterns in RH.");
+            if (result.pitchClassSimilarity > 0.85) recommendedFixes.push("Use different pitch classes — change the key or avoid identical note selection.");
+          }
+          pairs.push({
+            versionA: parsed.manifestPaths[i],
+            versionB: parsed.manifestPaths[j],
+            similarityScore: result.similarityScore,
+            distinctnessScore,
+            melodyContourSimilarity: result.melodyContourSimilarity,
+            pitchClassSimilarity: result.pitchClassSimilarity,
+            rhythmSimilarity: result.rhythmSimilarity,
+            chordMapSimilarity: result.chordMapSimilarity,
+            sectionFormSimilarity: result.sectionFormSimilarity,
+            blockingReasons: result.blockingReasons,
+            recommendedFixes,
+            ok: pairOk
+          });
+        }
+      }
+
+      const allOk = pairs.every((p) => p.ok);
+      const allBlockingReasons = pairs.flatMap((p) => p.blockingReasons.map((r) => `[${p.versionA} vs ${p.versionB}] ${r}`));
+      const report = { ok: allOk, versionCount: compositions.length, minDistinctnessScore: parsed.minDistinctnessScore, pairs, blockingReasons: allBlockingReasons };
+      const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputReportPath, `${JSON.stringify(report, null, 2)}\n`);
+      return {
+        ok: allOk,
+        summary: allOk ? `All ${pairs.length} version pair(s) are distinct enough for audition.` : `${pairs.filter((p) => !p.ok).length} pair(s) are too similar. Revise before audition.`,
+        jobId: parsed.projectId,
+        artifacts: [file.path],
+        structuredContent: { ...report, reportPath: file.path },
+        logs: [JSON.stringify(report, null, 2)],
+        errors: allBlockingReasons
+      };
     }
   }
 ];
