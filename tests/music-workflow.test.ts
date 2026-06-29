@@ -3775,6 +3775,94 @@ test("install_free_soundfont_pack fails closed for a sampled grand that is not b
     assert.deepEqual(payload.requiredFiles, ["Salamander.sf2", "LICENSE.txt"]);
     assert.ok(payload.searchDirectories.some((dir) => dir.endsWith("salamander")));
     assert.match(payload.nextAction, /Do not call render_production_music.*autoRegistered=true/);
+    assert.ok(typeof (payload as unknown as Record<string, unknown>).userFacingExplanation === "string" && ((payload as unknown as Record<string, unknown>).userFacingExplanation as string).length > 0, "userFacingExplanation is a non-empty string");
+    assert.match((payload as unknown as Record<string, string>).userFacingExplanation, /Salamander/, "userFacingExplanation mentions the pack name");
+  } finally {
+    if (oldSoundfontDir === undefined) delete process.env.MUSIC_SOUNDFONT_DIR; else process.env.MUSIC_SOUNDFONT_DIR = oldSoundfontDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// issue_0152: check_music_render_environment with requestedPackId="salamander_grand" returns a
+// blocked preflight when the runtime soundfont directory does not contain Salamander.sf2.
+test("check_music_render_environment: salamander_grand preflight returns blocked when not installed", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-salamander-preflight-"));
+  const oldSoundfontDir = process.env.MUSIC_SOUNDFONT_DIR;
+  try {
+    const ctx = toolContext(root);
+    process.env.MUSIC_SOUNDFONT_DIR = path.join(root, "empty-soundfonts");
+    const checker = getToolModule("check_music_render_environment");
+    assert.ok(checker);
+    const result = await checker!.handler({ requestedPackId: "salamander_grand" }, ctx);
+    const env = result.structuredContent as Record<string, unknown>;
+    assert.ok("requestedPackPreflight" in env, "requestedPackPreflight present in structuredContent");
+    const preflight = env.requestedPackPreflight as Record<string, unknown>;
+    assert.equal(preflight.requestedPackId, "salamander_grand");
+    assert.equal(preflight.runtimeFilesReady, false);
+    assert.equal(preflight.manualInstallRequired, true);
+    assert.deepEqual(preflight.requiredFiles, ["Salamander.sf2", "LICENSE.txt"]);
+    assert.ok(typeof preflight.userFacingExplanation === "string" && (preflight.userFacingExplanation as string).length > 0, "userFacingExplanation is present");
+    assert.match(preflight.userFacingExplanation as string, /Salamander/, "userFacingExplanation mentions the pack name");
+  } finally {
+    if (oldSoundfontDir === undefined) delete process.env.MUSIC_SOUNDFONT_DIR; else process.env.MUSIC_SOUNDFONT_DIR = oldSoundfontDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// issue_0152: when Salamander is missing but YDP Grand runtime files are present, the preflight
+// recommends ydp_grand as the fallback (preferred one-click sampled piano).
+test("check_music_render_environment: salamander_grand preflight recommends ydp_grand when YDP is available", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-ydp-fallback-"));
+  const oldSoundfontDir = process.env.MUSIC_SOUNDFONT_DIR;
+  try {
+    const ctx = toolContext(root);
+    const soundfontDir = path.join(root, "test-soundfonts");
+    process.env.MUSIC_SOUNDFONT_DIR = soundfontDir;
+    // Place YDP Grand runtime files so sampledPianoPackAvailability("ydp_grand") returns runtimeFilesReady=true.
+    const ydpDir = path.join(soundfontDir, "ydp-grand");
+    await mkdir(ydpDir, { recursive: true });
+    await writeFile(path.join(ydpDir, "YDP-GrandPiano.sf2"), fakeSoundfontBytes());
+    await writeFile(path.join(ydpDir, "LICENSE.txt"), "YDP Grand license fixture\n");
+    const checker = getToolModule("check_music_render_environment");
+    assert.ok(checker);
+    const result = await checker!.handler({ requestedPackId: "salamander_grand" }, ctx);
+    const env = result.structuredContent as Record<string, unknown>;
+    assert.ok("requestedPackPreflight" in env, "requestedPackPreflight present");
+    const preflight = env.requestedPackPreflight as Record<string, unknown>;
+    assert.equal(preflight.runtimeFilesReady, false, "Salamander is still blocked");
+    assert.equal(preflight.manualInstallRequired, true);
+    const fallback = preflight.fallbackRecommendation as Record<string, unknown>;
+    assert.ok(fallback, "fallbackRecommendation is present");
+    assert.equal(fallback.packId, "ydp_grand", "fallback is ydp_grand when YDP runtime files are present");
+    assert.match(fallback.label as string, /YDP Grand fallback/, "fallback label is truthful");
+    assert.match(preflight.renderLabel as string, /YDP Grand fallback/, "renderLabel matches fallback label");
+  } finally {
+    if (oldSoundfontDir === undefined) delete process.env.MUSIC_SOUNDFONT_DIR; else process.env.MUSIC_SOUNDFONT_DIR = oldSoundfontDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// issue_0152: when both Salamander and YDP Grand are missing, the preflight falls back to
+// generaluser_gs as the last resort and uses a truthful fallback label.
+test("check_music_render_environment: salamander_grand preflight recommends generaluser_gs when YDP is also missing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-gus-fallback-"));
+  const oldSoundfontDir = process.env.MUSIC_SOUNDFONT_DIR;
+  try {
+    const ctx = toolContext(root);
+    process.env.MUSIC_SOUNDFONT_DIR = path.join(root, "empty-soundfonts");
+    const checker = getToolModule("check_music_render_environment");
+    assert.ok(checker);
+    const result = await checker!.handler({ requestedPackId: "salamander_grand" }, ctx);
+    const env = result.structuredContent as Record<string, unknown>;
+    assert.ok("requestedPackPreflight" in env, "requestedPackPreflight present");
+    const preflight = env.requestedPackPreflight as Record<string, unknown>;
+    assert.equal(preflight.runtimeFilesReady, false, "Salamander is blocked");
+    const fallback = preflight.fallbackRecommendation as Record<string, unknown>;
+    assert.ok(fallback, "fallbackRecommendation is present");
+    assert.equal(fallback.packId, "generaluser_gs", "last-resort fallback is generaluser_gs");
+    assert.match(fallback.label as string, /GeneralUser GS fallback/, "fallback label is truthful and does not mention Salamander as the renderer");
+    assert.match(preflight.renderLabel as string, /GeneralUser GS fallback/, "renderLabel is truthful");
+    assert.ok(!(preflight.renderLabel as string).startsWith("Salamander"), "renderLabel must not falsely claim Salamander rendered");
   } finally {
     if (oldSoundfontDir === undefined) delete process.env.MUSIC_SOUNDFONT_DIR; else process.env.MUSIC_SOUNDFONT_DIR = oldSoundfontDir;
     await rm(root, { recursive: true, force: true });
