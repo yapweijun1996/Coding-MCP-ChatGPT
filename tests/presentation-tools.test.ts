@@ -268,6 +268,46 @@ test("create_video_presentation supports code and dryrun layouts", async () => {
   });
 });
 
+test("create_video_presentation supports typewriter and ken_burns layouts", async () => {
+  await withContext(async (ctx) => {
+    const result = await callTool("create_video_presentation", {
+      title: "Motion layouts",
+      scenes: [
+        {
+          layout: "typewriter",
+          title: "Quick summary",
+          body: "The algorithm runs in O(n²) time. Each pass moves the largest unsorted element to its final position.",
+          durationSeconds: 5
+        },
+        {
+          layout: "ken_burns",
+          title: "Hero shot",
+          body: "Full-bleed image with pan and zoom",
+          imagePath: "assets/hero.jpg",
+          durationSeconds: 4
+        }
+      ]
+    }, ctx);
+
+    assert.equal(result.ok, true);
+    assert.ok(result.jobId);
+
+    const scriptPath = await getProjectStoredFilePath(ctx.projectRoot, result.jobId, "video.js");
+    const script = await readFile(scriptPath, "utf8");
+    assert.match(script, /layout === "typewriter"/);
+    assert.match(script, /layout === "ken_burns"/);
+    assert.match(script, /twChars/);
+    assert.match(script, /kbScale/);
+    assert.doesNotMatch(script, /ken_burns.*if \(image\)/s);
+
+    const indexPath = await getProjectStoredFilePath(ctx.projectRoot, result.jobId, "index.html");
+    const indexHtml = await readFile(indexPath, "utf8");
+    assert.match(indexHtml, /"layout":"typewriter"/);
+    assert.match(indexHtml, /"layout":"ken_burns"/);
+    assert.match(indexHtml, /algorithm runs in O/);
+  });
+});
+
 test("scripted media export workflow creates timeline, captions, audio alignment, frame previews, and export manifest", async () => {
   await withContext(async (ctx) => {
     const project = await createProject(ctx.projectRoot, {

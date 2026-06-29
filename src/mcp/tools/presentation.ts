@@ -122,7 +122,7 @@ const createVideoPresentationInputSchema = z.object({
     title: z.string().max(180).optional(),
     body: z.string().max(2000).optional(),
     imagePath: z.string().min(1).max(240).optional(),
-    layout: z.enum(["text", "title_card", "code", "dryrun"]).optional().default("text"),
+    layout: z.enum(["text", "title_card", "code", "dryrun", "typewriter", "ken_burns"]).optional().default("text"),
     code: z.string().max(4000).optional(),
     steps: z.array(z.object({
       label: z.string().max(200).optional(),
@@ -1056,7 +1056,7 @@ async function renderAt(timeSeconds) {
 
   ctx.globalAlpha = transitionAlpha(scene.transition, local, duration);
   const image = await loadImage(scene.imagePath);
-  if (image) {
+  if (image && scene.layout !== "ken_burns") {
     const scale = Math.max(canvas.width / image.width, canvas.height / image.height) * (1 + progress * 0.035);
     const w = image.width * scale;
     const h = image.height * scale;
@@ -1164,6 +1164,47 @@ async function renderAt(timeSeconds) {
           ctx.fillText(ptr.label, px, arrY + cellH + 44);
           ctx.textAlign = "left";
         }
+      }
+    }
+  } else if (layout === "typewriter") {
+    ctx.fillStyle = "rgba(255,255,255,0.91)";
+    roundedRect(ctx, pad, panelY, panelW, panelH, 24);
+    ctx.fill();
+    ctx.fillStyle = "#136f63";
+    ctx.font = \`700 \${Math.max(20, canvas.width * 0.016)}px system-ui, sans-serif\`;
+    ctx.fillText(\`SCENE \${index + 1}\`, pad + 46, panelY + 56);
+    ctx.fillStyle = "#17211b";
+    ctx.font = \`800 \${Math.max(38, canvas.width * 0.036)}px Georgia, serif\`;
+    wrapText(ctx, scene.title || data.title, pad + 46, panelY + 106, panelW - 92, Math.max(44, canvas.width * 0.04), 2);
+    const twBody = scene.body || "";
+    const twChars = Math.round(progress * twBody.length);
+    const twCursor = progress < 0.98 && Math.floor(local * 2) % 2 === 0 ? "|" : "";
+    ctx.fillStyle = "#3d4a43";
+    ctx.font = \`400 \${Math.max(24, canvas.width * 0.021)}px system-ui, sans-serif\`;
+    wrapText(ctx, twBody.slice(0, twChars) + twCursor, pad + 48, panelY + 168, panelW - 96, Math.max(34, canvas.width * 0.028), 6);
+  } else if (layout === "ken_burns") {
+    const kbImage = await loadImage(scene.imagePath);
+    if (kbImage) {
+      const kbBaseScale = Math.max(canvas.width / kbImage.width, canvas.height / kbImage.height);
+      const kbScale = kbBaseScale * (1 + progress * 0.18);
+      const kbW = kbImage.width * kbScale;
+      const kbH = kbImage.height * kbScale;
+      ctx.drawImage(kbImage, -(kbW - canvas.width) * progress, -(kbH - canvas.height) * progress, kbW, kbH);
+      const scrimH = Math.round(canvas.height * 0.38);
+      const scrim = ctx.createLinearGradient(0, canvas.height - scrimH, 0, canvas.height);
+      scrim.addColorStop(0, "rgba(0,0,0,0)");
+      scrim.addColorStop(1, "rgba(0,0,0,0.72)");
+      ctx.fillStyle = scrim;
+      ctx.fillRect(0, canvas.height - scrimH, canvas.width, scrimH);
+      if (scene.title) {
+        ctx.fillStyle = "#ffffff";
+        ctx.font = \`700 \${Math.max(40, canvas.width * 0.038)}px Georgia, serif\`;
+        wrapText(ctx, scene.title, pad, canvas.height - Math.round(scrimH * 0.56), canvas.width - pad * 2, Math.max(48, canvas.width * 0.042), 2);
+      }
+      if (scene.body) {
+        ctx.fillStyle = "rgba(255,255,255,0.80)";
+        ctx.font = \`400 \${Math.max(22, canvas.width * 0.02)}px system-ui, sans-serif\`;
+        wrapText(ctx, scene.body, pad, canvas.height - Math.round(scrimH * 0.22), canvas.width - pad * 2, Math.max(30, canvas.width * 0.025), 2);
       }
     }
   } else {
@@ -1519,7 +1560,7 @@ export const presentationTools: ToolModule[] = [
           title: { type: "string" },
           aspectRatio: { type: "string", enum: ["16:9", "9:16", "1:1"] },
           fps: { type: "number", enum: [24, 30] },
-          scenes: { type: "array", items: { type: "object", properties: { title: { type: "string" }, body: { type: "string" }, imagePath: { type: "string" }, layout: { type: "string", enum: ["text", "title_card", "code", "dryrun"] }, code: { type: "string" }, steps: { type: "array", items: { type: "object" } }, durationSeconds: { type: "number" }, transition: { type: "string" } } } },
+          scenes: { type: "array", items: { type: "object", properties: { title: { type: "string" }, body: { type: "string" }, imagePath: { type: "string" }, layout: { type: "string", enum: ["text", "title_card", "code", "dryrun", "typewriter", "ken_burns"] }, code: { type: "string" }, steps: { type: "array", items: { type: "object" } }, durationSeconds: { type: "number" }, transition: { type: "string" } } } },
           audioPath: { type: "string" },
           outputPath: { type: "string" },
           publish: { type: "boolean" }
