@@ -132,6 +132,8 @@ const createVideoPresentationInputSchema = z.object({
         index: z.number().int()
       })).max(6).optional()
     })).max(20).optional(),
+    hold: z.number().min(0).max(10).optional().default(0),
+    ease: z.enum(["linear", "ease-in", "ease-out", "ease-in-out"]).optional().default("linear"),
     durationSeconds: z.number().min(0.5).max(30),
     transition: z.enum(["cut", "fade", "slide", "zoom"]).optional().default("fade")
   })).min(1).max(30),
@@ -1033,6 +1035,13 @@ function wrapText(context, text, x, y, maxWidth, lineHeight, maxLines) {
   for (let i = 0; i < lines.length; i++) context.fillText(lines[i], x, y + i * lineHeight);
 }
 
+function applyEase(t, ease) {
+  if (ease === "ease-in") return t * t;
+  if (ease === "ease-out") return 1 - (1 - t) * (1 - t);
+  if (ease === "ease-in-out") return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+  return t;
+}
+
 function transitionAlpha(kind, local, duration) {
   if (kind === "cut") return 1;
   const ramp = Math.min(1, local / Math.min(0.6, duration / 3));
@@ -1041,7 +1050,10 @@ function transitionAlpha(kind, local, duration) {
 
 async function renderAt(timeSeconds) {
   const { scene, index, local, duration } = sceneAt(timeSeconds);
-  const progress = duration > 0 ? local / duration : 0;
+  const holdSecs = scene.hold || 0;
+  const animDuration = Math.max(0.1, duration - holdSecs);
+  const rawProgress = duration > 0 ? Math.min(1, local / animDuration) : 0;
+  const progress = applyEase(rawProgress, scene.ease || "linear");
   sceneLabel.textContent = \`Scene \${index + 1} of \${data.scenes.length}\`;
   timeline.value = String(Math.min(timeSeconds, data.durationSeconds));
 
@@ -1560,7 +1572,7 @@ export const presentationTools: ToolModule[] = [
           title: { type: "string" },
           aspectRatio: { type: "string", enum: ["16:9", "9:16", "1:1"] },
           fps: { type: "number", enum: [24, 30] },
-          scenes: { type: "array", items: { type: "object", properties: { title: { type: "string" }, body: { type: "string" }, imagePath: { type: "string" }, layout: { type: "string", enum: ["text", "title_card", "code", "dryrun", "typewriter", "ken_burns"] }, code: { type: "string" }, steps: { type: "array", items: { type: "object" } }, durationSeconds: { type: "number" }, transition: { type: "string" } } } },
+          scenes: { type: "array", items: { type: "object", properties: { title: { type: "string" }, body: { type: "string" }, imagePath: { type: "string" }, layout: { type: "string", enum: ["text", "title_card", "code", "dryrun", "typewriter", "ken_burns"] }, code: { type: "string" }, steps: { type: "array", items: { type: "object" } }, hold: { type: "number" }, ease: { type: "string" }, durationSeconds: { type: "number" }, transition: { type: "string" } } } },
           audioPath: { type: "string" },
           outputPath: { type: "string" },
           publish: { type: "boolean" }

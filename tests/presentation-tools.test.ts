@@ -308,6 +308,31 @@ test("create_video_presentation supports typewriter and ken_burns layouts", asyn
   });
 });
 
+test("create_video_presentation respects hold and ease timing fields", async () => {
+  await withContext(async (ctx) => {
+    const result = await callTool("create_video_presentation", {
+      title: "Timing control",
+      scenes: [
+        { layout: "text", title: "Ease in", body: "Slow start", hold: 1, ease: "ease-in", durationSeconds: 4 },
+        { layout: "text", title: "Hold end", body: "Hold at end", hold: 2, ease: "ease-out", durationSeconds: 5 }
+      ]
+    }, ctx);
+
+    assert.equal(result.ok, true);
+
+    const scriptPath = await getProjectStoredFilePath(ctx.projectRoot, result.jobId, "video.js");
+    const script = await readFile(scriptPath, "utf8");
+    assert.match(script, /applyEase/);
+    assert.match(script, /holdSecs/);
+    assert.match(script, /animDuration/);
+
+    const indexPath = await getProjectStoredFilePath(ctx.projectRoot, result.jobId, "index.html");
+    const indexHtml = await readFile(indexPath, "utf8");
+    assert.match(indexHtml, /"hold":1/);
+    assert.match(indexHtml, /"ease":"ease-in"/);
+  });
+});
+
 test("scripted media export workflow creates timeline, captions, audio alignment, frame previews, and export manifest", async () => {
   await withContext(async (ctx) => {
     const project = await createProject(ctx.projectRoot, {
