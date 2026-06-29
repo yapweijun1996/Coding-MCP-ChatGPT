@@ -291,6 +291,16 @@ if (!out) {
 // WAV outputs (e.g. the loudnorm finalize pass) need a real PCM WAV so assertPcmWav passes; only the
 // MP3 encode wants ID3. Emit the right container by output extension.
 if (out.toLowerCase().endsWith(".wav")) {
+  if (process.env.FAKE_FFMPEG_LARGE_WAV) {
+    const size = Number(process.env.FAKE_FFMPEG_LARGE_WAV);
+    const header = Buffer.alloc(44);
+    header.write("RIFF", 0); header.writeUInt32LE(size - 8, 4); header.write("WAVEfmt ", 8);
+    header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22);
+    header.writeUInt32LE(44100, 24); header.writeUInt32LE(44100 * 2, 28); header.writeUInt16LE(2, 32);
+    header.writeUInt16LE(16, 34); header.write("data", 36); header.writeUInt32LE(size - 44, 40);
+    fs.writeFileSync(out, Buffer.concat([header, Buffer.alloc(size - 44, 1)]));
+    process.exit(0);
+  }
   const frames = 2000;
   const pcm = Buffer.alloc(frames * 2);
   for (let i = 0; i < frames; i++) pcm.writeInt16LE(Math.round(Math.sin(i / 12) * 9000), i * 2);
@@ -671,7 +681,8 @@ test("end-to-end: install GeneralUser GS -> compose cello+piano -> render covers
     const installer = getToolModule("install_free_soundfont_pack");
     const compose = getToolModule("compose_music");
     const productionRender = getToolModule("render_production_music");
-    assert.ok(installer && compose && productionRender);
+    const soundfontRender = getToolModule("render_midi_with_soundfont");
+    assert.ok(installer && compose && productionRender && soundfontRender);
 
     // 1) Install the only free pack — it must auto-register so render can use the id (issue_0145).
     restoreFetch = installMockFetch({ "GeneralUser-GS.sf2": fakeSoundfontBytes(), "LICENSE.txt": "GeneralUser GS license fixture\n", "README.md": "# GeneralUser GS fixture\n" });
@@ -724,6 +735,16 @@ test("end-to-end: install GeneralUser GS -> compose cello+piano -> render covers
     const noIdPayload = renderNoId.structuredContent as { stemPaths: Record<string, string>; stemRenderers: Record<string, { packId: string }> };
     assert.ok(noIdPayload.stemPaths.cello && noIdPayload.stemPaths.piano, "both stems render via the GM fallback");
     assert.equal(noIdPayload.stemRenderers.cello.packId, "generaluser_gs");
+
+    const directSoundfontRender = await soundfontRender!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/e2e-cue.json",
+      soundfontPackId: "generaluser_gs",
+      sampleRate: 16000,
+      outputAudioPath: "music/e2e-direct-soundfont.wav",
+      outputReportPath: "music/e2e-direct-soundfont-report.json"
+    }, ctx);
+    assert.equal(directSoundfontRender.ok, true, `render_midi_with_soundfont should use the installed pack id directly: ${JSON.stringify(directSoundfontRender.errors)}`);
 
     // NOTE: routing/identity is verified at the MIDI level (piano PC 0xC0 0x00, cello PC 0xC5 0x2A,
     // GeneralUser GS is GM-compliant so program 43 = cello). The fake FluidSynth emits a fixed tone
@@ -2338,6 +2359,97 @@ test("free production render pipeline creates WAV, MP3, stems, licenses, and tru
   }
 });
 
+test("render_production_music publishes MP3 when production WAV exceeds media asset limit", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-production-large-wav-"));
+  const oldPath = process.env.PATH;
+  const oldLargeWav = process.env.FAKE_FFMPEG_LARGE_WAV;
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Large production WAV", createdByClientId: "producer" });
+    const compose = getToolModule("compose_music");
+    const packManager = getToolModule("manage_jazz_instrument_packs");
+    const productionRender = getToolModule("render_production_music");
+    assert.ok(compose);
+    assert.ok(packManager);
+    assert.ok(productionRender);
+
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${await installFakeFfmpeg(root)}:${oldPath}`;
+    process.env.FAKE_FFMPEG_LARGE_WAV = String(101 * 1024 * 1024);
+
+    await compose!.handler({
+      projectId: project.id,
+      title: "Long Solo Piano",
+      style: "smooth_piano",
+      tempo: 70,
+      key: "D minor",
+      durationSeconds: 600,
+      instruments: ["piano"],
+      outputManifestPath: "music/long-solo.json",
+      outputMidiPath: "music/long-solo.mid"
+    }, ctx);
+    await writeProjectAsset(ctx.projectRoot, project.id, "instruments/free-piano.sf2", fakeSoundfontBytes(), "audio/soundfont");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/LICENSE.txt", "Public domain fixture license\n");
+    await writeProjectFile(ctx.projectRoot, project.id, "instruments/README.md", "# Free piano fixture\n");
+    const packResult = await packManager!.handler({
+      projectId: project.id,
+      intendedUse: "client_delivery",
+      packs: [{
+        packId: "free_piano_public_domain",
+        displayName: "Free Piano Public Domain",
+        instrumentRole: "realistic_piano",
+        format: "soundfont",
+        assetPaths: ["instruments/free-piano.sf2"],
+        licenseType: "public_domain",
+        source: "fixture",
+        sourceUrl: "https://example.test/free-piano",
+        licenseTextPath: "instruments/LICENSE.txt",
+        readmePath: "instruments/README.md",
+        commercialUseAllowed: true,
+        redistributionAllowed: true,
+        productionUseApproved: true,
+        qualityTier: "production_candidate"
+      }]
+    }, ctx);
+    assert.equal(packResult.ok, true);
+
+    const renderResult = await productionRender!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/long-solo.json",
+      instrumentPackMap: { realistic_piano: "free_piano_public_domain" },
+      sampleRate: 44100,
+      publish: false
+    }, ctx);
+    assert.equal(renderResult.ok, true);
+    const payload = renderResult.structuredContent as {
+      productionWavPath?: string;
+      previewMp3Path: string;
+      deliveryFormat: string;
+      largeAudioAssetSkips: Array<{ path: string; replacementPath?: string }>;
+      htmlPath: string;
+      licensesPath: string;
+    };
+    assert.equal(payload.productionWavPath, undefined);
+    assert.equal(payload.previewMp3Path, "music/preview.mp3");
+    assert.equal(payload.deliveryFormat, "mp3_first_large_wav_omitted");
+    assert.ok(payload.largeAudioAssetSkips.some((asset) => asset.path === "music/production.wav" && asset.replacementPath === "music/preview.mp3"));
+    const previewMp3 = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, payload.previewMp3Path));
+    assert.equal(previewMp3.subarray(0, 3).toString("ascii"), "ID3");
+    const omittedWavPath = await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/production.wav");
+    await assert.rejects(readFile(omittedWavPath), /ENOENT|no such file/i);
+    const html = await readProjectFile(ctx.projectRoot, project.id, payload.htmlPath);
+    assert.match(html, /Download MP3/);
+    assert.doesNotMatch(html, /Download WAV/);
+    assert.match(html, /Large WAV assets were omitted/);
+    const licenses = await readProjectFile(ctx.projectRoot, project.id, payload.licensesPath);
+    assert.match(licenses, /Large WAV Assets Omitted/);
+    assert.match(licenses, /music\/production\.wav/);
+  } finally {
+    process.env.PATH = oldPath;
+    if (oldLargeWav === undefined) delete process.env.FAKE_FFMPEG_LARGE_WAV; else process.env.FAKE_FFMPEG_LARGE_WAV = oldLargeWav;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("export_music_project creates a music package with README, playlist, checks, and license warnings", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "music-export-package-"));
   try {
@@ -3126,6 +3238,32 @@ test("process_music_revision_feedback turns audition comments into revision oper
   }
 });
 
+test("process_music_revision_feedback treats no-cello piano-only feedback as a hard exclusion", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-revision-no-cello-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "No cello revision", createdByClientId: "producer" });
+    const processFeedback = getToolModule("process_music_revision_feedback");
+    assert.ok(processFeedback);
+
+    const result = await processFeedback!.handler({
+      projectId: project.id,
+      selectedVersionId: "solo-piano",
+      sourceManifestPath: "music/solo-piano.json",
+      feedback: [{ comment: "Piano only is preferred. No cello." }]
+    }, ctx);
+
+    assert.equal(result.ok, true);
+    const payload = result.structuredContent as {
+      midiEditOperations: Array<{ type: string; track?: string; value?: string | number | boolean }>;
+    };
+    assert.ok(payload.midiEditOperations.some((operation) => operation.type === "mute_track" && operation.track === "cello" && operation.value === true));
+    assert.equal(payload.midiEditOperations.some((operation) => operation.type === "create_track" && operation.track === "cello"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("music-workflow skill exposes music tools through dedicated, coding, and debug skills", () => {
   const toolNames = [
     "create_music_style_brief",
@@ -3243,6 +3381,77 @@ test("issue_0146: render_midi_with_soundfont reads a registry written under a no
   } finally {
     process.env.PATH = oldPath;
     restoreFetch();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("issue_0141: registered assets SoundFont renders by pack id and path", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-assets-soundfont-"));
+  const oldPath = process.env.PATH;
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Assets SoundFont", createdByClientId: "producer" });
+    const compose = getToolModule("compose_music");
+    const packManager = getToolModule("manage_jazz_instrument_packs");
+    const soundfontRender = getToolModule("render_midi_with_soundfont");
+    assert.ok(compose && packManager && soundfontRender);
+
+    await compose!.handler({
+      projectId: project.id,
+      instruments: ["piano"],
+      durationSeconds: 8,
+      outputManifestPath: "music/assets-soundfont.json",
+      outputMidiPath: "music/assets-soundfont.mid"
+    }, ctx);
+
+    const soundfontPath = "assets/soundfonts/generaluser_gs/GeneralUser-GS.sf2";
+    const sf2 = fakeSoundfontBytes();
+    await writeProjectAsset(ctx.projectRoot, project.id, soundfontPath, sf2, "audio/soundfont");
+    await writeProjectFile(ctx.projectRoot, project.id, "assets/soundfonts/generaluser_gs/LICENSE.txt", "GeneralUser GS license fixture\n");
+    await writeProjectFile(ctx.projectRoot, project.id, "assets/soundfonts/generaluser_gs/README.md", "# GeneralUser GS fixture\n");
+
+    const registered = await packManager!.handler({
+      projectId: project.id,
+      packs: [{
+        packId: "generaluser_gs",
+        displayName: "GeneralUser GS",
+        instrumentRole: "realistic_piano",
+        format: "soundfont",
+        assetPaths: [soundfontPath],
+        declaredSha256: createHash("sha256").update(sf2).digest("hex"),
+        licenseType: "generaluser_gs_2_0",
+        source: "https://github.com/mrbumpy409/GeneralUser-GS",
+        sourceUrl: "https://github.com/mrbumpy409/GeneralUser-GS",
+        licenseTextPath: "assets/soundfonts/generaluser_gs/LICENSE.txt",
+        readmePath: "assets/soundfonts/generaluser_gs/README.md",
+        commercialUseAllowed: true,
+        redistributionAllowed: true,
+        productionUseApproved: true,
+        qualityTier: "production_candidate"
+      }]
+    }, ctx);
+    assert.equal(registered.ok, true);
+
+    process.env.PATH = `${await installFakeFluidSynth(root)}:${oldPath}`;
+    const byPackId = await soundfontRender!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/assets-soundfont.json",
+      soundfontPackId: "generaluser_gs",
+      outputAudioPath: "music/by-pack-id.wav",
+      outputReportPath: "music/by-pack-id-report.json"
+    }, ctx);
+    assert.equal(byPackId.ok, true, `pack id render should succeed: ${JSON.stringify(byPackId.errors)}`);
+
+    const byPath = await soundfontRender!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/assets-soundfont.json",
+      soundfontPath,
+      outputAudioPath: "music/by-path.wav",
+      outputReportPath: "music/by-path-report.json"
+    }, ctx);
+    assert.equal(byPath.ok, true, `path render should succeed: ${JSON.stringify(byPath.errors)}`);
+  } finally {
+    process.env.PATH = oldPath;
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -3470,6 +3679,18 @@ test("install_free_soundfont_pack fails closed for a sampled grand that is not b
     const result = await installer!.handler({ projectId: project.id, packId: "salamander_grand" }, ctx);
     assert.equal(result.ok, false);
     assert.match(JSON.stringify(result.errors), /not bundled|MUSIC_SOUNDFONT_DIR/);
+    const payload = result.structuredContent as {
+      manualInstallRequired: boolean;
+      autoDownloadAvailable: boolean;
+      requiredFiles: string[];
+      searchDirectories: string[];
+      nextAction: string;
+    };
+    assert.equal(payload.manualInstallRequired, true);
+    assert.equal(payload.autoDownloadAvailable, false);
+    assert.deepEqual(payload.requiredFiles, ["Salamander.sf2", "LICENSE.txt"]);
+    assert.ok(payload.searchDirectories.some((dir) => dir.endsWith("salamander")));
+    assert.match(payload.nextAction, /Do not call render_production_music.*autoRegistered=true/);
   } finally {
     if (oldSoundfontDir === undefined) delete process.env.MUSIC_SOUNDFONT_DIR; else process.env.MUSIC_SOUNDFONT_DIR = oldSoundfontDir;
     await rm(root, { recursive: true, force: true });

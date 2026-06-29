@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { z } from "zod";
-import { getProjectFilesDirectory, getProjectStoredFilePath, publishProject, readProjectFile, writeProjectAsset, writeProjectFile } from "../../projects/store.js";
+import { getProjectFilesDirectory, getProjectStoredFilePath, maxProjectMediaAssetBytes, publishProject, readProjectFile, writeProjectAsset, writeProjectFile } from "../../projects/store.js";
 import { buildProjectPublishOptions } from "../../projects/publish-policy.js";
 import type { ToolContext, ToolModule } from "../types.js";
 
@@ -2501,12 +2501,22 @@ function buildMusicRevisionPlan(parsed: z.infer<typeof processMusicRevisionFeedb
   const qaChecklist = new Set<string>(["Confirm selected version matches listener choice.", "Run inspect_audio_quality after render.", "Re-export music package after revision passes QA."]);
   const detectedFeedbackTypes = new Set<string>(["choose_winning_version"]);
 
+  const hasNegativeInstrumentConstraint = (text: string, instrumentPattern: RegExp) =>
+    instrumentPattern.test(text) && (
+      /\bno\s+(?:more\s+)?(?:violin|strings?|cello|drums?|brush(?:es)?|snare|kick|cymbal)s?\b/i.test(text) ||
+      /\b(?:without|remove|drop|exclude|mute)\s+(?:the\s+)?(?:violin|strings?|cello|drums?|brush(?:es)?|snare|kick|cymbal)s?\b/i.test(text) ||
+      /\b(?:piano|solo piano)\s+only\b/i.test(text) ||
+      /(不要|去掉|移除|不用)(?:.*)(小提琴|弦乐|大提琴|鼓|镲)/i.test(text)
+    );
+
   for (const item of normalizedFeedback) {
     const text = item.comment.toLowerCase();
     const reason = item.timestamp ? `${item.timestamp}: ${item.comment}` : item.comment;
     if (/(drum|drums|brush|snare|kick|cymbal|鼓|镲)/i.test(text)) {
       detectedFeedbackTypes.add("drums");
-      if (/(too busy|busy|less|reduce|quieter|soft|太忙|少一点|降低)/i.test(text)) {
+      if (hasNegativeInstrumentConstraint(text, /(drum|drums|brush|snare|kick|cymbal|鼓|镲)/i)) {
+        pushUniqueOperation(midiEditOperations, { type: "mute_track", track: "drums", value: true, reason, timestampSeconds: item.timestampSeconds });
+      } else if (/(too busy|busy|less|reduce|quieter|soft|太忙|少一点|降低)/i.test(text)) {
         pushUniqueOperation(midiEditOperations, { type: "adjust_velocity", track: "drums", value: 0.72, reason, timestampSeconds: item.timestampSeconds });
         pushUniqueOperation(midiEditOperations, { type: "edit_notes", track: "drums", value: "remove nonessential ghost notes and fills", reason, timestampSeconds: item.timestampSeconds });
         pushUniqueOperation(styleOperations, { tool: "generate_drum_groove", action: "make_less_busy", value: "jazz_brushes", reason });
@@ -2525,7 +2535,7 @@ function buildMusicRevisionPlan(parsed: z.infer<typeof processMusicRevisionFeedb
     }
     if (/(add violin|violin|strings|cello|小提琴|弦乐)/i.test(text)) {
       detectedFeedbackTypes.add("instrumentation");
-      if (/(remove|less|without|不要|去掉)/i.test(text)) {
+      if (hasNegativeInstrumentConstraint(text, /(violin|strings|cello|小提琴|弦乐|大提琴)/i) || /(remove|less|without|不要|去掉)/i.test(text)) {
         pushUniqueOperation(midiEditOperations, { type: "mute_track", track: text.includes("cello") ? "cello" : text.includes("strings") ? "strings" : "violin", value: true, reason, timestampSeconds: item.timestampSeconds });
       } else {
         pushUniqueOperation(midiEditOperations, { type: "create_track", track: text.includes("cello") ? "cello" : text.includes("strings") ? "strings" : "violin", value: "soft counterline under melody", reason, timestampSeconds: item.timestampSeconds });
@@ -3015,6 +3025,11 @@ async function installSampledPianoPack(ctx: ToolContext, input: z.infer<typeof i
       packId: pack.packId,
       displayName: pack.displayName,
       sourceUrl: pack.sourceUrl,
+      manualInstallRequired: true,
+      autoDownloadAvailable: false,
+      requiredFiles: [pack.sf2File, pack.licenseFile],
+      searchDirectories: bundledSoundfontDirectories(pack.dirName),
+      nextAction: `Place ${pack.sf2File} and ${pack.licenseFile} under <MUSIC_SOUNDFONT_DIR>/${pack.dirName}/, then re-run install_free_soundfont_pack with packId="${pack.packId}". Do not call render_production_music with this pack id until install returns autoRegistered=true.`,
       qualityTier: "blocked" as const,
       errors: [error instanceof Error ? error.message : String(error)]
     };
@@ -3682,6 +3697,37 @@ function productionStemGroups(composition: Composition) {
   }));
 }
 
+type SkippedLargeAudioAsset = {
+  path: string;
+  purpose: string;
+  sizeBytes: number;
+  maxBytes: number;
+  replacementPath?: string;
+};
+
+async function writeProjectAudioAssetWithinMediaLimit(
+  ctx: ToolContext,
+  projectId: string,
+  relativePath: string,
+  content: Buffer,
+  contentType: string,
+  purpose: string
+) {
+  if (content.length > maxProjectMediaAssetBytes) {
+    return {
+      filePath: undefined,
+      skipped: {
+        path: relativePath,
+        purpose,
+        sizeBytes: content.length,
+        maxBytes: maxProjectMediaAssetBytes
+      } satisfies SkippedLargeAudioAsset
+    };
+  }
+  const file = await writeProjectAsset(ctx.projectRoot, projectId, relativePath, content, contentType);
+  return { filePath: file.path, skipped: undefined };
+}
+
 function compositionWithSelectedTracks(composition: Composition, tracks: string[]): Composition {
   const selected = Object.fromEntries(tracks.map((track) => [track, composition.tracks[track] ?? []]));
   return { ...JSON.parse(JSON.stringify(composition)), tracks: selected };
@@ -3727,19 +3773,27 @@ async function inspectMusicRenderEnvironment(ctx: ToolContext, input: z.infer<ty
 function renderProductionLicensesMarkdown(input: {
   packs: JazzPackRecord[];
   toolchain: Awaited<ReturnType<typeof inspectMusicRenderEnvironment>>["tools"];
-  productionWavPath: string;
+  productionWavPath?: string;
   previewMp3Path: string;
   stemPaths: Record<string, string>;
   midiStemPaths: Record<string, string>;
+  skippedLargeAudioAssets?: SkippedLargeAudioAsset[];
 }) {
   const lines = [
     "# Music Rendering Licenses",
     "",
     "## Output Files",
-    `- ${input.productionWavPath}: final offline-rendered WAV master.`,
+    ...(input.productionWavPath ? [`- ${input.productionWavPath}: final offline-rendered WAV master.`] : []),
     `- ${input.previewMp3Path}: MP3 preview encoded from the WAV master with FFmpeg.`,
     ...Object.entries(input.stemPaths).map(([stem, filePath]) => `- ${filePath}: rendered ${stem} WAV stem.`),
     ...Object.entries(input.midiStemPaths).map(([stem, filePath]) => `- ${filePath}: generated ${stem} MIDI stem.`),
+    ...(input.skippedLargeAudioAssets?.length
+      ? [
+        "",
+        "## Large WAV Assets Omitted",
+        ...input.skippedLargeAudioAssets.map((asset) => `- ${asset.path}: ${asset.purpose} was ${asset.sizeBytes} bytes, above the ${asset.maxBytes} byte project media limit. Use ${asset.replacementPath ?? input.previewMp3Path} for published playback.`)
+      ]
+      : []),
     "",
     "## Instrument Libraries",
     ...input.packs.flatMap((pack) => [
@@ -3775,13 +3829,19 @@ function renderProductionMusicHtml(input: {
   title: string;
   statusLabel: string;
   productionReady: boolean;
-  productionWavPath: string;
+  productionWavPath?: string;
   previewMp3Path: string;
   licensesPath: string;
   reportPath: string;
+  skippedLargeAudioAssets?: SkippedLargeAudioAsset[];
 }) {
   const statusClass = input.productionReady ? "ok" : "warn";
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(input.title)}</title><style>body{font-family:system-ui;margin:32px;max-width:860px;color:#171717}.status{display:inline-block;border:1px solid #d6d3d1;border-radius:6px;padding:8px 10px;margin:10px 0}.ok{color:#166534;background:#f0fdf4}.warn{color:#9a3412;background:#fff7ed}.controls{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0}.button,button{border:1px solid #222;border-radius:6px;background:#fff;color:#171717;padding:10px 12px;font-weight:700;text-decoration:none;cursor:pointer}audio{width:100%;display:block;margin:12px 0 18px}</style></head><body><h1>${escapeHtml(input.title)}</h1><p class="status ${statusClass}">${escapeHtml(input.statusLabel)}</p><audio id="preview" controls preload="metadata" src="${escapeHtml(input.previewMp3Path)}"></audio><div class="controls"><button type="button" onclick="document.getElementById('preview').play()">Play Preview</button><a class="button" download href="${escapeHtml(input.productionWavPath)}">Download WAV</a><a class="button" download href="${escapeHtml(input.previewMp3Path)}">Download MP3</a></div><h2>Production Files</h2><ul><li><a href="${escapeHtml(input.productionWavPath)}">production.wav</a></li><li><a href="${escapeHtml(input.previewMp3Path)}">preview.mp3</a></li><li><a href="${escapeHtml(input.licensesPath)}">LICENSES.md</a></li><li><a href="${escapeHtml(input.reportPath)}">Pipeline report JSON</a></li></ul></body></html>`;
+  const wavDownload = input.productionWavPath ? `<a class="button" download href="${escapeHtml(input.productionWavPath)}">Download WAV</a>` : "";
+  const wavFile = input.productionWavPath ? `<li><a href="${escapeHtml(input.productionWavPath)}">production.wav</a></li>` : "";
+  const largeAssetNotice = input.skippedLargeAudioAssets?.length
+    ? `<p class="warn">Large WAV assets were omitted from the published project because they exceed the media limit; the MP3 preview is the published playback file.</p>`
+    : "";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(input.title)}</title><style>body{font-family:system-ui;margin:32px;max-width:860px;color:#171717}.status{display:inline-block;border:1px solid #d6d3d1;border-radius:6px;padding:8px 10px;margin:10px 0}.ok{color:#166534;background:#f0fdf4}.warn{color:#9a3412;background:#fff7ed}.controls{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0}.button,button{border:1px solid #222;border-radius:6px;background:#fff;color:#171717;padding:10px 12px;font-weight:700;text-decoration:none;cursor:pointer}audio{width:100%;display:block;margin:12px 0 18px}</style></head><body><h1>${escapeHtml(input.title)}</h1><p class="status ${statusClass}">${escapeHtml(input.statusLabel)}</p>${largeAssetNotice}<audio id="preview" controls preload="metadata" src="${escapeHtml(input.previewMp3Path)}"></audio><div class="controls"><button type="button" onclick="document.getElementById('preview').play()">Play Preview</button>${wavDownload}<a class="button" download href="${escapeHtml(input.previewMp3Path)}">Download MP3</a></div><h2>Production Files</h2><ul>${wavFile}<li><a href="${escapeHtml(input.previewMp3Path)}">preview.mp3</a></li><li><a href="${escapeHtml(input.licensesPath)}">LICENSES.md</a></li><li><a href="${escapeHtml(input.reportPath)}">Pipeline report JSON</a></li></ul></body></html>`;
 }
 
 function wavFallbackOutputPath(outputAudioPath: string) {
@@ -5193,6 +5253,7 @@ export const musicWorkflowTools: ToolModule[] = [
 	        const midiStemPaths: Record<string, string> = {};
 	        const stemRenderers: Record<string, Record<string, unknown>> = {};
 	        const stemValidations: Record<string, { rms: number; peak: number; ok: boolean }> = {};
+	        const skippedLargeAudioAssets: SkippedLargeAudioAsset[] = [];
 	        // A stem whose RMS is below this floor is effectively silent — usually a requested
 	        // instrument that produced no audible notes. Publishing it would be the misleading
 	        // "silent cello" output this work exists to prevent, so each stem is validated and we
@@ -5216,8 +5277,10 @@ export const musicWorkflowTools: ToolModule[] = [
 	          const stemWavTempPath = path.join(tempDir, `${group.id}.wav`);
 	          await writeFile(stemMidiTempPath, stemMidiBuffer);
 	          const stemWav = await productionInstrumentRender(resolved.renderer, resolved.absolutePath, stemMidiTempPath, stemWavTempPath, parsed.sampleRate, ctx.commandTimeoutMs);
-	          const stemProjectFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, `${parsed.outputStemDirectory}/${group.id}.wav`, stemWav, "audio/wav");
-	          stemPaths[group.id] = stemProjectFile.path;
+	          const stemProjectPath = `${parsed.outputStemDirectory}/${group.id}.wav`;
+	          const stemProjectFile = await writeProjectAudioAssetWithinMediaLimit(ctx, parsed.projectId, stemProjectPath, stemWav, "audio/wav", `rendered ${group.label} WAV stem`);
+	          if (stemProjectFile.filePath) stemPaths[group.id] = stemProjectFile.filePath;
+	          if (stemProjectFile.skipped) skippedLargeAudioAssets.push(stemProjectFile.skipped);
 	          stemRenderers[group.id] = { role: group.role, packId: resolved.pack.packId, renderer: resolved.renderer, soundfontPath: resolved.soundfontPath };
 	          stemBuffers.push(stemWav);
 	          const stemStats = audioStats(stemWav);
@@ -5227,7 +5290,8 @@ export const musicWorkflowTools: ToolModule[] = [
 	        const silentStems = Object.entries(stemValidations).filter(([, value]) => !value.ok).map(([id]) => id);
 	        if (silentStems.length) throw new Error(`Stem validation failed: ${silentStems.join(", ")} rendered effectively silent (RMS below ${productionStemSilenceFloor}). Refusing to publish a misleading mix where a requested instrument is missing.`);
 	        const mixedStems = mixPcmWavStems(stemBuffers);
-	        const rawFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputRawRenderPath, mixedStems, "audio/wav");
+	        const rawFile = await writeProjectAudioAssetWithinMediaLimit(ctx, parsed.projectId, parsed.outputRawRenderPath, mixedStems, "audio/wav", "unmastered raw WAV mix");
+	        if (rawFile.skipped) skippedLargeAudioAssets.push(rawFile.skipped);
 	        const mastered = applyMasterChain(mixedStems, {
 	          projectId: parsed.projectId,
 	          audioPath: parsed.outputRawRenderPath,
@@ -5256,17 +5320,19 @@ export const musicWorkflowTools: ToolModule[] = [
           }
         }
         if (!loudnessFinalizedWithFfmpeg) await writeFile(productionTempPath, productionBuffer);
-        const productionFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputProductionWavPath, productionBuffer, "audio/wav");
         const mp3TempPath = path.join(tempDir, "preview.mp3");
 	        const mp3 = await encodeMp3WithFfmpeg(productionTempPath, mp3TempPath, ctx.commandTimeoutMs);
 	        const mp3File = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputPreviewMp3Path, mp3, "audio/mpeg");
+        const productionFile = await writeProjectAudioAssetWithinMediaLimit(ctx, parsed.projectId, parsed.outputProductionWavPath, productionBuffer, "audio/wav", "final offline-rendered WAV master");
+        if (productionFile.skipped) skippedLargeAudioAssets.push({ ...productionFile.skipped, replacementPath: mp3File.path });
 	        const licenses = renderProductionLicensesMarkdown({
 	          packs: Object.values(packResolution.packRecords),
 	          toolchain: environment.tools,
-	          productionWavPath: productionFile.path,
+	          productionWavPath: productionFile.filePath,
 	          previewMp3Path: mp3File.path,
           stemPaths,
-          midiStemPaths
+          midiStemPaths,
+          skippedLargeAudioAssets
         });
         const licensesFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputLicensesPath, licenses);
         const statusLabel = "Rendered with free license-cleared instruments. Suitable for production use with proper attribution.";
@@ -5277,11 +5343,13 @@ export const musicWorkflowTools: ToolModule[] = [
 	          renderer: resolvedPacks.length > 1 ? "multi_instrument_renderer" : resolvedPacks[0]?.renderer,
 	          environment,
 	          sourceCompositionManifestPath: parsed.compositionManifestPath,
-	          productionWavPath: productionFile.path,
-	          masteredAudioPath: productionFile.path,
-	          fullMixPath: productionFile.path,
+	          productionWavPath: productionFile.filePath,
+	          masteredAudioPath: productionFile.filePath,
+	          fullMixPath: productionFile.filePath ?? mp3File.path,
 	          previewMp3Path: mp3File.path,
-	          rawRenderPath: rawFile.path,
+	          rawRenderPath: rawFile.filePath,
+	          largeAudioAssetSkips: skippedLargeAudioAssets,
+	          deliveryFormat: productionFile.filePath ? "wav_and_mp3" : "mp3_first_large_wav_omitted",
 	          stemPaths,
 	          midiStemPaths,
 	          stemRenderers,
@@ -5295,7 +5363,7 @@ export const musicWorkflowTools: ToolModule[] = [
 	          channelMap: parsed.channelMap,
 	          mixMasterChain: ["gain_staging", "eq_cleanup", "light_compression", "room_reverb", "master_limiter", "loudness_normalize"],
 	          loudnessFinalizedWithFfmpeg,
-	          masteringReport: { ...mastered.report, qualityTier: "production_candidate", productionReady: true, blockingReasons: [], sourceRenderPath: rawFile.path },
+	          masteringReport: { ...mastered.report, qualityTier: "production_candidate", productionReady: true, blockingReasons: [], sourceRenderPath: rawFile.filePath },
 	          soundfont: resolvedPacks[0] ? {
 	            packId: resolvedPacks[0].pack.packId,
 	            displayName: resolvedPacks[0].pack.displayName,
@@ -5337,16 +5405,20 @@ export const musicWorkflowTools: ToolModule[] = [
           title: composition.title,
           statusLabel,
           productionReady: true,
-          productionWavPath: productionFile.path,
+          productionWavPath: productionFile.filePath,
           previewMp3Path: mp3File.path,
           licensesPath: licensesFile.path,
-          reportPath: reportFile.path
+          reportPath: reportFile.path,
+          skippedLargeAudioAssets
         });
         const htmlFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputHtmlPath, html);
         const publishPolicy = parsed.publish ? buildProjectPublishOptions(ctx) : undefined;
         const published = publishPolicy ? await publishProject(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, htmlFile.path, publishPolicy.options) : undefined;
-        const artifacts = [productionFile.path, mp3File.path, rawFile.path, ...Object.values(stemPaths), ...Object.values(midiStemPaths), licensesFile.path, reportFile.path, htmlFile.path];
-        return { ok: true, summary: `Rendered production_candidate music to ${productionFile.path} and ${mp3File.path}.`, jobId: parsed.projectId, previewUrl: published?.publishedUrl, shareUrl: published?.publishedUrl, artifacts, structuredContent: { ...report, reportPath: reportFile.path, htmlPath: htmlFile.path, publishedUrl: published?.publishedUrl }, logs: [JSON.stringify(report, null, 2)], errors: [] };
+        const artifacts = [productionFile.filePath, mp3File.path, rawFile.filePath, ...Object.values(stemPaths), ...Object.values(midiStemPaths), licensesFile.path, reportFile.path, htmlFile.path].filter((value): value is string => Boolean(value));
+        const summary = productionFile.filePath
+          ? `Rendered production_candidate music to ${productionFile.filePath} and ${mp3File.path}.`
+          : `Rendered production_candidate music to ${mp3File.path}; omitted oversized WAV assets above the project media limit.`;
+        return { ok: true, summary, jobId: parsed.projectId, previewUrl: published?.publishedUrl, shareUrl: published?.publishedUrl, artifacts, structuredContent: { ...report, reportPath: reportFile.path, htmlPath: htmlFile.path, publishedUrl: published?.publishedUrl }, logs: [JSON.stringify(report, null, 2)], errors: [] };
       } finally {
         await rm(tempDir, { recursive: true, force: true });
       }

@@ -335,8 +335,12 @@ Timbre realism is dominated by the sample source, then by performance expression
 > (287 GM presets, synth-grade, the "any standard instrument" fallback).
 
 YDP/Salamander SF2 sources: <https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html>.
-Register a downloaded pack with `manage_jazz_instrument_packs` (needs SHA-256, license sidecar,
-`instrumentRole: realistic_piano`, CC-BY → attribution required), then render by `soundfontPackId`.
+`install_free_soundfont_pack` can auto-register these sampled grands only when the extracted `.sf2`
+and `LICENSE.txt` already exist under `<MUSIC_SOUNDFONT_DIR>/<pack>/`; otherwise it fails closed with
+`manualInstallRequired=true`. Do not render with `soundfontPackId="salamander_grand"` until install
+returns `autoRegistered=true`. For manually managed packs, register with
+`manage_jazz_instrument_packs` (needs SHA-256, license sidecar, `instrumentRole: realistic_piano`,
+CC-BY attribution), then render by `soundfontPackId`.
 
 **Why bytes ≈ realism:** a real piano changes *timbre* (not just volume) from soft→hard; only
 multi-velocity sampling captures that. GM stretches a few samples; YDP/Salamander are real
@@ -415,6 +419,10 @@ compose (motivic, from a loved theme)  →  finer velocity curve + CC64 pedal + 
    →  FluidSynth render w/ Salamander (.sf2)  →  convolution reverb w/ a REAL trimmed hall IR
    →  2-pass loudnorm (-16 LUFS / -1.5 dBTP)  →  mp3  →  publish_and_report
 ```
+
+For 5-10 minute BGM, publish MP3 first. `render_production_music` now skips project-asset writes for
+WAV/stem files above the 100 MiB media limit, records them in `largeAudioAssetSkips`, and still
+publishes `preview.mp3` plus a truthful player page.
 
 - **Compose by transformation, not invention.** A long piece (intro→theme→development→climax→reprise→
   outro) grown from *one* approved theme (octave-doubling, register shift, dynamics) holds together and
