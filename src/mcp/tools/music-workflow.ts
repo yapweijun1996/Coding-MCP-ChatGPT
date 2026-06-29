@@ -152,6 +152,14 @@ const editMidiInputSchema = z.object({
   velocityScale: z.number().min(0.2).max(2).optional().default(1),
   swing: z.number().min(0).max(0.45).optional().default(0),
   duplicateSections: z.array(z.string().min(1).max(40)).max(12).optional().default([]),
+  // Bass repair: raises LH/bass-track notes below raiseBelowMidi by one octave, reduces their
+  // velocity, and caps their duration to prevent sustain-pedal rumble in piano SoundFonts.
+  bassRepair: z.boolean().optional().default(false),
+  bassRepairConfig: z.object({
+    raiseBelowMidi: z.number().int().min(24).max(60).optional().default(48),
+    velocityScale: z.number().min(0.3).max(1).optional().default(0.72),
+    maxDurationBeats: z.number().min(0.25).max(4).optional().default(1.5)
+  }).optional().default({}),
   outputManifestPath: z.string().min(1).max(240).optional().default("music/edited-composition-manifest.json"),
   outputMidiPath: z.string().min(1).max(240).optional().default("music/edited-composition.mid")
 });
@@ -2031,19 +2039,36 @@ export function buildEnsembleQa(composition: Composition, requestedInstruments: 
   };
 }
 
+const BASS_TRACK_PATTERN = /left.?hand|lh\b|bass|contrabass/i;
+
 function applyMidiEdits(composition: Composition, input: z.infer<typeof editMidiInputSchema>) {
   const edited = JSON.parse(JSON.stringify(composition)) as Composition;
-  for (const notes of Object.values(edited.tracks)) {
+  const repairCfg = input.bassRepairConfig ?? {};
+  const raiseBelowMidi: number = repairCfg.raiseBelowMidi ?? 48;
+  const bassVelScale: number = repairCfg.velocityScale ?? 0.72;
+  const maxDurBeats: number = repairCfg.maxDurationBeats ?? 1.5;
+  const bassRepairLog: Array<{ track: string; midi: number; beat: number; change: string }> = [];
+
+  for (const [track, notes] of Object.entries(edited.tracks)) {
+    const isBassTrack = input.bassRepair && BASS_TRACK_PATTERN.test(track);
     for (const note of notes) {
       note.midi = Math.max(0, Math.min(127, note.midi + input.transposeSemitones));
       note.velocity = Math.max(1, Math.min(127, Math.round(note.velocity * input.velocityScale)));
       if (input.quantizeBeats) note.startBeat = Number((Math.round(note.startBeat / input.quantizeBeats) * input.quantizeBeats).toFixed(3));
       if (input.swing && Math.floor(note.startBeat * 2) % 2 === 1) note.startBeat = Number((note.startBeat + input.swing).toFixed(3));
       if (input.humanizeMs) note.startBeat = Number((note.startBeat + ((note.midi % 5) - 2) * input.humanizeMs / 1000 / (60 / edited.tempo)).toFixed(3));
+      // Bass repair: raise low notes by one octave, reduce velocity and cap duration.
+      if (isBassTrack && note.midi < raiseBelowMidi) {
+        const oldMidi = note.midi;
+        note.midi = Math.min(127, note.midi + 12);
+        note.velocity = Math.max(1, Math.min(127, Math.round(note.velocity * bassVelScale)));
+        if (note.durationBeats > maxDurBeats) note.durationBeats = maxDurBeats;
+        bassRepairLog.push({ track, midi: oldMidi, beat: note.startBeat, change: `raised ${oldMidi}→${note.midi}, vel×${bassVelScale}, dur≤${maxDurBeats}` });
+      }
     }
   }
   edited.title = `${edited.title} (edited)`;
-  return edited;
+  return { edited, bassRepairLog };
 }
 
 type AudioFinding = { severity: "high" | "medium" | "low"; category: string; message: string; suggestedFix: string };
@@ -2262,7 +2287,7 @@ function qualityForComposition(composition: Composition, options: { audio?: Buff
   if (technicalReport.dynamicRange > 28) addFinding(findings, "medium", "dynamic_range", "Dynamic range is wide for steady background playback.", "Use gentle compression or rebalance quiet/loud sections.");
   if (technicalReport.silenceGaps.length) addFinding(findings, "medium", "silence", "Detected long silence gaps.", "Fill gaps with room tone, pads, or adjust arrangement section lengths.");
   if (technicalReport.harshHighFrequencyProxy > 0.08) addFinding(findings, "medium", "harshness", "High-frequency change proxy suggests possible harshness.", "Reduce high-end, soften piano/drum velocities, or apply a gentle low-pass.");
-  if (technicalReport.excessiveBassProxy > 0.18) addFinding(findings, "medium", "bass", "Low-frequency proxy suggests excessive bass energy.", "Lower bass gain or high-pass non-bass instruments.");
+  if (technicalReport.excessiveBassProxy > 0.18) addFinding(findings, "medium", "bass", "Low-frequency proxy suggests excessive bass energy.", "Run edit_midi with bassRepair:true to raise left-hand/bass notes below C3 by an octave, reduce their velocity, and cap sustain duration. Also verify highpass=f=35 is applied in the loudnorm pass.");
   if (options.checkLoop && composition.loopable && technicalReport.loopSeamClickProxy > 0.08) addFinding(findings, "medium", "loop", "Loop seam may click due to a large start/end waveform jump.", "End near a zero crossing, add a short crossfade, or preserve reverb tail.");
   const sessionQualityReport = sessionQuality(options.session);
   if (sessionQualityReport?.roughTransitionCount) addFinding(findings, "medium", "session", "Session contains rough transitions.", "Reorder by compatible key/tempo/energy or increase transition bed/crossfade length.");
@@ -5592,12 +5617,12 @@ export const musicWorkflowTools: ToolModule[] = [
     schema: editMidiInputSchema,
     handler: async (input, ctx) => {
       const parsed = editMidiInputSchema.parse(input);
-      const edited = applyMidiEdits(await readComposition(ctx, parsed.projectId, parsed.compositionManifestPath), parsed);
+      const { edited, bassRepairLog } = applyMidiEdits(await readComposition(ctx, parsed.projectId, parsed.compositionManifestPath), parsed);
       const [manifestFile, midiFile] = await Promise.all([
         writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(edited, null, 2)}\n`),
         writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(edited), "audio/midi")
       ]);
-      return { ok: true, summary: `Edited MIDI manifest and wrote ${midiFile.path}.`, jobId: parsed.projectId, artifacts: [manifestFile.path, midiFile.path], structuredContent: { ...edited, manifestPath: manifestFile.path, midiPath: midiFile.path }, logs: [JSON.stringify(edited, null, 2)], errors: [] };
+      return { ok: true, summary: `Edited MIDI manifest and wrote ${midiFile.path}.${bassRepairLog.length ? ` Bass repair: ${bassRepairLog.length} note(s) adjusted.` : ""}`, jobId: parsed.projectId, artifacts: [manifestFile.path, midiFile.path], structuredContent: { ...edited, manifestPath: manifestFile.path, midiPath: midiFile.path, bassRepairLog }, logs: [JSON.stringify(edited, null, 2)], errors: [] };
     }
   },
   {
@@ -5942,7 +5967,21 @@ export const musicWorkflowTools: ToolModule[] = [
 	        temporaryFiles.push(tempDir);
       } else {
         midiAbsolutePath = await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, parsed.midiPath!);
-        const midi = await readFile(midiAbsolutePath);
+        let midi: Buffer;
+        try {
+          midi = await readFile(midiAbsolutePath);
+        } catch (err: unknown) {
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+            return writeSoundfontRenderFailure(ctx, parsed, [
+              `MIDI file not found at project path "${parsed.midiPath}". The file must be written to project storage before rendering.`
+            ], {
+              missingMidiPath: parsed.midiPath,
+              nextAction: "write_project_asset or import_project_asset_from_local_file",
+              hint: `Write or import the MIDI asset to project path "${parsed.midiPath}" first, then retry render_midi_with_soundfont.`
+            });
+          }
+          throw err;
+        }
         if (midi.subarray(0, 4).toString("ascii") !== "MThd") throw new Error("midiPath must point to a valid MIDI file.");
       }
 

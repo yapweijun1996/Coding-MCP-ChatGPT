@@ -4365,3 +4365,135 @@ test("music-workflow skill exposes author_handwritten_music_score and validate_m
   assert.ok(protocol.includes("Rough sketch") || protocol.includes("rough sketch"), "compose_music must be demoted to rough sketch in protocol");
   assert.ok(!protocol.includes("default to the score-first path: `import_musicxml_score` or `compose_music`"), "compose_music must NOT be in the professional default path");
 });
+
+test("edit_midi: bassRepair raises LH notes below C3, scales velocity, caps duration", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "edit-midi-bass-repair-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Bass repair test", createdByClientId: "test" });
+    const edit = getToolModule("edit_midi");
+    assert.ok(edit, "edit_midi registered");
+
+    // Compose a minimal manifest with piano_left_hand notes spanning above and below C3 (MIDI 48).
+    const composition = {
+      title: "Bass Repair Test",
+      tempo: 90,
+      key: "C",
+      style: "jazz",
+      durationSeconds: 8,
+      loopable: false,
+      instruments: ["piano_right_hand", "piano_left_hand"],
+      sections: [{ name: "A", startBeat: 0, endBeat: 16 }],
+      tracks: {
+        piano_right_hand: [
+          { track: "piano_right_hand", midi: 60, startBeat: 0, durationBeats: 1, velocity: 80 },
+          { track: "piano_right_hand", midi: 64, startBeat: 1, durationBeats: 1, velocity: 80 }
+        ],
+        piano_left_hand: [
+          { track: "piano_left_hand", midi: 40, startBeat: 0, durationBeats: 3, velocity: 90 },  // below C3 → should rise
+          { track: "piano_left_hand", midi: 36, startBeat: 2, durationBeats: 4, velocity: 85 },  // below C3 → should rise
+          { track: "piano_left_hand", midi: 52, startBeat: 4, durationBeats: 1, velocity: 88 }   // above C3 → untouched
+        ]
+      }
+    };
+    await writeProjectFile(ctx.projectRoot, project.id, "music/test-manifest.json", JSON.stringify(composition, null, 2));
+
+    const result = await edit!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/test-manifest.json",
+      bassRepair: true,
+      bassRepairConfig: { raiseBelowMidi: 48, velocityScale: 0.72, maxDurationBeats: 1.5 },
+      outputManifestPath: "music/repaired-manifest.json",
+      outputMidiPath: "music/repaired.mid"
+    }, ctx);
+
+    assert.equal(result.ok, true, "bassRepair edit should succeed");
+    const payload = result.structuredContent as {
+      tracks: { piano_right_hand: Array<{ midi: number; velocity: number; durationBeats: number }>; piano_left_hand: Array<{ midi: number; velocity: number; durationBeats: number }> };
+      bassRepairLog: Array<{ track: string; midi: number; beat: number; change: string }>;
+    };
+
+    // LH note at MIDI 40 → should be raised to 52, velocity 90×0.72=64, duration capped at 1.5
+    const lh = payload.tracks.piano_left_hand;
+    assert.equal(lh[0].midi, 52, "MIDI 40 should be raised to 52");
+    assert.equal(lh[0].velocity, Math.round(90 * 0.72), "velocity should be scaled by 0.72");
+    assert.equal(lh[0].durationBeats, 1.5, "duration capped at 1.5");
+
+    // LH note at MIDI 36 → should be raised to 48, velocity 85×0.72=61, duration capped
+    assert.equal(lh[1].midi, 48, "MIDI 36 should be raised to 48");
+    assert.equal(lh[1].velocity, Math.round(85 * 0.72), "velocity scaled");
+    assert.equal(lh[1].durationBeats, 1.5, "duration capped");
+
+    // LH note at MIDI 52 → untouched (above threshold)
+    assert.equal(lh[2].midi, 52, "MIDI 52 above threshold, untouched");
+    assert.equal(lh[2].velocity, 88, "velocity untouched above threshold");
+
+    // RH notes untouched
+    const rh = payload.tracks.piano_right_hand;
+    assert.equal(rh[0].midi, 60, "RH note untouched");
+
+    // bassRepairLog has exactly the two below-C3 notes
+    assert.equal(payload.bassRepairLog.length, 2, "exactly 2 notes repaired");
+    assert.equal(payload.bassRepairLog[0].midi, 40, "log records original MIDI 40");
+    assert.equal(payload.bassRepairLog[1].midi, 36, "log records original MIDI 36");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("render_midi_with_soundfont: ENOENT on missing midiPath returns structured nextAction error", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "render-enoent-"));
+  const ffmpegBin = await installFakeFfmpeg(root);
+  const origPath = process.env.PATH;
+  try {
+    const ctx = toolContext(root);
+    process.env.PATH = `${ffmpegBin}:${origPath}`;
+    const project = await createProject(ctx.projectRoot, { title: "ENOENT test", createdByClientId: "test" });
+    const soundfontRender = getToolModule("render_midi_with_soundfont");
+    assert.ok(soundfontRender, "render_midi_with_soundfont registered");
+
+    // Register a fake soundfont so the render gets past soundfont resolution.
+    // Must supply all production_candidate fields so productionRenderBlockersForPack returns [].
+    const packManager = getToolModule("manage_jazz_instrument_packs");
+    assert.ok(packManager, "manage_jazz_instrument_packs registered");
+    const sfPath = "assets/fake.sf2";
+    const licensePath = "assets/fake-license.md";
+    await writeProjectAsset(ctx.projectRoot, project.id, sfPath, fakeSoundfontBytes(), "audio/soundfont");
+    await writeProjectFile(ctx.projectRoot, project.id, licensePath, "MIT License");
+    await packManager!.handler({
+      projectId: project.id,
+      packs: [{
+        packId: "test_sf2",
+        displayName: "Test SF2",
+        instrumentRole: "general_midi",
+        format: "soundfont",
+        assetPaths: [sfPath],
+        licenseType: "mit",
+        source: "https://example.com/fake.sf2",
+        sourceUrl: "https://example.com/fake.sf2",
+        licenseTextPath: licensePath,
+        commercialUseAllowed: true,
+        productionUseApproved: true,
+        qualityTier: "production_candidate"
+      }]
+    }, ctx);
+
+    // Call render with a midiPath that does NOT exist in project storage
+    const result = await soundfontRender!.handler({
+      projectId: project.id,
+      midiPath: "music/nonexistent.mid",
+      soundfontPackId: "test_sf2",
+      outputAudioPath: "music/out.wav"
+    }, ctx);
+
+    // Should NOT throw; should return a structured failure with nextAction
+    assert.equal(result.ok, false, "render should fail cleanly on ENOENT");
+    const payload = result.structuredContent as { missingMidiPath?: string; nextAction?: string; hint?: string };
+    assert.equal(payload.missingMidiPath, "music/nonexistent.mid", "missingMidiPath reported");
+    assert.ok(payload.nextAction?.includes("write_project_asset"), "nextAction should mention write_project_asset");
+    assert.ok(payload.hint, "hint should be present");
+  } finally {
+    process.env.PATH = origPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
