@@ -1339,7 +1339,7 @@ function performancePlanForComposition(composition: Composition) {
     { beat: Number((totalBeats * 0.62).toFixed(3)), tempoScale: 1.025 },
     { beat: Number((totalBeats * 0.9).toFixed(3)), tempoScale: 0.97 }
   ];
-  return { humanized: true, timingJitterBeats: 0.018, velocityJitter: 7, sustainPedal, rubatoMap };
+  return { humanized: true, timingJitterBeats: 0.035, velocityJitter: 14, sustainPedal, rubatoMap };
 }
 
 function applyPerformanceHumanization(composition: Composition, performance: NonNullable<Composition["performance"]>): Composition["tracks"] {
@@ -1353,11 +1353,14 @@ function applyPerformanceHumanization(composition: Composition, performance: Non
       const pedalOverlap = performance.sustainPedal.some((pedal) => note.startBeat >= pedal.startBeat && note.startBeat < pedal.endBeat);
       const durationLift = track === "piano" && pedalOverlap && note.durationBeats >= 0.4 ? 0.08 : 0;
       const startBeat = Math.max(0, Math.min(totalBeats - 0.05, note.startBeat + timing));
+      // Beat emphasis: downbeat (beat 1 of bar) gets +5, beat 3 gets +2; skip drums (already explicitly voiced)
+      const beatInBar = note.startBeat % 4;
+      const beatAccent = track !== "drums" ? (beatInBar < 0.12 ? 5 : beatInBar > 1.88 && beatInBar < 2.12 ? 2 : 0) : 0;
       return {
         ...note,
         startBeat: Number(startBeat.toFixed(3)),
         durationBeats: Number(Math.min(totalBeats - startBeat, note.durationBeats + durationLift).toFixed(3)),
-        velocity: Math.max(1, Math.min(127, Math.round(note.velocity + velocity)))
+        velocity: Math.max(1, Math.min(127, Math.round(note.velocity + velocity + beatAccent)))
       };
     }).sort((a, b) => a.startBeat - b.startBeat || a.midi - b.midi);
   }
