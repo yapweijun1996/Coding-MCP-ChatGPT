@@ -19,7 +19,7 @@ RUN NODE_OPTIONS=--max-old-space-size=2048 npm run build
 FROM mcr.microsoft.com/playwright:v1.61.0-noble AS runtime
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends fluidsynth ffmpeg bzip2 \
+  && apt-get install -y --no-install-recommends fluidsynth ffmpeg bzip2 xz-utils \
   && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /app/soundfonts/generaluser-gs \
@@ -63,7 +63,7 @@ NODE
 # Bundle the YDP Grand Piano (sampled Yamaha grand, CC-BY 3.0) so install_free_soundfont_pack
 # packId=ydp_grand resolves from MUSIC_SOUNDFONT_DIR with no per-run download (~118 MB sampled .sf2
 # ships as a bz2 archive Node cannot extract, so it is fetched + extracted here at build time).
-# Salamander (1.27 GB) is intentionally NOT bundled — it stays download-on-demand to keep the image small.
+# Salamander (296 MiB compressed / 1.27 GB uncompressed) is bundled at build time — see the RUN block below.
 RUN mkdir -p /app/soundfonts/ydp-grand \
   && node -e "const fs=require('node:fs');fetch('https://freepats.zenvoid.org/Piano/YDP-GrandPiano/YDP-GrandPiano-SF2-20160804.tar.bz2').then(r=>{if(!r.ok)throw new Error('download '+r.status);return r.arrayBuffer()}).then(b=>fs.writeFileSync('/tmp/ydp.tar.bz2',Buffer.from(b)))" \
   && tar -xjf /tmp/ydp.tar.bz2 -C /tmp \
@@ -73,6 +73,18 @@ RUN mkdir -p /app/soundfonts/ydp-grand \
   && cp "$SRC/YDP-GrandPiano-20160804.txt" /app/soundfonts/ydp-grand/LICENSE.txt \
   && cp "$SRC/YDP-GrandPiano-20160804.txt" /app/soundfonts/ydp-grand/README.md \
   && rm -rf /tmp/ydp.tar.bz2 "$SRC"
+
+# Bundle Salamander Grand Piano V3 (CC-BY 3.0, Yamaha C5 samples) so install_free_soundfont_pack
+# packId=salamander_grand resolves from MUSIC_SOUNDFONT_DIR with no per-run download.
+# 296 MiB compressed / 1.27 GB uncompressed; tradeoff explicitly accepted.
+RUN mkdir -p /app/soundfonts/salamander \
+  && node -e "const fs=require('node:fs');const crypto=require('node:crypto');(async()=>{const r=await fetch('https://freepats.zenvoid.org/Piano/SalamanderGrandPiano/SalamanderGrandPiano-SF2-V3+20200602.tar.xz');if(!r.ok)throw new Error('download '+r.status);const hash=crypto.createHash('sha256');const out=fs.createWriteStream('/tmp/salamander.tar.xz');for await(const chunk of r.body){hash.update(chunk);out.write(chunk);}await new Promise((res,rej)=>out.end(e=>e?rej(e):res()));const h=hash.digest('hex');if(h!=='15edb061d7ba60d58332f72dba8f8ce40988048cc703f935e6320f37d650e213')throw new Error('SHA256 mismatch: '+h);})()" \
+  && tar -xJf /tmp/salamander.tar.xz -C /tmp \
+  && SRC="/tmp/SalamanderGrandPiano-SF2-V3+20200602" \
+  && cp "$SRC/SalamanderGrandPiano-V3+20200602.sf2" /app/soundfonts/salamander/Salamander.sf2 \
+  && cp "$SRC/readme.txt" /app/soundfonts/salamander/LICENSE.txt \
+  && node -e "const fs=require('node:fs');const h=Buffer.alloc(12);const fd=fs.openSync('/app/soundfonts/salamander/Salamander.sf2','r');fs.readSync(fd,h,0,12,0);fs.closeSync(fd);if(h.toString('ascii',0,4)!=='RIFF'||h.toString('ascii',8,12)!=='sfbk')throw new Error('magic check failed: '+h.toString('hex'))" \
+  && rm -rf /tmp/salamander.tar.xz "$SRC"
 
 ENV NODE_ENV=production \
     PORT=6859 \
