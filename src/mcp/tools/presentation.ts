@@ -122,6 +122,16 @@ const createVideoPresentationInputSchema = z.object({
     title: z.string().max(180).optional(),
     body: z.string().max(2000).optional(),
     imagePath: z.string().min(1).max(240).optional(),
+    layout: z.enum(["text", "title_card", "code", "dryrun"]).optional().default("text"),
+    code: z.string().max(4000).optional(),
+    steps: z.array(z.object({
+      label: z.string().max(200).optional(),
+      array: z.array(z.union([z.string(), z.number(), z.null()])).max(30),
+      pointers: z.array(z.object({
+        label: z.string().max(20),
+        index: z.number().int()
+      })).max(6).optional()
+    })).max(20).optional(),
     durationSeconds: z.number().min(0.5).max(30),
     transition: z.enum(["cut", "fade", "slide", "zoom"]).optional().default("fade")
   })).min(1).max(30),
@@ -1059,21 +1069,117 @@ async function renderAt(timeSeconds) {
   const panelW = Math.min(canvas.width - pad * 2, Math.round(canvas.width * 0.68));
   const panelH = Math.round(canvas.height * 0.5);
   const panelY = Math.round((canvas.height - panelH) / 2);
-  ctx.fillStyle = "rgba(255,255,255,0.88)";
-  roundedRect(ctx, pad, panelY, panelW, panelH, 28);
-  ctx.fill();
-
-  ctx.fillStyle = "#136f63";
-  ctx.font = \`700 \${Math.max(24, canvas.width * 0.018)}px system-ui, sans-serif\`;
-  ctx.fillText(\`SCENE \${index + 1}\`, pad + 54, panelY + 72);
-
-  ctx.fillStyle = "#17211b";
-  ctx.font = \`800 \${Math.max(58, canvas.width * 0.055)}px Georgia, serif\`;
-  wrapText(ctx, scene.title || data.title, pad + 54, panelY + 165, panelW - 108, Math.max(64, canvas.width * 0.064), 3);
-
-  ctx.fillStyle = "#3d4a43";
-  ctx.font = \`400 \${Math.max(28, canvas.width * 0.024)}px system-ui, sans-serif\`;
-  wrapText(ctx, scene.body || "", pad + 56, panelY + panelH - 150, panelW - 112, Math.max(38, canvas.width * 0.031), 4);
+  const layout = scene.layout || "text";
+  if (layout === "title_card") {
+    ctx.fillStyle = "rgba(255,255,255,0.14)";
+    roundedRect(ctx, pad, panelY - 20, canvas.width - pad * 2, panelH + 40, 12);
+    ctx.fill();
+    const titleSize = Math.max(72, canvas.width * 0.072);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = \`800 \${titleSize}px Georgia, serif\`;
+    ctx.textAlign = "center";
+    wrapText(ctx, scene.title || data.title, canvas.width / 2, canvas.height / 2 - titleSize * 0.4, canvas.width - pad * 2, titleSize * 1.15, 3);
+    if (scene.body) {
+      ctx.font = \`400 \${Math.max(30, canvas.width * 0.026)}px system-ui, sans-serif\`;
+      ctx.fillStyle = "rgba(255,255,255,0.82)";
+      wrapText(ctx, scene.body, canvas.width / 2, canvas.height / 2 + titleSize * 1.3, canvas.width - pad * 2.5, Math.max(38, canvas.width * 0.032), 2);
+    }
+    ctx.textAlign = "left";
+  } else if (layout === "code") {
+    const codePanel = { x: pad, y: panelY - 20, w: canvas.width - pad * 2, h: panelH + 40 };
+    ctx.fillStyle = "rgba(12,20,18,0.93)";
+    roundedRect(ctx, codePanel.x, codePanel.y, codePanel.w, codePanel.h, 16);
+    ctx.fill();
+    ctx.fillStyle = "#74c7b8";
+    ctx.font = \`600 \${Math.max(18, canvas.width * 0.015)}px system-ui, monospace\`;
+    ctx.fillText(scene.title || "Code", codePanel.x + 26, codePanel.y + 36);
+    const codeLines = (scene.code || "").split("\\n");
+    const revealed = Math.max(1, Math.round(progress * codeLines.length + 0.5));
+    const lineH = Math.max(28, canvas.width * 0.022);
+    const fontSize = Math.max(18, canvas.width * 0.017);
+    ctx.font = \`400 \${fontSize}px "Courier New", monospace\`;
+    const codeStartY = codePanel.y + 62;
+    const maxVisible = Math.floor((codePanel.h - 72) / lineH);
+    const startLine = Math.max(0, revealed - maxVisible);
+    for (let li = startLine; li < Math.min(revealed, codeLines.length); li++) {
+      const lineY = codeStartY + (li - startLine) * lineH;
+      if (li === revealed - 1) {
+        ctx.fillStyle = "rgba(19,111,99,0.32)";
+        ctx.fillRect(codePanel.x + 6, lineY - lineH * 0.8, codePanel.w - 12, lineH);
+      }
+      ctx.fillStyle = "rgba(116,199,184,0.5)";
+      ctx.font = \`400 \${fontSize}px "Courier New", monospace\`;
+      ctx.fillText(String(li + 1).padStart(3, " "), codePanel.x + 12, lineY);
+      ctx.fillStyle = "#cce8e3";
+      ctx.fillText(codeLines[li].replace(/\\t/g, "    "), codePanel.x + 58, lineY);
+    }
+  } else if (layout === "dryrun") {
+    ctx.fillStyle = "rgba(255,255,255,0.91)";
+    roundedRect(ctx, pad, panelY, panelW, panelH, 24);
+    ctx.fill();
+    ctx.fillStyle = "#136f63";
+    ctx.font = \`700 \${Math.max(20, canvas.width * 0.016)}px system-ui, sans-serif\`;
+    ctx.fillText(\`SCENE \${index + 1}\`, pad + 46, panelY + 56);
+    ctx.fillStyle = "#17211b";
+    ctx.font = \`700 \${Math.max(32, canvas.width * 0.03)}px system-ui, sans-serif\`;
+    ctx.fillText(scene.title || "Dry Run", pad + 46, panelY + 106);
+    const steps = scene.steps || [];
+    if (steps.length > 0) {
+      const stepIndex = Math.min(steps.length - 1, Math.floor(progress * steps.length));
+      const step = steps[stepIndex];
+      ctx.fillStyle = "#66746b";
+      ctx.font = \`500 \${Math.max(16, canvas.width * 0.014)}px system-ui, sans-serif\`;
+      ctx.fillText(\`Step \${stepIndex + 1} / \${steps.length}\${step.label ? ": " + step.label : ""}\`, pad + 46, panelY + 148);
+      const arr = step.array || [];
+      const pointers = step.pointers || [];
+      const cellSize = Math.max(40, Math.min(Math.floor((panelW - 92) / Math.max(1, arr.length)), Math.round(canvas.width * 0.062)));
+      const cellH = Math.round(cellSize * 0.84);
+      const arrStartX = pad + 46;
+      const arrY = panelY + 186;
+      const cellFontSize = Math.max(14, Math.floor(cellSize * 0.36));
+      for (let ci = 0; ci < arr.length; ci++) {
+        const cx = arrStartX + ci * (cellSize + 4);
+        const isPointed = pointers.some((p) => p.index === ci);
+        ctx.fillStyle = isPointed ? "#136f63" : "#e4eeea";
+        roundedRect(ctx, cx, arrY, cellSize, cellH, 6);
+        ctx.fill();
+        ctx.strokeStyle = isPointed ? "#0d4f47" : "#adbdb5";
+        ctx.lineWidth = 2;
+        roundedRect(ctx, cx, arrY, cellSize, cellH, 6);
+        ctx.stroke();
+        ctx.fillStyle = isPointed ? "#ffffff" : "#17211b";
+        ctx.font = \`700 \${cellFontSize}px system-ui, monospace\`;
+        ctx.textAlign = "center";
+        ctx.fillText(String(arr[ci] ?? ""), cx + cellSize / 2, arrY + cellH * 0.66);
+        ctx.textAlign = "left";
+      }
+      const ptrFontSize = Math.max(13, Math.floor(cellSize * 0.28));
+      for (const ptr of pointers) {
+        if (ptr.index >= 0 && ptr.index < arr.length) {
+          const px = arrStartX + ptr.index * (cellSize + 4) + cellSize / 2;
+          ctx.fillStyle = "#136f63";
+          ctx.font = \`700 \${ptrFontSize}px system-ui, sans-serif\`;
+          ctx.textAlign = "center";
+          ctx.fillText("▲", px, arrY + cellH + 24);
+          ctx.fillText(ptr.label, px, arrY + cellH + 44);
+          ctx.textAlign = "left";
+        }
+      }
+    }
+  } else {
+    ctx.fillStyle = "rgba(255,255,255,0.88)";
+    roundedRect(ctx, pad, panelY, panelW, panelH, 28);
+    ctx.fill();
+    ctx.fillStyle = "#136f63";
+    ctx.font = \`700 \${Math.max(24, canvas.width * 0.018)}px system-ui, sans-serif\`;
+    ctx.fillText(\`SCENE \${index + 1}\`, pad + 54, panelY + 72);
+    ctx.fillStyle = "#17211b";
+    ctx.font = \`800 \${Math.max(58, canvas.width * 0.055)}px Georgia, serif\`;
+    wrapText(ctx, scene.title || data.title, pad + 54, panelY + 165, panelW - 108, Math.max(64, canvas.width * 0.064), 3);
+    ctx.fillStyle = "#3d4a43";
+    ctx.font = \`400 \${Math.max(28, canvas.width * 0.024)}px system-ui, sans-serif\`;
+    wrapText(ctx, scene.body || "", pad + 56, panelY + panelH - 150, panelW - 112, Math.max(38, canvas.width * 0.031), 4);
+  }
 
   const barW = canvas.width - pad * 2;
   ctx.globalAlpha = 1;
@@ -1413,7 +1519,7 @@ export const presentationTools: ToolModule[] = [
           title: { type: "string" },
           aspectRatio: { type: "string", enum: ["16:9", "9:16", "1:1"] },
           fps: { type: "number", enum: [24, 30] },
-          scenes: { type: "array", items: { type: "object" } },
+          scenes: { type: "array", items: { type: "object", properties: { title: { type: "string" }, body: { type: "string" }, imagePath: { type: "string" }, layout: { type: "string", enum: ["text", "title_card", "code", "dryrun"] }, code: { type: "string" }, steps: { type: "array", items: { type: "object" } }, durationSeconds: { type: "number" }, transition: { type: "string" } } } },
           audioPath: { type: "string" },
           outputPath: { type: "string" },
           publish: { type: "boolean" }

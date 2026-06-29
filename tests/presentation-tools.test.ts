@@ -215,6 +215,59 @@ test("create_video_presentation stays private by default and publishes only when
   });
 });
 
+test("create_video_presentation supports code and dryrun layouts", async () => {
+  await withContext(async (ctx) => {
+    const result = await callTool("create_video_presentation", {
+      title: "Algorithm walk-through",
+      scenes: [
+        {
+          layout: "title_card",
+          title: "Bubble Sort",
+          body: "Step-by-step animation",
+          durationSeconds: 3
+        },
+        {
+          layout: "code",
+          title: "bubbleSort",
+          code: "function bubbleSort(arr) {\n  for (let i = 0; i < arr.length; i++) {\n    for (let j = 0; j < arr.length - i - 1; j++) {\n      if (arr[j] > arr[j + 1]) {\n        [arr[j], arr[j + 1]] = [arr[j + 1], arr[j]];\n      }\n    }\n  }\n  return arr;\n}",
+          durationSeconds: 6
+        },
+        {
+          layout: "dryrun",
+          title: "Pass 1",
+          steps: [
+            { label: "compare 5,3", array: [5, 3, 8, 1], pointers: [{ label: "j", index: 0 }] },
+            { label: "swap → 3,5", array: [3, 5, 8, 1], pointers: [{ label: "j", index: 1 }] },
+            { label: "compare 5,8", array: [3, 5, 8, 1], pointers: [{ label: "j", index: 1 }] },
+            { label: "compare 8,1", array: [3, 5, 1, 8], pointers: [{ label: "j", index: 2 }] }
+          ],
+          durationSeconds: 8
+        }
+      ]
+    }, ctx);
+
+    assert.equal(result.ok, true);
+    assert.ok(result.jobId);
+
+    const indexPath = await getProjectStoredFilePath(ctx.projectRoot, result.jobId, "index.html");
+    const indexHtml = await readFile(indexPath, "utf8");
+    assert.match(indexHtml, /video-data/);
+    assert.match(indexHtml, /title_card/);
+    assert.match(indexHtml, /"layout":"code"/);
+    assert.match(indexHtml, /bubbleSort/);
+    assert.match(indexHtml, /"layout":"dryrun"/);
+    assert.match(indexHtml, /compare 5,3/);
+
+    const scriptPath = await getProjectStoredFilePath(ctx.projectRoot, result.jobId, "video.js");
+    const script = await readFile(scriptPath, "utf8");
+    assert.match(script, /layout === "code"/);
+    assert.match(script, /layout === "dryrun"/);
+    assert.match(script, /layout === "title_card"/);
+    assert.match(script, /codeLines/);
+    assert.match(script, /stepIndex/);
+  });
+});
+
 test("scripted media export workflow creates timeline, captions, audio alignment, frame previews, and export manifest", async () => {
   await withContext(async (ctx) => {
     const project = await createProject(ctx.projectRoot, {
