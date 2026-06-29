@@ -208,7 +208,8 @@ const renderMidiWithSoundfontInputSchema = z.object({
 const checkMusicRenderEnvironmentInputSchema = z.object({
   projectId: z.string().min(8).max(80).optional(),
   includeLocalMusicPacks: z.boolean().optional().default(true),
-  projectSearchDirectories: z.array(z.string().min(1).max(200)).max(20).optional().default(["soundfonts", "instruments", "music", "assets/soundfonts", "assets"])
+  projectSearchDirectories: z.array(z.string().min(1).max(200)).max(20).optional().default(["soundfonts", "instruments", "music", "assets/soundfonts", "assets"]),
+  requestedPackId: z.enum(["generaluser_gs", "ydp_grand", "salamander_grand"]).optional()
 });
 
 const renderProductionMusicInputSchema = z.object({
@@ -2914,7 +2915,10 @@ async function sampledPianoPackAvailability(packId?: string) {
     fallbackPolicy: `Do not label fallback renders as ${pack.displayName}; only report this pack after install_free_soundfont_pack returns autoRegistered=true for ${pack.packId}.`,
     nextAction: runtimeFilesReady
       ? `Run install_free_soundfont_pack with packId="${pack.packId}" to copy, hash, license-record, and auto-register the bundled runtime files before rendering.`
-      : `Place ${pack.sf2File} and ${pack.licenseFile} under <MUSIC_SOUNDFONT_DIR>/${pack.dirName}/, then run install_free_soundfont_pack with packId="${pack.packId}".`
+      : `Place ${pack.sf2File} and ${pack.licenseFile} under <MUSIC_SOUNDFONT_DIR>/${pack.dirName}/, then run install_free_soundfont_pack with packId="${pack.packId}".`,
+    userFacingExplanation: runtimeFilesReady
+      ? `${pack.displayName} runtime files are present. Run install_free_soundfont_pack with packId="${pack.packId}" to register it before rendering.`
+      : `${pack.displayName} is not available in this runtime. The files ${pack.sf2File} and ${pack.licenseFile} were not found under any of: ${searchDirectories.join(", ")}. To enable it, download and extract the archive from ${pack.sourceUrl}, place ${pack.sf2File} and ${pack.licenseFile} under <MUSIC_SOUNDFONT_DIR>/${pack.dirName}/, then run install_free_soundfont_pack with packId="${pack.packId}". Until then, use a registered fallback pack for rendering.`
   };
 }
 
@@ -3053,6 +3057,7 @@ async function installSampledPianoPack(ctx: ToolContext, input: z.infer<typeof i
       recommendedNextTool: "manage_jazz_instrument_packs"
     };
   } catch (error) {
+    const searchDirs = bundledSoundfontDirectories(pack.dirName);
     return {
       ok: false as const,
       packId: pack.packId,
@@ -3061,8 +3066,9 @@ async function installSampledPianoPack(ctx: ToolContext, input: z.infer<typeof i
       manualInstallRequired: true,
       autoDownloadAvailable: false,
       requiredFiles: [pack.sf2File, pack.licenseFile],
-      searchDirectories: bundledSoundfontDirectories(pack.dirName),
+      searchDirectories: searchDirs,
       nextAction: `Place ${pack.sf2File} and ${pack.licenseFile} under <MUSIC_SOUNDFONT_DIR>/${pack.dirName}/, then re-run install_free_soundfont_pack with packId="${pack.packId}". Do not call render_production_music with this pack id until install returns autoRegistered=true.`,
+      userFacingExplanation: `${pack.displayName} is a bundled-only pack not available for automatic download. The files ${pack.sf2File} and ${pack.licenseFile} were not found under any of: ${searchDirs.join(", ")}. To enable it, download and extract the archive from ${pack.sourceUrl}, place ${pack.sf2File} and ${pack.licenseFile} under <MUSIC_SOUNDFONT_DIR>/${pack.dirName}/, then re-run install_free_soundfont_pack with packId="${pack.packId}". Do not call render_production_music with this pack id until install returns autoRegistered=true.`,
       qualityTier: "blocked" as const,
       errors: [error instanceof Error ? error.message : String(error)]
     };
@@ -3794,6 +3800,45 @@ async function inspectMusicRenderEnvironment(ctx: ToolContext, input: z.infer<ty
     ...(!ffmpeg.ok ? ["FFmpeg is not available; preview.mp3 export is blocked."] : []),
     ...(discovery && discovery.ready.length === 0 ? ["No ready .sf2/.sf3/.sfz instrument candidate with sidecar license/readme metadata was discovered."] : [])
   ];
+  const packShortNames: Record<string, string> = {
+    ydp_grand: "YDP Grand",
+    salamander_grand: "Salamander",
+    generaluser_gs: "GeneralUser GS"
+  };
+  let requestedPackPreflight: Record<string, unknown> | undefined;
+  if (input.requestedPackId && input.requestedPackId !== "generaluser_gs") {
+    const preflight = await sampledPianoPackAvailability(input.requestedPackId);
+    if (preflight) {
+      if (!preflight.runtimeFilesReady) {
+        let fallbackPackId: string;
+        if (input.requestedPackId !== "ydp_grand") {
+          const ydpCheck = await sampledPianoPackAvailability("ydp_grand");
+          fallbackPackId = ydpCheck?.runtimeFilesReady ? "ydp_grand" : "generaluser_gs";
+        } else {
+          fallbackPackId = "generaluser_gs";
+        }
+        const fallbackShortName = packShortNames[fallbackPackId] ?? fallbackPackId;
+        const requestedShortName = packShortNames[input.requestedPackId] ?? preflight.displayName;
+        const renderLabel = `${fallbackShortName} fallback — ${requestedShortName} blocked until installed`;
+        requestedPackPreflight = {
+          ...preflight,
+          renderLabel,
+          fallbackRecommendation: {
+            packId: fallbackPackId,
+            label: renderLabel,
+            explanation: `${preflight.displayName} is not installed. ${fallbackShortName} will be used for rendering until ${preflight.displayName} is installed and registered.`
+          }
+        };
+      } else {
+        requestedPackPreflight = {
+          ...preflight,
+          renderLabel: preflight.displayName,
+          fallbackRecommendation: null
+        };
+      }
+    }
+  }
+
   return {
     tools: {
       fluidsynth: { binary: "fluidsynth", ...fluidSynth },
@@ -3808,7 +3853,8 @@ async function inspectMusicRenderEnvironment(ctx: ToolContext, input: z.infer<ty
       statusLabel: reasons.length === 0
         ? "Rendered with free license-cleared instruments. Suitable for production use with proper attribution."
         : "MIDI preview only. Not production audio."
-    }
+    },
+    ...(requestedPackPreflight !== undefined ? { requestedPackPreflight } : {})
   };
 }
 
@@ -5241,7 +5287,7 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "check_music_render_environment", description: "Detect offline music rendering tools (sfizz_render, FluidSynth, FFmpeg, SoX) and available .sf2/.sf3/.sfz instrument candidates without claiming production support when requirements are missing.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, includeLocalMusicPacks: { type: "boolean" }, projectSearchDirectories: { type: "array", items: { type: "string" } } }, required: [], additionalProperties: false } },
+    definition: { name: "check_music_render_environment", description: "Detect offline music rendering tools (sfizz_render, FluidSynth, FFmpeg, SoX) and available .sf2/.sf3/.sfz instrument candidates without claiming production support when requirements are missing.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, includeLocalMusicPacks: { type: "boolean" }, projectSearchDirectories: { type: "array", items: { type: "string" } }, requestedPackId: { type: "string", enum: ["generaluser_gs", "ydp_grand", "salamander_grand"] } }, required: [], additionalProperties: false } },
     enabledByDefault: true,
     schema: checkMusicRenderEnvironmentInputSchema,
     handler: async (input, ctx) => {
