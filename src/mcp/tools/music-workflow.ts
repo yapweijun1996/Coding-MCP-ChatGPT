@@ -2256,7 +2256,7 @@ function sessionQuality(session?: Record<string, unknown>) {
   };
 }
 
-function qualityForComposition(composition: Composition, options: { audio?: Buffer; useCase: string; checkLoop: boolean; targetMood?: string; session?: Record<string, unknown> }) {
+function qualityForComposition(composition: Composition, options: { audio?: Buffer; useCase: string; checkLoop: boolean; targetMood?: string; session?: Record<string, unknown>; profile?: "solo_piano" | "full_ensemble" }) {
   const warnings: string[] = [];
   const findings: AudioFinding[] = [];
   const allNotes = Object.values(composition.tracks).flat();
@@ -2287,13 +2287,20 @@ function qualityForComposition(composition: Composition, options: { audio?: Buff
   if (technicalReport.dynamicRange > 28) addFinding(findings, "medium", "dynamic_range", "Dynamic range is wide for steady background playback.", "Use gentle compression or rebalance quiet/loud sections.");
   if (technicalReport.silenceGaps.length) addFinding(findings, "medium", "silence", "Detected long silence gaps.", "Fill gaps with room tone, pads, or adjust arrangement section lengths.");
   if (technicalReport.harshHighFrequencyProxy > 0.08) addFinding(findings, "medium", "harshness", "High-frequency change proxy suggests possible harshness.", "Reduce high-end, soften piano/drum velocities, or apply a gentle low-pass.");
-  // Audible noise floor: noise-to-signal ratio > 15% means the quiet passages carry persistent hiss
-  // (typical with Salamander/SoundFont renders after aggressive loudnorm boost). Block as high so
-  // productionSafe=false for sparse solo piano where hiss is clearly audible.
-  if (technicalReport.readable && technicalReport.noiseFloorRms > 0.003 && technicalReport.rms > 0 && technicalReport.noiseFloorRms / technicalReport.rms > 0.15) {
-    addFinding(findings, "high", "noise_floor", "Audible noise floor detected: noise-to-signal ratio is above 15%, likely from SoundFont hiss amplified by loudness normalization.", "Remove room_ambience and loudness_normalize from the master chain; use a single two-pass ffmpeg loudnorm (renderProfile='normalized') without the PCM loudness stage, or lower the loudnorm target LUFS.");
+  // Audible noise floor: noise-to-signal ratio > 15% (or > 10% for solo_piano) means the quiet
+  // passages carry persistent hiss (typical with Salamander/SoundFont renders after aggressive
+  // loudnorm boost). Block as high so productionSafe=false.
+  const noiseRatioThreshold = options.profile === "solo_piano" ? 0.10 : 0.15;
+  if (technicalReport.readable && technicalReport.noiseFloorRms > 0.003 && technicalReport.rms > 0 && technicalReport.noiseFloorRms / technicalReport.rms > noiseRatioThreshold) {
+    const profileNote = options.profile === "solo_piano" ? " (solo piano profile uses a stricter 10% threshold)" : "";
+    addFinding(findings, "high", "noise_floor", `Audible noise floor detected: noise-to-signal ratio is above ${Math.round(noiseRatioThreshold * 100)}%${profileNote}, likely from SoundFont hiss amplified by loudness normalization.`, "Use renderProfile='normalized' (single ffmpeg loudnorm, no PCM loudness stage) or renderProfile='clean_dry' with no normalization. Do not include room_ambience in the master chain for sparse solo piano.");
   }
-  if (technicalReport.excessiveBassProxy > 0.18) addFinding(findings, "medium", "bass", "Low-frequency proxy suggests excessive bass energy.", "Run edit_midi with bassRepair:true to raise left-hand/bass notes below C3 by an octave, reduce their velocity, and cap sustain duration. Also verify highpass=f=35 is applied in the loudnorm pass.");
+  // solo_piano profile: stricter harshness check (0.05 instead of default 0.08) because any
+  // audible hiss in a solo instrument has no ensemble masking to hide it.
+  if (options.profile === "solo_piano" && technicalReport.harshHighFrequencyProxy > 0.05 && technicalReport.harshHighFrequencyProxy <= 0.08) {
+    addFinding(findings, "high", "harshness", "Solo piano profile: high-frequency change proxy exceeds strict clean-piano threshold (0.05).", "Apply lowpass=f=17000 in the ffmpeg loudnorm pass, or use renderProfile='normalized' which includes the lowpass filter automatically.");
+  }
+  if (technicalReport.excessiveBassProxy > 0.18) addFinding(findings, "medium", "bass", "Low-frequency proxy suggests excessive bass energy.", "Run edit_midi with bassRepair:true to raise left-hand/bass notes below C3 by an octave, reduce their velocity, and cap sustain duration. Also verify highpass=f=80 is applied in the loudnorm pass.");
   if (options.checkLoop && composition.loopable && technicalReport.loopSeamClickProxy > 0.08) addFinding(findings, "medium", "loop", "Loop seam may click due to a large start/end waveform jump.", "End near a zero crossing, add a short crossfade, or preserve reverb tail.");
   const sessionQualityReport = sessionQuality(options.session);
   if (sessionQualityReport?.roughTransitionCount) addFinding(findings, "medium", "session", "Session contains rough transitions.", "Reorder by compatible key/tempo/energy or increase transition bed/crossfade length.");
@@ -3976,10 +3983,14 @@ async function fluidSynthRender(soundfontPath: string, midiPath: string, outputP
 // Two-pass linear loudnorm: pass 1 measures audio stats, pass 2 applies a single static gain
 // (linear=true). This preserves dynamics and avoids the pumping artefact of single-pass dynamic
 // mode, which raises quiet intros by a large gain and surfaces the soundfont's noise floor.
-// highpass=f=35 removes sub-bass rumble that FluidSynth can leave on soft velocity layers.
+// highpass=f=80: removes sub-bass rumble that FluidSynth leaves on soft velocity layers (raised
+// from 35 Hz — piano fundamental of A0 is 27.5 Hz but its harmonics carry the body; 80 Hz is
+// safe for piano and any non-bass instrument).
+// lowpass=f=17000: cuts SoundFont hiss and aliasing above 17 kHz which becomes audible after
+// loudnorm gain-up on sparse solo piano; 17 kHz is above musical content for most instruments.
 async function normalizeWavWithFfmpeg(inputWavPath: string, outputWavPath: string, sampleRate: number, timeout: number) {
   // Pass 1: measure. loudnorm prints a JSON block to stderr at loglevel=info.
-  const measureFilter = "highpass=f=35,loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json";
+  const measureFilter = "highpass=f=80,lowpass=f=17000,loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json";
   let measured: { input_i: string; input_tp: string; input_lra: string; input_thresh: string; target_offset: string } | undefined;
   try {
     const result = await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "info", "-i", inputWavPath, "-af", measureFilter, "-f", "null", "-"], { timeout, maxBuffer: 256 * 1024 });
@@ -3991,8 +4002,8 @@ async function normalizeWavWithFfmpeg(inputWavPath: string, outputWavPath: strin
   }
   // Pass 2: apply. linear=true when stats available → static gain; falls back to dynamic mode.
   const applyFilter = measured
-    ? `highpass=f=35,loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=${measured.input_i}:measured_TP=${measured.input_tp}:measured_LRA=${measured.input_lra}:measured_thresh=${measured.input_thresh}:offset=${measured.target_offset}:linear=true`
-    : "highpass=f=35,loudnorm=I=-16:TP=-1.5:LRA=11";
+    ? `highpass=f=80,lowpass=f=17000,loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=${measured.input_i}:measured_TP=${measured.input_tp}:measured_LRA=${measured.input_lra}:measured_thresh=${measured.input_thresh}:offset=${measured.target_offset}:linear=true`
+    : "highpass=f=80,lowpass=f=17000,loudnorm=I=-16:TP=-1.5:LRA=11";
   await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", inputWavPath, "-af", applyFilter, "-ar", String(sampleRate), outputWavPath], { timeout, maxBuffer: 1024 * 1024 });
   const output = await readFile(outputWavPath);
   assertPcmWav(output, "Normalized output");
@@ -6268,7 +6279,10 @@ export const musicWorkflowTools: ToolModule[] = [
       }
       const audio = parsed.audioPath ? await readFile(await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, parsed.audioPath)) : undefined;
       const session = parsed.sessionManifestPath ? JSON.parse(await readProjectFile(ctx.projectRoot, parsed.projectId, parsed.sessionManifestPath, 2 * 1024 * 1024)) as Record<string, unknown> : undefined;
-      const report = qualityForComposition(composition, { audio, useCase: parsed.useCase, checkLoop: parsed.checkLoop, targetMood: parsed.targetMood, session });
+      // Auto-detect solo_piano profile: all tracks resolve to "piano" and no drums/bass present.
+      const trackInstrumentSet = new Set(Object.keys(composition.tracks).map((track) => canonicalInstrumentFromTrackKey(track) ?? track));
+      const autoProfile: "solo_piano" | "full_ensemble" | undefined = trackInstrumentSet.size > 0 && [...trackInstrumentSet].every((inst) => inst === "piano" || inst === "electric_piano") ? "solo_piano" : undefined;
+      const report = qualityForComposition(composition, { audio, useCase: parsed.useCase, checkLoop: parsed.checkLoop, targetMood: parsed.targetMood, session, profile: autoProfile });
       const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(report, null, 2)}\n`);
       return { ok: report.ok, summary: `Audio QA found ${report.warnings.length} warning(s).`, jobId: parsed.projectId, artifacts: [file.path], structuredContent: report, logs: [JSON.stringify(report, null, 2)], errors: report.warnings };
     }
