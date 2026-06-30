@@ -560,7 +560,7 @@ async function readProjectMetadata(projectRoot: string, projectId: string): Prom
     raw = await readFile(getProjectMetadataPath(projectRoot, projectId), "utf8");
   } catch (error) {
     // A missing project.json surfaced as a raw "ENOENT: open .../project.json", which gave the agent
-    // no recoverable next step (tools like compose_music require an existing project). Turn it into an
+    // no recoverable next step (music import/render tools require an existing project). Turn it into an
     // actionable instruction at this single chokepoint — every projectId-consuming tool resolves
     // metadata through here. Keep code="ENOENT" so callers that branch on it still work.
     if (error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {

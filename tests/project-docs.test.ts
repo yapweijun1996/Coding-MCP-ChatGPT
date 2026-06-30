@@ -75,8 +75,15 @@ test("tools on a missing project return an actionable create_project hint, not r
   const root = await mkdtemp(path.join(tmpdir(), "missing-project-"));
   try {
     const ctx = toolContext(root);
-    // compose_music against a projectId that was never created — the issue_0133 shape.
-    const result = await callTool("compose_music", { projectId: "music_cafe_jazz_v1", title: "Cafe Jazz", style: "cafe_jazz" }, ctx);
+    // import_musicxml_score against a projectId that was never created — the issue_0133 shape.
+    const result = await callTool("import_musicxml_score", {
+      projectId: "music_cafe_jazz_v1",
+      musicXmlString: `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
+  <part id="P1"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>1</duration><type>quarter</type></note></measure></part>
+</score-partwise>`
+    }, ctx);
     assert.equal(result.ok, false);
     assert.doesNotMatch(result.summary, /ENOENT|project\.json/);
     assert.match(result.summary, /does not exist/);

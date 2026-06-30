@@ -68,6 +68,27 @@ const simplePianoMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
   </part>
 </score-partwise>`;
 
+async function importTestMusicXml(
+  ctx: ToolContext,
+  projectId: string,
+  musicXmlString: string,
+  outputManifestPath: string,
+  outputMidiPath: string,
+  title = "Imported Test Score"
+) {
+  const importer = getToolModule("import_musicxml_score");
+  assert.ok(importer, "import_musicxml_score must be registered");
+  const result = await importer.handler({
+    projectId,
+    musicXmlString,
+    title,
+    outputManifestPath,
+    outputMidiPath
+  }, ctx);
+  assert.equal(result.ok, true, `MusicXML import should succeed: ${JSON.stringify(result.errors)}`);
+  return result;
+}
+
 // Cello + piano duet. P2 carries part-name "Cello" and GM program 43; identity must survive
 // import as a `cello` track (not `piano_2`). Both parts play from bar 1 (true simultaneity).
 const celloPianoDuetMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -606,45 +627,40 @@ test("compose_edit_midi fails closed when an ensembleRequirement instrument has 
   }
 });
 
-test("compose_music generates a real cello voice for a cello + piano ensemble and fails closed when cello is absent", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "music-compose-cello-"));
+test("imported MusicXML cello + piano ensemble validates and missing cello fails closed", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-import-cello-"));
   try {
     const ctx = toolContext(root);
-    const project = await createProject(ctx.projectRoot, { title: "Compose cello", createdByClientId: "composer" });
-    const compose = getToolModule("compose_music");
-    assert.ok(compose);
+    const project = await createProject(ctx.projectRoot, { title: "Import cello", createdByClientId: "composer" });
+    const validator = getToolModule("validate_music_ensemble");
+    assert.ok(validator);
 
-    // cello + piano with an ensemble requirement -> cello track generated, overlapping piano, ok.
-    const ensembleResult = await compose!.handler({
-      projectId: project.id,
-      instruments: ["piano", "cello"],
-      durationSeconds: 16,
-      ensembleRequirement: { requiredInstruments: ["piano", "cello"] },
-      outputManifestPath: "music/cello-cue.json",
-      outputMidiPath: "music/cello-cue.mid"
-    }, ctx);
-    assert.equal(ensembleResult.ok, true);
+    const ensembleResult = await importTestMusicXml(ctx, project.id, celloPianoDuetMusicXml, "music/cello-cue.json", "music/cello-cue.mid");
     const payload = ensembleResult.structuredContent as { tracks: Record<string, unknown[]>; ensembleReport: { ok: boolean; overlap: { durationSeconds: number } | null } };
     assert.ok(payload.tracks.cello && payload.tracks.cello.length > 0, "cello voice must be generated, not just requested");
     assert.ok(payload.tracks.piano && payload.tracks.piano.length > 0);
-    assert.ok(payload.ensembleReport.overlap && payload.ensembleReport.overlap.durationSeconds > 0, "cello must overlap piano in time");
+    const ensembleGate = await validator!.handler({
+      projectId: project.id,
+      compositionManifestPath: "music/cello-cue.json",
+      requiredInstruments: ["piano", "cello"]
+    }, ctx);
+    assert.equal(ensembleGate.ok, true);
+    const ensembleGatePayload = ensembleGate.structuredContent as { overlap: { durationSeconds: number } | null };
+    assert.ok(ensembleGatePayload.overlap && ensembleGatePayload.overlap.durationSeconds > 0, "cello must overlap piano in time");
     // cello = channel 5 / GM program 43 -> Program Change 0xC5 0x2A in the MIDI.
     const midi = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/cello-cue.mid"));
     let hasCelloPc = false;
     for (let i = 0; i + 1 < midi.length; i += 1) if (midi[i] === 0xc5 && midi[i + 1] === 0x2a) hasCelloPc = true;
     assert.ok(hasCelloPc, "cello program change must be present in the MIDI");
 
-    // Requesting a cello ensemble but only composing piano -> fail closed.
-    const missing = await compose!.handler({
+    await importTestMusicXml(ctx, project.id, simplePianoMusicXml, "music/piano-only.json", "music/piano-only.mid");
+    const missing = await validator!.handler({
       projectId: project.id,
-      instruments: ["piano"],
-      durationSeconds: 16,
-      ensembleRequirement: { requiredInstruments: ["piano", "cello"] },
-      outputManifestPath: "music/piano-only.json",
-      outputMidiPath: "music/piano-only.mid"
+      compositionManifestPath: "music/piano-only.json",
+      requiredInstruments: ["piano", "cello"]
     }, ctx);
     assert.equal(missing.ok, false);
-    assert.ok((missing.structuredContent as { ensembleReport: { failures: string[] } }).ensembleReport.failures.some((reason) => /cello/i.test(reason)));
+    assert.ok((missing.structuredContent as { failures: string[] }).failures.some((reason) => /cello/i.test(reason)));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -655,10 +671,9 @@ test("render_midi_to_audio refuses procedural fallback by default and points to 
   try {
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "No procedural", createdByClientId: "composer" });
-    const compose = getToolModule("compose_music");
     const render = getToolModule("render_midi_to_audio");
-    assert.ok(compose && render);
-    await compose!.handler({ projectId: project.id, instruments: ["piano"], durationSeconds: 12, outputManifestPath: "music/p.json", outputMidiPath: "music/p.mid" }, ctx);
+    assert.ok(render);
+    await importTestMusicXml(ctx, project.id, simplePianoMusicXml, "music/p.json", "music/p.mid");
 
     // Default (no acknowledgement): fail closed, no fake preview written.
     const refused = await render!.handler({ acknowledgePreviewOnly: false, projectId: project.id, compositionManifestPath: "music/p.json", outputAudioPath: "music/refused.wav" }, ctx);
@@ -688,10 +703,9 @@ test("end-to-end: install GeneralUser GS -> compose cello+piano -> render covers
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "E2E ensemble", createdByClientId: "producer" });
     const installer = getToolModule("install_free_soundfont_pack");
-    const compose = getToolModule("compose_music");
     const productionRender = getToolModule("render_production_music");
     const soundfontRender = getToolModule("render_midi_with_soundfont");
-    assert.ok(installer && compose && productionRender && soundfontRender);
+    assert.ok(installer && productionRender && soundfontRender);
 
     // 1) Install the only free pack — it must auto-register so render can use the id (issue_0145).
     restoreFetch = installMockFetch({ "GeneralUser-GS.sf2": fakeSoundfontBytes(), "LICENSE.txt": "GeneralUser GS license fixture\n", "README.md": "# GeneralUser GS fixture\n" });
@@ -701,15 +715,8 @@ test("end-to-end: install GeneralUser GS -> compose cello+piano -> render covers
     assert.equal(installPayload.autoRegistered, true, "installed pack must auto-register");
     assert.ok(installPayload.readyPackIds.includes("generaluser_gs"));
 
-    // 2) Compose a real cello + piano ensemble (issue_0144).
-    await compose!.handler({
-      projectId: project.id,
-      instruments: ["piano", "cello"],
-      durationSeconds: 16,
-      ensembleRequirement: { requiredInstruments: ["piano", "cello"] },
-      outputManifestPath: "music/e2e-cue.json",
-      outputMidiPath: "music/e2e-cue.mid"
-    }, ctx);
+    // 2) Import a real cello + piano ensemble from MusicXML.
+    await importTestMusicXml(ctx, project.id, celloPianoDuetMusicXml, "music/e2e-cue.json", "music/e2e-cue.mid");
 
     // 3) Render: one general_midi pack must cover BOTH the piano and cello roles (keystone).
     process.env.PATH = `${await installFakeFluidSynth(root)}:${await installFakeFfmpeg(root)}:${oldPath}`;
@@ -3373,7 +3380,8 @@ test("music-workflow skill exposes music tools through dedicated, coding, and de
     "review_music_production_export",
     "export_music_project",
     "process_music_revision_feedback",
-    "compose_music",
+    "import_musicxml_score",
+    "validate_music_ensemble",
     "edit_midi",
     "render_midi_to_audio",
     "check_music_render_environment",
@@ -4350,20 +4358,20 @@ test("inspect_audio_quality: accepts strict_handwritten manifest without plan/pe
   }
 });
 
-test("music-workflow skill exposes author_handwritten_music_score and validate_music_audition_distinctness; compose_music no longer recommended for professional solo piano", () => {
+test("music-workflow skill requires handwritten MusicXML import and Salamander rendering path", () => {
   const music = skillRegistry.find((skill) => skill.id === "music-workflow");
   assert.ok(music, "music-workflow skill must exist in registry");
+  assert.ok(music!.toolNames.includes("import_musicxml_score"), "import_musicxml_score must be in toolNames");
   assert.ok(music!.toolNames.includes("author_handwritten_music_score"), "author_handwritten_music_score must be in toolNames");
   assert.ok(music!.toolNames.includes("validate_music_audition_distinctness"), "validate_music_audition_distinctness must be in toolNames");
   assert.ok(music!.toolNames.includes("validate_music_ensemble"), "validate_music_ensemble must be in toolNames");
-  // compose_music must still be registered (for sketch use), but NOT promoted as the professional path
-  assert.ok(music!.toolNames.includes("compose_music"), "compose_music must remain in toolNames for rough sketch use");
+  assert.equal(music!.toolNames.includes("compose_music"), false, "generic compose_music must not be exposed");
   const protocol = music!.protocolMarkdown;
+  assert.ok(protocol.includes("author the score itself as explicit MusicXML"), "protocolMarkdown must require agent-authored MusicXML");
+  assert.ok(protocol.includes("soundfontPackId=\"salamander_grand\""), "protocolMarkdown must require Salamander rendering for piano");
   assert.ok(protocol.includes("author_handwritten_music_score"), "protocolMarkdown must mention author_handwritten_music_score");
   assert.ok(protocol.includes("validate_music_audition_distinctness"), "protocolMarkdown must mention validate_music_audition_distinctness");
-  // The default professional path must reference the strict handwritten tool, not compose_music
-  assert.ok(protocol.includes("Rough sketch") || protocol.includes("rough sketch"), "compose_music must be demoted to rough sketch in protocol");
-  assert.ok(!protocol.includes("default to the score-first path: `import_musicxml_score` or `compose_music`"), "compose_music must NOT be in the professional default path");
+  assert.equal(protocol.includes("Rough sketch"), false, "generic compose_music rough-sketch guidance must be removed");
 });
 
 test("edit_midi: bassRepair raises LH notes below C3, scales velocity, caps duration", async () => {

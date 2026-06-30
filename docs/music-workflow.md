@@ -16,7 +16,7 @@ For the user-facing tool list and the recommended production workflow, see
 ## 1. The three-layer model
 
 ```
-compose_music / import_musicxml_score / compose_edit_midi
+agent-authored MusicXML / import_musicxml_score / compose_edit_midi
         │  (build/edit)
         ▼
    Composition  ───────────────►  midiBuffer()  ──►  .mid  ──► FluidSynth/sfizz ──► .wav stems ──► mix/master ──► .wav + .mp3
@@ -136,7 +136,7 @@ It fails when:
 | Surface | Behavior |
 |---|---|
 | `validate_music_ensemble` tool | standalone validator; returns `ok:false` with `failures` when the ensemble is not real |
-| `compose_music` / `compose_edit_midi` `ensembleRequirement` (opt-in) | when present, runs `analyzeEnsemble` between computation and the `ok:true` return, flipping to `ok:false` on failure |
+| `compose_edit_midi` `ensembleRequirement` (opt-in) | when present, runs `analyzeEnsemble` between computation and the `ok:true` return, flipping to `ok:false` on failure |
 
 > **Why opt-in, not always-on:** a `solo_track` operation legitimately produces a zero-note
 > track. A blanket "zero notes → fail" would break valid solo/mute flows. The gate only fires
@@ -144,13 +144,15 @@ It fails when:
 
 ---
 
-## 6. Composition generation — `buildComposition`
+## 6. Composition generation — score-first import
 
-`buildComposition` turns a `compose_music` request into notes. It has per-instrument
-generators guarded by flags: `hasPiano`, `hasBass`, `hasDrums`, `hasPad`, `hasLead`,
-`hasCello`. **A requested instrument with no generator produces no track** — which is exactly
-why `compose_music` with `["piano","cello"]` used to yield piano only until the `hasCello`
-branch was added.
+User-facing music generation is now score-first: the agent authors explicit MusicXML, then
+`import_musicxml_score` turns that score into the composition manifest and MIDI. The legacy
+`buildComposition` helper remains internal for older arrangement flows and test fixtures. It
+has per-instrument generators guarded by flags: `hasPiano`, `hasBass`, `hasDrums`, `hasPad`,
+`hasLead`, `hasCello`. **A requested instrument with no generator produces no track** — which
+is exactly why the old generic composer with `["piano","cello"]` used to yield piano only until
+the `hasCello` branch was added.
 
 The cello generator emits a sustained voice in cello register (≈ MIDI 36–72) entering at
 **every bar start**, so it overlaps the piano from bar 0 and passes `analyzeEnsemble`'s
@@ -253,7 +255,7 @@ the render **fails closed** — a silent/missing-instrument stem can never ship 
 |---|---|---|---|
 | keystone | one pack can't cover a cello+piano ensemble | `general_midi` role + `packCoversRole` + GM fallback; dropped the render-selector `refine` | `packCoversRole`, `resolveProductionPackMap`, schema |
 | 0145 | install succeeds but render doesn't recognize the pack | auto-register installed pack as `general_midi` | `autoRegisterInstalledGeneralMidiPack` |
-| 0144 | "cello + piano" delivers piano only | generate a real cello voice + opt-in `ensembleRequirement` | `buildComposition` (`hasCello`), `compose_music` handler |
+| 0144 | "cello + piano" delivers piano only | generate a real cello voice + opt-in `ensembleRequirement` | legacy `buildComposition` (`hasCello`), score import/ensemble validator |
 | 0143 | procedural synth delivered as fake preview | fail closed behind `acknowledgePreviewOnly` | `render_midi_to_audio`, `extend_*` handlers |
 
 End-to-end verification (real FluidSynth + real GeneralUser GS, run in the Docker container):
@@ -270,8 +272,8 @@ not the CI fake's fixed tone.
 2. Add a catalog entry (GM program, channel, name patterns) in the correct specific-before-generic order.
 3. Add a GM-program family range in `canonicalInstrumentFromGmProgram`.
 4. If it should render as its own stem, add a role to `productionRoleSpecs` (and the role enum + `jazzPackAllowedFormats` + `instrumentPackMap` schema — TypeScript will point you at every exhaustive map).
-5. If `compose_music` should generate it, add a `hasFlute` branch to `buildComposition`.
-6. Add a test: import a part named "Flute" → correct track + program-change bytes.
+5. Add a test: import a part named "Flute" → correct track + program-change bytes.
+6. Only if an internal legacy arrangement flow must synthesize the part, add a `hasFlute` branch to `buildComposition`.
 
 **Add a new render engine:** implement a `*Render` function mirroring `fluidSynthRender` /
 `sfizzRender` and wire it in `productionInstrumentRender` + `rendererForPack`.
@@ -300,7 +302,7 @@ A second wave of fixes, found while taking a score all the way to commercial-usa
 | Issue | Symptom | Fix | Where |
 |---|---|---|---|
 | 0146 | render rejects a *ready* SoundFont: "No registered ready instrument pack" | read side discovers any `music/*instrument-packs*.json` (was hardcoded to the default name); self-heal discovery also scans `assets/soundfonts` + `assets`; failure message now names what it searched | `readJazzPackRegistry`, `pickJazzPackRegistryCandidatePaths`, `resolveProductionSoundfont`, `discoverSoundfontPacksInputSchema` |
-| 0147 | a missing/late voice only inferable from an absent stem | always-on `buildEnsembleQa` in `compose_music` + both render reports (instrumentsRequested/Found, missing warnings, per-voice channel/program/firstBeat, overlapFromBeat0) | `buildEnsembleQa`, `compose_music`/render handlers |
+| 0147 | a missing/late voice only inferable from an absent stem | always-on `buildEnsembleQa` in render reports (instrumentsRequested/Found, missing warnings, per-voice channel/program/firstBeat, overlapFromBeat0) | `buildEnsembleQa`, import/render handlers |
 | FluidSynth 2.x | render produces **no WAV** ("illegal option at this place") | options must precede positional sf2/midi; pure `fluidSynthArgs()` puts them first | `fluidSynthArgs`, `fluidSynthRender` |
 | quiet render | single-pack render is very quiet (FluidSynth default gain) | opt-in `normalize` (ffmpeg loudnorm) on `render_midi_with_soundfont`; silence gate validates the **raw** stem so loudnorm can't mask a missing voice | `normalizeWavWithFfmpeg`, render handler |
 | MusicXML import | `musicXmlPath` unusable: project file allowlist rejected `.xml`/`.musicxml` | added both to `allowedTextExtensions` | `src/projects/store.ts` |

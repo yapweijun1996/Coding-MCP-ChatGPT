@@ -315,7 +315,6 @@ Use this skill to discover the available workspace/project context before taking
       "process_music_revision_feedback",
       "import_musicxml_score",
       "validate_music_ensemble",
-      "compose_music",
       "edit_midi",
       "render_midi_to_audio",
       "check_music_render_environment",
@@ -769,7 +768,6 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "process_music_revision_feedback",
       "import_musicxml_score",
       "validate_music_ensemble",
-      "compose_music",
       "edit_midi",
       "render_midi_to_audio",
       "check_music_render_environment",
@@ -1326,7 +1324,7 @@ Use this skill for project-local 3D assets, game scene planning, gameplay QA, an
     id: "music-workflow",
     label: "Music Workflow",
     category: "media",
-    description: "Import MusicXML scores, compose original music, edit MIDI, render WAV previews, generate harmony/drum grooves, QA audio, and export music assets.",
+    description: "Import handwritten MusicXML scores, edit MIDI, render Salamander/other SoundFont previews, generate harmony/drum grooves, QA audio, and export music assets.",
     enabledByDefault: true,
     status: "beta",
     riskLevel: "medium",
@@ -1346,7 +1344,6 @@ Use this skill for project-local 3D assets, game scene planning, gameplay QA, an
       "export_music_project",
       "process_music_revision_feedback",
       "import_musicxml_score",
-      "compose_music",
       "edit_midi",
       "render_midi_to_audio",
       "check_music_render_environment",
@@ -1367,12 +1364,12 @@ Use this skill for project-local 3D assets, game scene planning, gameplay QA, an
     ],
     protocolMarkdown: `# Music Workflow
 
-Use this skill for score-driven MusicXML import, strict handwritten solo piano, original background music, MIDI sketches, professional SoundFont/SFZ rendering, jazz harmony, grooves, and export handoff.
+Use this skill for score-driven MusicXML import, strict handwritten solo piano, original background music, MIDI edits, professional SoundFont/SFZ rendering, jazz harmony, grooves, and export handoff.
 
 - Start with \`create_music_style_brief\` when the user references a venue, brand, artist, or vibe; convert it into broad non-copying musical traits.
-- **Professional / client-ready solo piano (default path):** use \`author_handwritten_music_score\` to supply explicit RH/LH note arrays, sections, chord map, and performance metadata → \`validate_music_audition_distinctness\` when producing multiple versions → \`render_midi_with_soundfont(renderProfile=clean_dry)\` → \`inspect_audio_quality\`. This is the only path for audition-grade solo piano deliverables. \`compose_music\` is NOT recommended for this use case.
-- **MusicXML import path:** use \`import_musicxml_score\` when the user provides a MusicXML file; it writes a composition manifest + MIDI with \`scoreSource.scoreDriven=true\`, \`compositionPlan\`, and \`performance\` already populated so \`inspect_audio_quality\` does not reject it.
-- **Rough sketch / idea generation only:** \`compose_music\` is suitable for quick structural ideas and internal previews. Do NOT use it for production, audition, or client-ready solo piano — it produces a generic arrangement without strict RH/LH voice separation or audition-grade expressiveness.
+- **Default composition path:** the AI agent must author the score itself as explicit MusicXML first, then call \`import_musicxml_score\` to convert that score into the project composition manifest + MIDI. Do not use generic MIDI composition tools for user-facing music.
+- **Professional / client-ready solo piano:** write explicit RH/LH MusicXML (or use \`author_handwritten_music_score\` when note arrays are already the source of truth), run \`import_musicxml_score\`, run \`validate_music_audition_distinctness\` when producing multiple versions, install/register \`salamander_grand\` with \`install_free_soundfont_pack\`, render with \`render_midi_with_soundfont(soundfontPackId="salamander_grand")\`, then run \`inspect_audio_quality\`. If Salamander is unavailable, fail closed or report the required install steps; do not silently relabel a fallback.
+- **MusicXML import path:** use \`import_musicxml_score\` for user-provided or agent-authored MusicXML; it writes a composition manifest + MIDI with \`scoreSource.scoreDriven=true\`, \`compositionPlan\`, and \`performance\` already populated so \`inspect_audio_quality\` does not reject it.
 - Use \`import_musicxml_score\` when the user provides MusicXML or wants score-first generation; it writes the normal composition manifest plus standard MIDI, defaults missing tempo/instrument metadata conservatively, and records warnings in the manifest.
 - Use \`validate_music_ensemble\` before publishing duet/ensemble requests to fail closed when a requested instrument is silent, only sequential, or missing meaningful overlap.
 - Use \`edit_midi\` for quantize, transpose, humanize, swing, and velocity shaping.
@@ -1380,7 +1377,7 @@ Use this skill for score-driven MusicXML import, strict handwritten solo piano, 
 - Use \`discover_soundfont_packs\` to read-only scan project assets and optional \`.music-packs/\` for \`.sf2\`, \`.sf3\`, and \`.sfz\` candidates before registration.
 - Use \`check_music_render_environment\` to detect \`sfizz_render\`, FluidSynth, FFmpeg, SoX, and available \`.sf2\`/\`.sf3\`/\`.sfz\` candidates. Use \`render_production_music\` when a complete offline handoff is needed; it renders MIDI stems with a license-cleared pack, mixes stems, encodes \`music/preview.mp3\` with FFmpeg, writes \`LICENSES.md\`, and publishes a truthful player. For long-form tracks whose WAV/stem assets exceed the project media limit, it keeps MP3 playback publishable and records omitted WAV assets instead of failing after render.
 - Use \`render_midi_to_audio\` only for internal scratch previews when the user explicitly accepts preview-only audio. Never use its built-in procedural synth output as finished music, professional music, a public listening demo, or a production handoff. Use \`render_midi_with_soundfont\` for lower-level FluidSynth/SFZ + ready commercial-safe instrument pack \`production_candidate\` renders. MP3/OGG require a verified encoder step.
-- For V1 piano rendering, prefer a registered \`realistic_piano\` SFZ/SoundFont such as a license-cleared Salamander Grand Piano or FreePats-style piano pack. DecentSampler/Decent Samples references require stored license text, README, source URL, attribution, redistribution notes, and commercial-use flags before public use.
+- For V1 piano rendering, prefer a registered \`salamander_grand\` / Salamander Grand Piano pack. DecentSampler/Decent Samples references require stored license text, README, source URL, attribution, redistribution notes, and commercial-use flags before public use.
 - Use \`generate_jazz_harmony\` for section-aware original jazz progressions, piano voicings, bass guide tones, MIDI-ready voicing data, and variation notes before composing cafe/lounge tracks; use \`generate_drum_groove\` for section-aware MIDI-ready drum/brush grooves with swing, velocities, fills, background safety constraints, and variation maps.
 - Run \`inspect_audio_quality\` before delivery or publishing to check clipping, loudness, dynamic range, silence gaps, harshness/bass proxies, density, repetition, loop seams, session transitions, severity-ranked findings, and background suitability fixes.
 - Use \`assemble_original_music_session\` or \`assemble_music_session\` after 5-10 minute arrangements to create 30/60/90/120 minute background programs with energy profile, transition map, loudness report, source manifest, and render/export plan.

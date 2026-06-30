@@ -130,7 +130,7 @@ const composeMusicInputSchema = z.object({
   complexity: complexitySchema.optional().default("medium"),
   loopable: z.boolean().optional().default(true),
   // Opt-in fail-closed ensemble gate (issue_0144). When set, the requested instruments must form a
-  // real simultaneous ensemble (each present with notes, overlapping in time) or compose_music
+  // real simultaneous ensemble (each present with notes, overlapping in time) or composition
   // returns ok:false instead of silently delivering a one-instrument cue.
   ensembleRequirement: z.object({
     requiredInstruments: z.array(z.string().min(1).max(80)).min(1).max(16),
@@ -5577,37 +5577,6 @@ export const musicWorkflowTools: ToolModule[] = [
         structuredContent: report,
         logs: [JSON.stringify(report, null, 2)],
         errors: report.failures
-      };
-    }
-  },
-  {
-    definition: { name: "compose_music", description: "Compose a structured original music cue and write a project MIDI file plus composition manifest.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, title: { type: "string" }, style: { type: "string", enum: ["cafe_jazz", "lo_fi", "bossa_nova", "smooth_piano", "acoustic_pop", "cinematic_background", "corporate_intro", "game_bgm", "orchestral_sketch", "ambient", "chill_lounge"] }, mood: { type: "string" }, tempo: { type: "number" }, key: { type: "string" }, durationSeconds: { type: "number" }, useCase: { type: "string" }, instruments: { type: "array", items: { type: "string", enum: ["piano", "electric_piano", "upright_bass", "acoustic_bass", "violin", "cello", "drums", "brushes", "guitar", "strings", "pads", "synth", "sax_like_lead"] } }, complexity: { type: "string", enum: ["simple", "medium", "rich"] }, loopable: { type: "boolean" }, ensembleRequirement: { type: "object", properties: { requiredInstruments: { type: "array", items: { type: "string" } }, soloInstruments: { type: "array", items: { type: "string" } }, maxSingleInstrumentSeconds: { type: "number" }, requireStartWithinBars: { type: "number" }, barBeats: { type: "number" } } }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
-    enabledByDefault: true,
-    schema: composeMusicInputSchema,
-    handler: async (input, ctx) => {
-      const parsed = composeMusicInputSchema.parse(input);
-      const composition = buildComposition(parsed);
-      // issue_0144: when the caller declares an ensemble, verify the requested instruments actually
-      // play together (cello track present, with notes, overlapping piano) before reporting success.
-      const ensembleReport = parsed.ensembleRequirement ? analyzeEnsemble(composition, parsed.ensembleRequirement) : undefined;
-      // issue_0147: always expose ensemble QA (per-instrument noteCount, channel/program, first-note
-      // time, overlap) so a missing/late voice is visible without opting into the fail-closed gate.
-      const ensembleQa = buildEnsembleQa(composition, parsed.instruments);
-      const [manifestFile, midiFile] = await Promise.all([
-        writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(composition, null, 2)}\n`),
-        writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(composition), "audio/midi")
-      ]);
-      const ensembleOk = ensembleReport ? ensembleReport.ok : true;
-      return {
-        ok: ensembleOk,
-        summary: ensembleOk
-          ? `Composed ${composition.style} cue with ${Object.keys(composition.tracks).length} track(s); requested ${ensembleQa.instrumentsRequested.length}, found ${ensembleQa.instrumentsFound.length} with notes.`
-          : `Ensemble requirement not met: ${ensembleReport!.failures.length} blocking issue(s). MIDI written for inspection but not a deliverable ensemble.`,
-        jobId: parsed.projectId,
-        artifacts: [manifestFile.path, midiFile.path],
-        structuredContent: { ...composition, manifestPath: manifestFile.path, midiPath: midiFile.path, ensembleReport, ensembleQa },
-        logs: [JSON.stringify({ ...composition, ensembleReport, ensembleQa }, null, 2)],
-        errors: ensembleOk ? [] : ensembleReport!.failures
       };
     }
   },
