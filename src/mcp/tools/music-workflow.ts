@@ -2287,6 +2287,12 @@ function qualityForComposition(composition: Composition, options: { audio?: Buff
   if (technicalReport.dynamicRange > 28) addFinding(findings, "medium", "dynamic_range", "Dynamic range is wide for steady background playback.", "Use gentle compression or rebalance quiet/loud sections.");
   if (technicalReport.silenceGaps.length) addFinding(findings, "medium", "silence", "Detected long silence gaps.", "Fill gaps with room tone, pads, or adjust arrangement section lengths.");
   if (technicalReport.harshHighFrequencyProxy > 0.08) addFinding(findings, "medium", "harshness", "High-frequency change proxy suggests possible harshness.", "Reduce high-end, soften piano/drum velocities, or apply a gentle low-pass.");
+  // Audible noise floor: noise-to-signal ratio > 15% means the quiet passages carry persistent hiss
+  // (typical with Salamander/SoundFont renders after aggressive loudnorm boost). Block as high so
+  // productionSafe=false for sparse solo piano where hiss is clearly audible.
+  if (technicalReport.readable && technicalReport.noiseFloorRms > 0.003 && technicalReport.rms > 0 && technicalReport.noiseFloorRms / technicalReport.rms > 0.15) {
+    addFinding(findings, "high", "noise_floor", "Audible noise floor detected: noise-to-signal ratio is above 15%, likely from SoundFont hiss amplified by loudness normalization.", "Remove room_ambience and loudness_normalize from the master chain; use a single two-pass ffmpeg loudnorm (renderProfile='normalized') without the PCM loudness stage, or lower the loudnorm target LUFS.");
+  }
   if (technicalReport.excessiveBassProxy > 0.18) addFinding(findings, "medium", "bass", "Low-frequency proxy suggests excessive bass energy.", "Run edit_midi with bassRepair:true to raise left-hand/bass notes below C3 by an octave, reduce their velocity, and cap sustain duration. Also verify highpass=f=35 is applied in the loudnorm pass.");
   if (options.checkLoop && composition.loopable && technicalReport.loopSeamClickProxy > 0.08) addFinding(findings, "medium", "loop", "Loop seam may click due to a large start/end waveform jump.", "End near a zero crossing, add a short crossfade, or preserve reverb tail.");
   const sessionQualityReport = sessionQuality(options.session);
@@ -5693,7 +5699,11 @@ export const musicWorkflowTools: ToolModule[] = [
 	          projectId: parsed.projectId,
 	          audioPath: parsed.outputRawRenderPath,
           stemPaths: Object.values(stemPaths),
-          chain: ["room_ambience", "eq_cleanup", "gentle_compression", "limiter", "loudness_normalize"],
+          // loudness_normalize is intentionally omitted here: normalizeWavWithFfmpeg (two-pass
+          // linear loudnorm) runs immediately after and is the sole gain stage. Including it in
+          // the PCM chain would double-normalize, amplifying the SoundFont noise floor by up to
+          // 12 dB before ffmpeg gets a chance to target the correct broadcast level.
+          chain: ["room_ambience", "eq_cleanup", "gentle_compression", "limiter"],
           targetRms: parsed.targetRms,
           truePeakCeiling: parsed.truePeakCeiling,
           abLabel: "production_master",
@@ -5881,7 +5891,7 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "render_midi_with_soundfont", description: "Render a MIDI/composition manifest through a registered ready .sf2/.sf3 SoundFont or .sfz instrument pack, producing production_candidate WAV, optional stems, and a renderer/license report. .sf2/.sf3 uses FluidSynth; .sfz uses sfizz_render when installed.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, stems: { type: "boolean" }, normalize: { type: "boolean" }, expressiveStrings: { type: "boolean", description: "Auto-author CC11 bow swells + CC1 vibrato into monophonic cello/violin/strings lines (compositionManifestPath path only). Default true." }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "render_midi_with_soundfont", description: "Render a MIDI/composition manifest through a registered ready .sf2/.sf3 SoundFont or .sfz instrument pack, producing production_candidate WAV, optional stems, and a renderer/license report. .sf2/.sf3 uses FluidSynth; .sfz uses sfizz_render when installed.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, stems: { type: "boolean" }, normalize: { type: "boolean" }, expressiveStrings: { type: "boolean", description: "Auto-author CC11 bow swells + CC1 vibrato into monophonic cello/violin/strings lines (compositionManifestPath path only). Default true." }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" }, renderProfile: { type: "string", enum: ["clean_dry", "normalized"], description: "clean_dry: SoundFont render only, no noise bed/ambience, normalize=false. normalized: clean_dry + two-pass ffmpeg loudnorm to -16 LUFS. Omit to use the normalize field." } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: renderMidiWithSoundfontInputSchema,
     handler: async (input, ctx) => {
@@ -5981,10 +5991,13 @@ export const musicWorkflowTools: ToolModule[] = [
             const stemWavPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.wav`);
             await writeFile(stemMidiPath, midiBuffer(compositionWithSingleTrack(composition!, track), { channelMap: parsed.channelMap, programMap: parsed.programMap, expressiveStrings: parsed.expressiveStrings }));
             const rawStemWav = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, stemMidiPath, stemWavPath, parsed.sampleRate, ctx.commandTimeoutMs);
-            // Validate the RAW stem (pre-normalize): loudnorm would otherwise amplify a near-silent
-            // stem's noise floor and let a missing instrument pass the silence guard.
+            // Validate the RAW stem (pre-normalize) using peak, not RMS: loudnorm would amplify
+            // a near-silent stem's noise floor to pass an RMS guard, and soft-velocity piano
+            // left-hand parts can produce legitimate RMS below 0.0005 while still having a clearly
+            // audible note peak. Peak >= 0.001 (-60 dBFS) reliably separates a truly empty MIDI
+            // stem (peak ≈ 0) from any real note, even at very low velocities.
             const stemStats = audioStats(rawStemWav);
-            stemValidations[track] = { rms: stemStats.rms, peak: stemStats.peak, ok: stemStats.rms >= 0.0005 };
+            stemValidations[track] = { rms: stemStats.rms, peak: stemStats.peak, ok: stemStats.peak >= 0.001 };
             const stemWav = normalizeActive
               ? await normalizeWavWithFfmpeg(stemWavPath, path.join(tempDir, `${slugifyMusicExportPart(track)}.norm.wav`), parsed.sampleRate, ctx.commandTimeoutMs)
               : rawStemWav;
