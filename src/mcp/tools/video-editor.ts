@@ -333,10 +333,15 @@ export const videoEditorTools: ToolModule[] = [
   {
     definition: {
       name: "import_video_asset_from_local_file",
-      description: "Import an uploaded/generated local MP4, WebM, or MOV file into a video project asset path.",
+      description: "Import an MP4, WebM, or MOV file that already exists inside this server's own workspace directory into a video project asset path. This does NOT reach files in a separate ChatGPT/client sandbox (e.g. /mnt/data) — the server and the client run in different filesystems.",
       inputSchema: {
         type: "object",
-        properties: { projectId: { type: "string" }, sourcePath: { type: "string" }, relativePath: { type: "string" }, contentType: { type: "string" } },
+        properties: {
+          projectId: { type: "string" },
+          sourcePath: { type: "string", description: "Path to the video file; it must resolve inside this server's workspace directory. Client-side sandbox paths (e.g. /mnt/data/...) will not resolve." },
+          relativePath: { type: "string" },
+          contentType: { type: "string" }
+        },
         required: ["projectId", "sourcePath", "relativePath"],
         additionalProperties: false
       }
@@ -345,7 +350,20 @@ export const videoEditorTools: ToolModule[] = [
     schema: importVideoAssetSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof importVideoAssetSchema>;
-      const sourcePath = resolveLocalSourcePath(ctx.workspaceRoot, parsed.sourcePath);
+      let sourcePath: string;
+      try {
+        sourcePath = resolveLocalSourcePath(ctx.workspaceRoot, parsed.sourcePath);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Invalid sourcePath.";
+        return {
+          ok: false,
+          summary: `${message} "${parsed.sourcePath}" is not inside this server's workspace and cannot be imported this way.`,
+          jobId: parsed.projectId,
+          artifacts: [],
+          logs: [],
+          errors: [message]
+        };
+      }
       const file = await importProjectAssetFromLocalFile(ctx.projectRoot, parsed.projectId, parsed.relativePath, sourcePath, parsed.contentType);
       await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, {
         toolName: "import_video_asset_from_local_file",

@@ -2632,13 +2632,13 @@ export const projectTools: ToolModule[] = [
   {
     definition: {
       name: "import_project_asset_from_local_file",
-      description: "Import a local uploaded/generated image or PPTX file into a persistent project, e.g. copy /mnt/data/character.png to assets/character.png.",
+      description: "Import an image or PPTX file that already exists inside this server's own workspace directory into a persistent project. This does NOT reach files in a separate ChatGPT/client sandbox (e.g. /mnt/data) — the server and the client run in different filesystems. For a file only available on the client side, use write_project_asset with base64 content, or import_project_asset_from_url if it is reachable over HTTPS.",
       inputSchema: {
         type: "object",
         properties: {
           projectId: { type: "string" },
           relativePath: { type: "string", description: "Project-relative asset path, e.g. assets/character.png." },
-          sourcePath: { type: "string", description: "Absolute local runtime path, or workspace-relative path, to an uploaded/generated asset." },
+          sourcePath: { type: "string", description: "Absolute or relative path to the asset, but it must resolve inside this server's workspace directory. Client-side sandbox paths (e.g. /mnt/data/...) will not resolve — use write_project_asset or import_project_asset_from_url instead." },
           contentType: { type: "string", description: "Optional MIME type, e.g. image/png." }
         },
         required: ["projectId", "relativePath", "sourcePath"],
@@ -2649,7 +2649,28 @@ export const projectTools: ToolModule[] = [
     schema: importProjectAssetFromLocalFileInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof importProjectAssetFromLocalFileInputSchema>;
-      const sourcePath = resolveLocalSourcePath(ctx.workspaceRoot, parsed.sourcePath);
+      let sourcePath: string;
+      try {
+        sourcePath = resolveLocalSourcePath(ctx.workspaceRoot, parsed.sourcePath);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Invalid sourcePath.";
+        return {
+          ok: false,
+          summary: `${message} "${parsed.sourcePath}" is not inside this server's workspace and cannot be imported this way.`,
+          jobId: parsed.projectId,
+          artifacts: [],
+          structuredContent: {
+            nextStep: {
+              tool: "write_project_asset",
+              reason: "sourcePath is not reachable from this server; send the file bytes directly instead.",
+              arguments: { projectId: parsed.projectId, relativePath: parsed.relativePath, contentBase64: "<base64 bytes of the asset>", contentType: parsed.contentType }
+            },
+            alternative: { tool: "import_project_asset_from_url", reason: "Use this instead if the asset is reachable over HTTPS." }
+          },
+          logs: [],
+          errors: [message]
+        };
+      }
       const file = await importProjectAssetFromLocalFile(ctx.projectRoot, parsed.projectId, parsed.relativePath, sourcePath, parsed.contentType);
       return {
         ok: true,
