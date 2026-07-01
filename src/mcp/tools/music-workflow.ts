@@ -5695,6 +5695,13 @@ export const musicWorkflowTools: ToolModule[] = [
         }
         const artifacts = [fullMixFile.path, ...Object.values(stemPaths)];
         const stats = audioStats(fullMix);
+        // Fail closed on the full mix too (issue_0171): a truncated/invalid MIDI asset can render
+        // to a near-empty WAV while every earlier step (file exists, MThd header, renderer exit code)
+        // succeeds. Same peak-based guard as the per-stem check above — RMS alone would let loudnorm
+        // mask a silent render by amplifying its noise floor to a passing level.
+        if (stats.peak < 0.001) {
+          throw new Error(`Full mix rendered effectively silent (peak=${stats.peak.toFixed(6)}, rms=${stats.rms.toFixed(6)}). Refusing to report production_candidate for near-empty audio — verify the source MIDI has real note data (it may be truncated or empty).`);
+        }
         const report = {
           renderer: soundfont.renderer,
           rendererMetadata: {
