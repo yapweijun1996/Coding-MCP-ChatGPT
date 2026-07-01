@@ -27,6 +27,43 @@ import {
 const execFileAsync = promisify(execFile);
 
 const musicStyleSchema = z.enum(["cafe_jazz", "lo_fi", "bossa_nova", "smooth_piano", "acoustic_pop", "cinematic_background", "corporate_intro", "game_bgm", "orchestral_sketch", "ambient", "chill_lounge"]);
+// Agents naturally describe style with free-text phrases ("Yiruma emotional piano", "lofi")
+// instead of the exact enum token. Normalize common aliases/keywords to the nearest enum value
+// before validation; anything unmatched falls through to the enum and gets Zod's own
+// "expected X | Y | ..." error so the agent still sees the valid options (issue_0165).
+const musicStyleAliasMap: Record<string, z.infer<typeof musicStyleSchema>> = {
+  yiruma: "smooth_piano",
+  romantic: "smooth_piano",
+  emotional: "smooth_piano",
+  expressive: "smooth_piano",
+  gentle: "chill_lounge",
+  soft: "chill_lounge",
+  relaxing: "chill_lounge",
+  chill: "chill_lounge",
+  cinematic: "cinematic_background",
+  film: "cinematic_background",
+  orchestral: "orchestral_sketch",
+  jazzy: "cafe_jazz",
+  jazz: "cafe_jazz",
+  lofi: "lo_fi",
+  "lo-fi": "lo_fi",
+  bossa: "bossa_nova",
+  pop: "acoustic_pop",
+  corporate: "corporate_intro",
+  game: "game_bgm"
+};
+function normalizeMusicStyleAlias(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if ((musicStyleSchema.options as readonly string[]).includes(trimmed)) return trimmed;
+  const key = trimmed.toLowerCase();
+  if (musicStyleAliasMap[key]) return musicStyleAliasMap[key];
+  for (const [alias, canonical] of Object.entries(musicStyleAliasMap)) {
+    if (key.includes(alias)) return canonical;
+  }
+  return value;
+}
+const musicStyleInputSchema = z.preprocess(normalizeMusicStyleAlias, musicStyleSchema);
 const instrumentSchema = z.enum(["piano", "electric_piano", "upright_bass", "acoustic_bass", "violin", "cello", "drums", "brushes", "guitar", "strings", "pads", "synth", "sax_like_lead"]);
 const complexitySchema = z.enum(["simple", "medium", "rich"]);
 const sectionSchema = z.object({ name: z.string().min(1).max(40), bars: z.number().int().min(1).max(64), intensity: z.number().min(0).max(1).optional().default(0.5) });
@@ -135,7 +172,7 @@ const validateMusicEnsembleInputSchema = z.object({
 const composeMusicInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   title: z.string().min(1).max(160).optional().default("Generated Music Cue"),
-  style: musicStyleSchema.optional().default("cafe_jazz"),
+  style: musicStyleInputSchema.optional().default("cafe_jazz"),
   mood: z.string().min(1).max(240).optional().default("warm, relaxed, unobtrusive"),
   tempo: z.number().int().min(40).max(220).optional().default(92),
   key: z.string().min(1).max(12).optional().default("C"),
@@ -446,7 +483,7 @@ const createMusicStyleBriefInputSchema = z.object({
 const auditionMusicVariationsInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   brief: z.string().min(1).max(500),
-  styles: z.array(musicStyleSchema).min(1).max(5).optional().default(["cafe_jazz", "bossa_nova", "lo_fi"]),
+  styles: z.array(musicStyleInputSchema).min(1).max(5).optional().default(["cafe_jazz", "bossa_nova", "lo_fi"]),
   durationSeconds: z.number().int().min(5).max(120).optional().default(20),
   outputPath: z.string().min(1).max(240).optional().default("music/audition-variations.json")
 });
@@ -454,7 +491,7 @@ const auditionMusicVariationsInputSchema = z.object({
 const generateMusicVariationsInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   brief: z.string().min(1).max(500),
-  styles: z.array(musicStyleSchema).min(1).max(6).optional().default(["cafe_jazz", "bossa_nova", "lo_fi"]),
+  styles: z.array(musicStyleInputSchema).min(1).max(6).optional().default(["cafe_jazz", "bossa_nova", "lo_fi"]),
   durationSeconds: z.number().int().min(10).max(120).optional().default(30),
   renderAudio: z.boolean().optional().default(false),
   outputPath: z.string().min(1).max(240).optional().default("music/production-variations.json")
@@ -650,7 +687,7 @@ const midiOperationSchema = z.object({
 const composeEditMidiInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   existingManifestPath: z.string().min(1).max(240).optional(),
-  style: musicStyleSchema.optional().default("cafe_jazz"),
+  style: musicStyleInputSchema.optional().default("cafe_jazz"),
   mood: z.string().min(1).max(240).optional().default("warm, relaxed, background-friendly"),
   tempoBpm: z.number().int().min(40).max(220).optional().default(82),
   key: z.string().min(1).max(40).optional().default("F major"),
@@ -4812,7 +4849,7 @@ async function handleAssembleMusicSession(input: unknown, ctx: ToolContext) {
 
 export const musicWorkflowTools: ToolModule[] = [
   {
-    definition: { name: "compose_edit_midi", description: "Create or edit a structured multi-track MIDI composition with sections, chord chart, arrangement map, editable operations, background constraints, and a real MIDI asset.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, existingManifestPath: { type: "string" }, style: { type: "string" }, mood: { type: "string" }, tempoBpm: { type: "number" }, key: { type: "string" }, durationSec: { type: "number" }, tracks: { type: "array", items: { type: "string" } }, sections: { type: "array", items: { type: "string" } }, constraints: { type: "object" }, operations: { type: "array", items: { type: "object" } }, ensembleRequirement: { type: "object", properties: { requiredInstruments: { type: "array", items: { type: "string" } }, soloInstruments: { type: "array", items: { type: "string" } }, maxSingleInstrumentSeconds: { type: "number" }, requireStartWithinBars: { type: "number" }, barBeats: { type: "number" } } }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "compose_edit_midi", description: "Create or edit a structured multi-track MIDI composition with sections, chord chart, arrangement map, editable operations, background constraints, and a real MIDI asset.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, existingManifestPath: { type: "string" }, style: { type: "string", description: "cafe_jazz | lo_fi | bossa_nova | smooth_piano | acoustic_pop | cinematic_background | corporate_intro | game_bgm | orchestral_sketch | ambient | chill_lounge. Common natural-language aliases (e.g. \"Yiruma\", \"emotional piano\", \"lofi\") are auto-normalized to the closest of these; anything else must match one of these values exactly." }, mood: { type: "string" }, tempoBpm: { type: "number" }, key: { type: "string" }, durationSec: { type: "number" }, tracks: { type: "array", items: { type: "string" } }, sections: { type: "array", items: { type: "string" } }, constraints: { type: "object" }, operations: { type: "array", items: { type: "object" } }, ensembleRequirement: { type: "object", properties: { requiredInstruments: { type: "array", items: { type: "string" } }, soloInstruments: { type: "array", items: { type: "string" } }, maxSingleInstrumentSeconds: { type: "number" }, requireStartWithinBars: { type: "number" }, barBeats: { type: "number" } } }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: composeEditMidiInputSchema,
     handler: async (input, ctx) => {
