@@ -167,6 +167,28 @@ const twoCellosMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
   <part id="P2"><measure number="1"><attributes><divisions>1</divisions></attributes><note><pitch><step>G</step><octave>2</octave></pitch><duration>4</duration><type>whole</type></note></measure></part>
 </score-partwise>`;
 
+// One part, two voices sharing a measure: voice 1 plays a melody note at beat 0, voice 2 plays a
+// harmony note that must ALSO start at beat 0 (not trail after voice 1 finishes). Before the
+// <voice>-grouping fix, both notes shared one global beat cursor, so voice 2's note landed at
+// beat 1 instead of beat 0 — the exact "second voice plays out of sync" bug this guards against.
+const twoVoiceSingleMeasureMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list>
+    <score-part id="P1"><part-name>Piano</part-name></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      <direction><sound tempo="90"/></direction>
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><voice>1</voice></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><voice>1</voice></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><voice>1</voice></note>
+      <note><pitch><step>F</step><octave>5</octave></pitch><duration>1</duration><type>quarter</type><voice>1</voice></note>
+      <note><pitch><step>C</step><octave>3</octave></pitch><duration>4</duration><type>whole</type><voice>2</voice></note>
+    </measure>
+  </part>
+</score-partwise>`;
+
 const noTempoMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
 <score-partwise version="3.1">
   <part-list><score-part id="P1"><part-name>Piano</part-name></score-part></part-list>
@@ -551,6 +573,40 @@ test("import_musicxml_score keeps a second same-instrument part as cello_2 with 
     assert.ok(celloStat);
     assert.deepEqual(celloStat!.matchedTracks.sort(), ["cello", "cello_2"]);
     assert.equal(celloStat!.noteCount, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("import_musicxml_score aligns voice 2 with voice 1 instead of trailing after it (backup/forward equivalent)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-two-voice-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Two voice", createdByClientId: "composer" });
+    const importer = getToolModule("import_musicxml_score");
+    assert.ok(importer);
+
+    const result = await importer!.handler({
+      projectId: project.id,
+      musicXmlString: twoVoiceSingleMeasureMusicXml,
+      outputManifestPath: "music/two-voice.json",
+      outputMidiPath: "music/two-voice.mid"
+    }, ctx);
+    assert.equal(result.ok, true, `Expected ok:true but got errors: ${JSON.stringify(result.errors)}`);
+    const payload = result.structuredContent as {
+      tracks: Record<string, Array<{ midi: number; startBeat: number; durationBeats: number }>>;
+    };
+    const notes = payload.tracks.piano;
+    assert.equal(notes.length, 5, "4 voice-1 melody notes + 1 voice-2 harmony note");
+
+    const voice2Note = notes.find((n) => n.midi === 48); // C3, the voice-2 whole note
+    assert.ok(voice2Note, "voice 2 note must be imported");
+    assert.equal(voice2Note!.startBeat, 0, "voice 2 must start at beat 0, aligned with voice 1 — not trailing after voice 1's 4 beats");
+    assert.equal(voice2Note!.durationBeats, 4);
+
+    const voice1FirstNote = notes.find((n) => n.midi === 72); // C5, the first voice-1 melody note
+    assert.ok(voice1FirstNote);
+    assert.equal(voice1FirstNote!.startBeat, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -4105,6 +4161,93 @@ test("author_handwritten_music_score: writes MusicXML + manifest + MIDI with D m
     // Verify MIDI file is valid
     const midiBytes = await readFile(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/score.mid"));
     assert.equal(midiBytes.subarray(0, 4).toString("ascii"), "MThd", "MIDI must start with MThd header");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("author_handwritten_music_score: exported <type> matches actual note duration (half/eighth/dotted-quarter), not hardcoded quarter", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-handwritten-notetype-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Note type test", createdByClientId: "composer" });
+    const author = getToolModule("author_handwritten_music_score");
+    assert.ok(author);
+
+    // One bar (4 beats): half note, then eighth note, then dotted-quarter note — exactly fills the bar.
+    const rhNotes = [
+      { track: "piano_right_hand", midi: 67, startBeat: 0, durationBeats: 2, velocity: 80 },
+      { track: "piano_right_hand", midi: 69, startBeat: 2, durationBeats: 0.5, velocity: 75 },
+      { track: "piano_right_hand", midi: 71, startBeat: 2.5, durationBeats: 1.5, velocity: 78 }
+    ];
+    const lhNotes = [{ track: "piano_left_hand", midi: 43, startBeat: 0, durationBeats: 4, velocity: 60 }];
+
+    const result = await author!.handler({
+      projectId: project.id,
+      title: "Note Type Test",
+      tempoBpm: 90,
+      key: "C major",
+      durationSec: 4,
+      sections: [{ name: "A", bars: 1, intensity: 0.5 }],
+      parts: { piano_right_hand: rhNotes, piano_left_hand: lhNotes },
+      chordMap: [{ bar: 1, chord: "C" }],
+      outputMusicXmlPath: "music/note-type.xml",
+      outputManifestPath: "music/note-type-manifest.json",
+      outputMidiPath: "music/note-type.mid"
+    }, ctx);
+    assert.equal(result.ok, true, `Expected ok:true but got errors: ${JSON.stringify(result.errors)}`);
+
+    const xmlContent = await readProjectFile(ctx.projectRoot, project.id, "music/note-type.xml");
+    assert.ok(xmlContent.includes("<type>half</type>"), "2-beat note must export as half, not quarter");
+    assert.ok(xmlContent.includes("<type>eighth</type>"), "0.5-beat note must export as eighth, not quarter");
+    assert.ok(xmlContent.includes("<type>quarter</type><dot/>"), "1.5-beat note must export as dotted quarter");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("author_handwritten_music_score: a note crossing a bar line is split with <tie> instead of silently truncated", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "music-handwritten-tie-"));
+  try {
+    const ctx = toolContext(root);
+    const project = await createProject(ctx.projectRoot, { title: "Tie test", createdByClientId: "composer" });
+    const author = getToolModule("author_handwritten_music_score");
+    assert.ok(author);
+
+    // RH note starts at beat 2 of bar 1 and runs 4 beats, so it crosses into bar 2 (2 beats in
+    // each bar). Before the fix, buildMeasureNotesXml clamped this to the 2 beats remaining in
+    // bar 1 and the tail simply vanished from the exported MusicXML.
+    const rhNotes = [{ track: "piano_right_hand", midi: 60, startBeat: 2, durationBeats: 4, velocity: 80 }];
+    const lhNotes = [
+      { track: "piano_left_hand", midi: 36, startBeat: 0, durationBeats: 4, velocity: 60 },
+      { track: "piano_left_hand", midi: 38, startBeat: 4, durationBeats: 4, velocity: 62 }
+    ];
+
+    const result = await author!.handler({
+      projectId: project.id,
+      title: "Tie Test",
+      tempoBpm: 90,
+      key: "C major",
+      durationSec: 8,
+      sections: [{ name: "A", bars: 2, intensity: 0.5 }],
+      parts: { piano_right_hand: rhNotes, piano_left_hand: lhNotes },
+      chordMap: [{ bar: 1, chord: "C" }, { bar: 2, chord: "C" }],
+      outputMusicXmlPath: "music/tie.xml",
+      outputManifestPath: "music/tie-manifest.json",
+      outputMidiPath: "music/tie.mid"
+    }, ctx);
+    assert.equal(result.ok, true, `Expected ok:true but got errors: ${JSON.stringify(result.errors)}`);
+
+    const xmlContent = await readProjectFile(ctx.projectRoot, project.id, "music/tie.xml");
+    const c4PitchXml = "<pitch><step>C</step><octave>4</octave></pitch>"; // MIDI 60
+    const c4Occurrences = xmlContent.split(c4PitchXml).length - 1;
+    assert.equal(c4Occurrences, 2, "the crossing note must be split into 2 fragments (one per bar), not truncated to 1");
+
+    const tieStartCount = xmlContent.split(`<tie type="start"/>`).length - 1;
+    const tieStopCount = xmlContent.split(`<tie type="stop"/>`).length - 1;
+    assert.equal(tieStartCount, 1, "exactly one fragment must open the tie");
+    assert.equal(tieStopCount, 1, "exactly one fragment must close the tie");
+    assert.ok(xmlContent.includes(`<tied type="start"/>`) && xmlContent.includes(`<tied type="stop"/>`), "notation-level <tied> must accompany the sound-level <tie>");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

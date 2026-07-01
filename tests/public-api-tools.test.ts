@@ -43,12 +43,19 @@ test("public API tools register no-key APIs only with stable names", () => {
   assert.equal(getToolModule(publicApiToolName("usaspending")), undefined, "POST-only no-key API is not registered in GET-only v1");
 });
 
-test("public API tools are exposed through coding, debug, and readonly integration skills", () => {
+test("public API tools are gated behind the opt-in public-api-sandbox skill, not exposed by default", () => {
+  const sandbox = skillRegistry.find((entry) => entry.id === "public-api-sandbox");
+  assert.ok(sandbox, "public-api-sandbox skill exists");
+  assert.equal(sandbox.enabledByDefault, false, "public-api-sandbox is disabled by default");
+  assert.ok(sandbox.toolNames.includes("public_api_dummy_products"), "sandbox exposes public_api_dummy_products");
+  assert.ok(sandbox.toolNames.includes("public_api_data_gov_carpark"), "sandbox exposes public_api_data_gov_carpark");
+
+  // A 2026-06-20..06-30 production telemetry audit showed 0 calls across all 91 public_api_*
+  // tools while they were default-enabled here, so they were moved to opt-in instead of deleted.
   for (const skillId of ["coding", "debug", "agent-integration-readonly"]) {
     const skill = skillRegistry.find((entry) => entry.id === skillId);
     assert.ok(skill, `${skillId} skill exists`);
-    assert.ok(skill.toolNames.includes("public_api_dummy_products"), `${skillId} exposes public_api_dummy_products`);
-    assert.ok(skill.toolNames.includes("public_api_data_gov_carpark"), `${skillId} exposes public_api_data_gov_carpark`);
+    assert.ok(!skill.toolNames.includes("public_api_dummy_products"), `${skillId} no longer exposes public_api_dummy_products by default`);
   }
 });
 

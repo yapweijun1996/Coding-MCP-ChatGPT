@@ -179,8 +179,11 @@ For our read-only `text_stats`, `core` is the right home:
 ```
 
 If a tool should appear for project work, add it to `coding` (and usually `debug`) too. For a
-concrete multi-skill example, see how `public-api` tool names are spread into `coding`, `debug`,
-and `agent-integration-readonly` via `...publicApiToolNames`.
+concrete example of gating a large low-value tool family behind its own opt-in skill, see how
+`public-api` tool names are spread into the disabled-by-default `public-api-sandbox` skill via
+`...publicApiToolNames` — a 2026-06-20..06-30 production telemetry audit showed 0 calls across
+all 91 of these tools while they were default-enabled in `coding`/`debug`/
+`agent-integration-readonly`, so they were moved to opt-in rather than deleted.
 
 ### Step (d) — decide `enabledByDefault` vs high-risk-disabled
 

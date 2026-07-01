@@ -51,23 +51,6 @@ export const skillRegistry: readonly SkillDefinition[] = [
       "git_status",
       "git_diff",
       "git_safe_change_plan",
-      "git_diff_staged",
-      "git_show",
-      "git_blame",
-      "git_ls_files",
-      "git_log",
-      "git_rev_parse",
-      "git_show_ref",
-      "git_for_each_ref",
-      "git_cat_file",
-      "git_check_ref_format",
-      "git_merge_base",
-      "git_count_objects",
-      "git_verify_pack",
-      "git_fsck",
-      "git_reflog",
-      "git_symbolic_ref",
-      "git_name_rev",
       "refactor_hints",
       "report_issue",
       "list_reported_issues",
@@ -387,7 +370,6 @@ Use this skill to discover the available workspace/project context before taking
       "inspect_project_workspace",
       "record_project_workspace_video",
       "publish_project_workspace",
-      ...publicApiToolNames,
       "record_project_task",
       "import_project_asset_from_local_file",
       "patch_project_file",
@@ -425,21 +407,8 @@ Use this skill to discover the available workspace/project context before taking
       "refactor_hints",
       "git_status",
       "git_diff",
-      "git_safe_change_plan",
-      "git_diff_staged",
-      "git_show",
-      "git_log",
-      "git_add",
       "git_commit",
-      "git_branch",
-      "git_checkout",
-      "git_stash",
-      "git_stash_apply",
-      "git_stash_pop",
-      "git_merge",
-      "git_fetch",
-      "git_remote",
-      "git_revert",
+      "git_safe_change_plan",
       "repo_summary",
       "test_failure_digest",
       "changed_files_context",
@@ -971,10 +940,6 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "restore_latest_project_backup",
       "recover_deleted_project_file",
       "export_project_backup_archive",
-      "browser_dom_snapshot",
-      "browser_network_trace",
-      "browser_console_log",
-      "browser_storage_snapshot",
       "run_a11y_audit_detailed",
       "run_visual_regression_snapshot",
       "profile_web_performance",
@@ -1008,7 +973,6 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "reply_project_review_comment",
       "resolve_project_review_comment",
       "export_project_review_summary",
-      ...publicApiToolNames,
       "check_url",
       "inspect_webpage",
       "inspect_webpage_plus",
@@ -1419,10 +1383,6 @@ Use this skill to inspect an existing webpage and rebuild it as a validated stat
     status: "stable",
     riskLevel: "medium",
     toolNames: [
-      "browser_dom_snapshot",
-      "browser_network_trace",
-      "browser_console_log",
-      "browser_storage_snapshot",
       "run_a11y_audit_detailed",
       "run_visual_regression_snapshot",
       "profile_web_performance",
@@ -2275,7 +2235,6 @@ Use this skill before broad edits, risky refactors, release promotion, file dele
       "api_healthcheck",
       "api_contract_test",
       "openapi_summary",
-      ...publicApiToolNames,
       "register_data_connector",
       "list_data_connectors",
       "check_connector_auth_scope",
@@ -2290,6 +2249,76 @@ Use this skill for safe external API checks and API contract summarization.
 - Run checks only on allowlisted hosts.
 - Use contract tests for request/response shape, status, pagination, and mock-vs-real drift.
 - Treat API summaries as input to endpoint coverage planning.`
+  },
+  {
+    id: "public-api-sandbox",
+    label: "Public API Sandbox",
+    category: "integration",
+    description: "No-key third-party public API demo tools (weather, geo, finance, media, gov data). Opt-in only: a 2026-06-20..06-30 production telemetry audit showed 0 calls across all 91 tools while enabled by default, and ChatGPT already has its own web search for discovery. Enable from Admin only for a request that specifically needs one of these fixed demo endpoints.",
+    enabledByDefault: false,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      ...publicApiToolNames
+    ],
+    protocolMarkdown: `# Public API Sandbox
+
+Fixed-endpoint, no-key public API demo tools. Use only when a request specifically needs one
+of these allowlisted third-party endpoints (e.g. weather, geocoding, government open data,
+finance reference rates, museum/media catalogues).
+
+- Prefer ChatGPT's own web search for general discovery; these tools are narrow, fixed demo
+  endpoints, not a search replacement.
+- Treat responses as read-only, best-effort demo data — check each API's licence/commercial
+  status field before using output in a client-facing deliverable.
+- This skill is disabled by default; enable it from Admin only for the specific task at hand.`
+  },
+  {
+    id: "git-advanced",
+    label: "Git Advanced",
+    category: "development",
+    description: "Non-destructive but rarely-needed git plumbing and history/branch tools beyond the core status/diff/commit workflow. Opt-in: a 2026-06-20..06-30 production telemetry audit showed 0 calls across all of these while default-enabled in core/coding, versus 5 calls for git_status in the same window.",
+    enabledByDefault: false,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: [
+      "git_diff_staged",
+      "git_show",
+      "git_blame",
+      "git_ls_files",
+      "git_log",
+      "git_rev_parse",
+      "git_show_ref",
+      "git_for_each_ref",
+      "git_cat_file",
+      "git_check_ref_format",
+      "git_merge_base",
+      "git_count_objects",
+      "git_verify_pack",
+      "git_fsck",
+      "git_reflog",
+      "git_symbolic_ref",
+      "git_name_rev",
+      "git_add",
+      "git_branch",
+      "git_checkout",
+      "git_stash",
+      "git_stash_apply",
+      "git_stash_pop",
+      "git_merge",
+      "git_fetch",
+      "git_remote",
+      "git_revert"
+    ],
+    protocolMarkdown: `# Git Advanced
+
+Non-destructive but rarely-needed git plumbing (blame, cat-file, verify-pack, reflog, ...) and
+branch/stash/merge tools beyond the always-on \`git_status\` / \`git_diff\` / \`git_commit\` workflow.
+
+- The core workflow (\`git_status\`, \`git_diff\`, \`git_commit\`, plus \`git_push\` in \`high-risk\`)
+  covers the documented "bind a repo, inspect, commit, publish" path and stays enabled by default.
+- Enable this skill from Admin only when a task specifically needs branch/stash management,
+  history plumbing, or a merge/fetch/revert operation.`
   },
   {
     id: "high-risk",
