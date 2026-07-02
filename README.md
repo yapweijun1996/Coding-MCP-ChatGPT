@@ -145,6 +145,8 @@ curl -sS http://127.0.0.1:6859/health
 - `WORKSPACE_ROOT`：允许工具操作的工作目录
 - `SHARE_ROOT`：分享 HTML 产物存储目录（默认 `.shares`）
 - `COMMAND_TIMEOUT_MS`：命令执行超时时间（默认 `30000`）
+- `MCP_RATE_LIMIT_MAX_REQUESTS`：每个 MCP 用户/客户端在一个窗口内允许的请求数（默认 `100`）
+- `MCP_RATE_LIMIT_WINDOW_MS`：MCP 限流窗口毫秒数（默认 `60000`，即每分钟）
 
 注意：  
 1. ChatGPT 连接器通常仅提供 `No Auth`/`OAuth`，为避免明文 token 风险，建议走 OAuth 为主。  
@@ -167,6 +169,7 @@ curl -sS http://127.0.0.1:6859/health
 - `.well-known` 端点返回 OAuth metadata JSON
 - 设置 `MCP_DEV_TOKEN` 后，无授权访问 `/mcp` 返回 401 并给出正确的 auth 引导
 - 授权后可返回 tool 列表
+- 同一用户/客户端超过 MCP 限流时，`POST /mcp` 返回 `429` 与 `Retry-After`
 - 工具执行后返回预览链接（或可直接映射到 `/outcome/<id>`）
 
 ## ChatGPT 连接说明

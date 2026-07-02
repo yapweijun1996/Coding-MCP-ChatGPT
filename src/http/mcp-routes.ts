@@ -38,6 +38,7 @@ const supportedProtocolVersions = new Set(["2024-11-05", "2025-03-26", "2025-06-
 // multi-client setup actually needs. In-memory: rebuilt whenever a client re-initializes.
 const clientTypeById = new Map<string, string>();
 const maxArgsPreviewChars = 4000;
+const mcpRateLimitBuckets = new Map<string, { tokens: number; updatedAt: number }>();
 
 // Bounded preview of tool arguments for telemetry: returns the byte size of the full input
 // plus a preview that is truncated so a large payload (e.g. a base64 asset upload) can never
@@ -67,6 +68,29 @@ function getBearerToken(header: string | undefined): string | undefined {
   if (!header) return undefined;
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   return match?.[1];
+}
+
+function rateLimitKey(auth: Pick<McpAuth, "clientId" | "userId">): string {
+  return auth.userId ? `user:${auth.userId}` : `client:${auth.clientId}`;
+}
+
+function consumeMcpRateLimit(auth: Pick<McpAuth, "clientId" | "userId">, now: number, windowMs: number, maxRequests: number): { ok: true } | { ok: false; retryAfterSeconds: number } {
+  const key = rateLimitKey(auth);
+  const current = mcpRateLimitBuckets.get(key);
+  if (!current) {
+    mcpRateLimitBuckets.set(key, { tokens: maxRequests - 1, updatedAt: now });
+    return { ok: true };
+  }
+  const refillRate = maxRequests / windowMs;
+  const tokens = Math.min(maxRequests, current.tokens + Math.max(0, now - current.updatedAt) * refillRate);
+  if (tokens < 1) {
+    current.tokens = tokens;
+    current.updatedAt = now;
+    return { ok: false, retryAfterSeconds: Math.max(1, Math.ceil((1 - tokens) / refillRate / 1000)) };
+  }
+  current.tokens = tokens - 1;
+  current.updatedAt = now;
+  return { ok: true };
 }
 
 interface McpAuth {
@@ -104,7 +128,7 @@ async function cleanupExpiredVisibleBrowserControl(): Promise<void> {
 }
 
 export function registerMcpRoutes(app: express.Express, config: ServerConfig): void {
-  const { publicBaseUrl, contentBaseUrl, projectRoot, workspaceRoot, shareRoot, artifactRoot, feedbackRoot, commandTimeoutMs, devToken } = config;
+  const { publicBaseUrl, contentBaseUrl, projectRoot, workspaceRoot, shareRoot, artifactRoot, feedbackRoot, commandTimeoutMs, devToken, mcpRateLimit } = config;
 
   function unauthorized(res: express.Response): undefined {
     res
@@ -158,6 +182,15 @@ export function registerMcpRoutes(app: express.Express, config: ServerConfig): v
     const auth = await requireMcpAuth(req, res);
     if (!auth) return;
     const { clientId, userId } = auth;
+    const rateLimit = consumeMcpRateLimit(auth, Date.now(), mcpRateLimit.windowMs, mcpRateLimit.maxRequests);
+    if (!rateLimit.ok) {
+      recordActivity({ userId, clientId, method: "rate_limit", ok: false, summary: "MCP rate limit exceeded." });
+      res
+        .status(429)
+        .setHeader("Retry-After", String(rateLimit.retryAfterSeconds))
+        .json({ ok: false, error: "MCP rate limit exceeded.", retryAfterSeconds: rateLimit.retryAfterSeconds });
+      return;
+    }
     await cleanupExpiredVisibleBrowserControl();
 
     const request = asJsonRpcRequest(req.body);

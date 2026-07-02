@@ -53,6 +53,7 @@ function makeConfig(root: string): ServerConfig {
     siteStatePath: path.join(root, "site.json"),
     blogStatePath: path.join(root, "blog.json"),
     commandTimeoutMs: 10000,
+    mcpRateLimit: { windowMs: 60_000, maxRequests: 100 },
     adminPasscode: "",
     oauthConfig: {
       issuer: "https://example.test",

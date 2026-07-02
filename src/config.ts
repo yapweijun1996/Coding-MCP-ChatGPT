@@ -26,11 +26,17 @@ export interface ServerConfig {
   siteStatePath: string;
   blogStatePath: string;
   commandTimeoutMs: number;
+  mcpRateLimit: McpRateLimitConfig;
   devToken?: string;
   configWarnings: string[];
   adminPasscode: string;
   oauthConfig: OAuthConfig;
   adminDistPath: string;
+}
+
+export interface McpRateLimitConfig {
+  windowMs: number;
+  maxRequests: number;
 }
 
 export interface DevTokenResolution {
@@ -58,6 +64,11 @@ export function resolveDevToken(raw: string | undefined, nodeEnv: string | undef
   return { token: value, warnings: [warning] };
 }
 
+function parsePositiveInteger(raw: string | undefined, fallback: number): number {
+  const value = Number.parseInt(raw ?? "", 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 function resolveConfig(): ServerConfig {
   const publicBaseUrl = process.env.PUBLIC_BASE_URL ?? "https://gmb01.xyz";
   const contentBaseUrl = process.env.CONTENT_BASE_URL ?? publicBaseUrl;
@@ -83,6 +94,10 @@ function resolveConfig(): ServerConfig {
     siteStatePath: process.env.SITE_STATE_PATH ?? `${workspaceRoot}/.state/site-state.json`,
     blogStatePath: process.env.BLOG_STATE_PATH ?? `${workspaceRoot}/.state/blog-state.json`,
     commandTimeoutMs: Number.parseInt(process.env.COMMAND_TIMEOUT_MS ?? "30000", 10),
+    mcpRateLimit: {
+      windowMs: parsePositiveInteger(process.env.MCP_RATE_LIMIT_WINDOW_MS, 60_000),
+      maxRequests: parsePositiveInteger(process.env.MCP_RATE_LIMIT_MAX_REQUESTS, 100)
+    },
     devToken: devTokenResolution.token,
     configWarnings: devTokenResolution.warnings,
     adminPasscode: process.env.ADMIN_PASSCODE ?? process.env.KB_MCP_OAUTH_PASSCODE ?? "",

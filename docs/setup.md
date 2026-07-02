@@ -51,6 +51,8 @@ export WORKSPACE_ROOT=/Users/yapweijun/Documents/GitHub/Coding-MCP-ChatGPT
 export SHARE_ROOT=/Users/yapweijun/Documents/GitHub/Coding-MCP-ChatGPT/.shares
 export TOOL_STATE_PATH=/Users/yapweijun/Documents/GitHub/Coding-MCP-ChatGPT/.state/tool-state.json
 export COMMAND_TIMEOUT_MS=30000
+export MCP_RATE_LIMIT_MAX_REQUESTS=100
+export MCP_RATE_LIMIT_WINDOW_MS=60000
 ```
 
 > 建议使用 `http.env` 或你的密钥管理系统，不要把敏感值写进 git。
@@ -77,6 +79,7 @@ export COMMAND_TIMEOUT_MS=30000
 - 已提供 OAuth discovery、DCR、authorization code、PKCE、access token、refresh token 与 revoke。
 - OAuth 状态当前存在内存中，服务重启后 ChatGPT 需要重新授权。
 - `MCP_DEV_TOKEN` 仍可用于本地 curl 调试；ChatGPT 连接应使用 OAuth。
+- `/mcp` 对每个已认证用户/客户端执行内存限流，默认每 60 秒 100 次；超限返回 `429` 和 `Retry-After`。
 
 ## 结果链接
 

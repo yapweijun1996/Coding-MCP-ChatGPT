@@ -72,6 +72,17 @@ If neither path matches, `unauthorized(res)` returns **401** with a
 `/.well-known/oauth-protected-resource/mcp` document. That header is how ChatGPT
 discovers it must run the OAuth flow.
 
+### Step 3.5 — MCP rate limit
+
+After authentication succeeds and before JSON-RPC method routing, `registerMcpRoutes`
+applies an in-memory token bucket to the resolved caller. The key is `user:<userId>` when
+the token is bound to a user, otherwise `client:<clientId>`. Defaults come from
+`MCP_RATE_LIMIT_MAX_REQUESTS=100` and `MCP_RATE_LIMIT_WINDOW_MS=60000`.
+
+When the caller exceeds the configured window, the route returns HTTP **429** with
+`Retry-After` and a small JSON body. The tool handler is not called and no JSON-RPC
+method is dispatched.
+
 ### Step 4 — JSON-RPC parse and method routing
 
 With `auth` in hand, the handler parses the body via `asJsonRpcRequest(req.body)`
@@ -199,6 +210,8 @@ the failure with the error message, and re-throws to the terminal error middlewa
     ├─[3] requireMcpAuth ──────────────────────────────► 401 + WWW-Authenticate
     │       OAuth token  OR  dev-token (constant-time)      (if neither valid)
     │       → resolves per-user projectRoot / workspaceRoot
+    ├─[3.5] MCP rate limit ────────────────────────────► 429 + Retry-After
+    │       key = user:<userId> or client:<clientId>
     ▼
    [4] asJsonRpcRequest ─ bad body ─────────────────────► 400  jsonRpcError(-32600)
     │

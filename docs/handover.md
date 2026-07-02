@@ -60,6 +60,7 @@ Configuration is via environment variables (see the full list in the root
 | `PORT` | HTTP port (default `6859`) |
 | `NODE_ENV` | `development` / `production` |
 | `MCP_DEV_TOKEN` | a bearer token that bypasses OAuth **only** in non-production (disabled when `NODE_ENV=production`) |
+| `MCP_RATE_LIMIT_MAX_REQUESTS` / `MCP_RATE_LIMIT_WINDOW_MS` | per-user/per-client `/mcp` request limit (defaults: 100 requests / 60s) |
 | `PUBLIC_BASE_URL` | external base URL used to build share/preview links (default `https://gmb01.xyz`) |
 | `WORKSPACE_ROOT` | the directory tools are allowed to operate in |
 | `DATABASE_URL` | Postgres connection (the store falls back to JSON files if absent) |
