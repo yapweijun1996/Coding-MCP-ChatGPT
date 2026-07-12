@@ -2277,25 +2277,28 @@ finance reference rates, museum/media catalogues).
     id: "travel-search",
     label: "Travel Search",
     category: "integration",
-    description: "Live Agoda hotel search by driving a real headless browser session against agoda.com (Agoda has no stateless public search API for this). Opt-in: narrow, single-third-party-site tool, not a general web search replacement.",
+    description: "Live Agoda hotel and one-way flight search. Hotel search drives a real headless browser session against agoda.com (no stateless public API); flight search is a stateless public API call. Opt-in: narrow, single-third-party-site tools, not a general web search replacement.",
     enabledByDefault: false,
     status: "stable",
     riskLevel: "low",
-    toolNames: ["agoda_search_hotels"],
+    toolNames: ["agoda_search_hotels", "agoda_search_flights"],
     protocolMarkdown: `# Travel Search
 
-Live hotel availability/pricing search scoped to agoda.com only.
+Live hotel and flight availability/pricing search scoped to agoda.com only.
 
-- Read-only: returns structured hotel results (name, star rating, review score, price,
-  area, link). Never logs in, books, or pays for anything.
-- Not an official Agoda API — it drives a headless browser through the real search UI,
-  because Agoda's GraphQL backend rejects stateless server-side calls (session cookies,
-  xsrf token, and a signed gate-meta header are all required). Treat it as best-effort:
-  results can break if Agoda changes their site markup.
+- Read-only: returns structured results only. Never logs in, books, or pays for anything.
+- agoda_search_hotels is not an official Agoda API — it drives a headless browser through
+  the real search UI, because Agoda's GraphQL backend rejects stateless server-side calls
+  (session cookies, xsrf token, and a signed gate-meta header are all required, and even a
+  full session gets blocked from headless Chromium by Akamai bot mitigation; the runtime
+  image runs it under xvfb-run to work around that). Treat it as best-effort: results can
+  break if Agoda changes their site markup or bot-mitigation posture.
+- agoda_search_flights is a genuinely stateless public API call (no session/cookies/xsrf
+  needed) but only supports one-way search; round-trip itineraries need two calls.
 - For production-grade, ToS-covered access, point the user at Agoda's official Partner/
-  Affiliate API (developer.agoda.com) instead of scaling this tool up.
-- Enable this skill from Admin only for a request that specifically needs live hotel
-  search results.`
+  Affiliate API (developer.agoda.com) instead of scaling either tool up.
+- Enable this skill from Admin only for a request that specifically needs live hotel or
+  flight search results.`
   },
   {
     id: "git-advanced",
