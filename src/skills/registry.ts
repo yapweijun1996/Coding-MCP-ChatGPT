@@ -2274,6 +2274,30 @@ finance reference rates, museum/media catalogues).
 - This skill is disabled by default; enable it from Admin only for the specific task at hand.`
   },
   {
+    id: "travel-search",
+    label: "Travel Search",
+    category: "integration",
+    description: "Live Agoda hotel search by driving a real headless browser session against agoda.com (Agoda has no stateless public search API for this). Opt-in: narrow, single-third-party-site tool, not a general web search replacement.",
+    enabledByDefault: false,
+    status: "stable",
+    riskLevel: "low",
+    toolNames: ["agoda_search_hotels"],
+    protocolMarkdown: `# Travel Search
+
+Live hotel availability/pricing search scoped to agoda.com only.
+
+- Read-only: returns structured hotel results (name, star rating, review score, price,
+  area, link). Never logs in, books, or pays for anything.
+- Not an official Agoda API — it drives a headless browser through the real search UI,
+  because Agoda's GraphQL backend rejects stateless server-side calls (session cookies,
+  xsrf token, and a signed gate-meta header are all required). Treat it as best-effort:
+  results can break if Agoda changes their site markup.
+- For production-grade, ToS-covered access, point the user at Agoda's official Partner/
+  Affiliate API (developer.agoda.com) instead of scaling this tool up.
+- Enable this skill from Admin only for a request that specifically needs live hotel
+  search results.`
+  },
+  {
     id: "git-advanced",
     label: "Git Advanced",
     category: "development",

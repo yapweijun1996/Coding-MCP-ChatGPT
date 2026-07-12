@@ -55,6 +55,7 @@ import { testAutomationTools } from "./test-automation.js";
 import { accessibilityAutofixTools } from "./accessibility-autofix.js";
 import { permissionScopeTools } from "./permission-scope.js";
 import { publicApiTools } from "./public-api.js";
+import { hotelSearchTools } from "./hotel-search.js";
 import { auditLogTools } from "./audit-log.js";
 import { agentEvaluationTools } from "./agent-evaluation.js";
 import { releaseManagementTools } from "./release-management.js";
@@ -108,6 +109,7 @@ export const allToolModules: ToolModule[] = [
   ...accessibilityAutofixTools,
   ...permissionScopeTools,
   ...publicApiTools,
+  ...hotelSearchTools,
   ...auditLogTools,
   ...agentEvaluationTools,
   ...releaseManagementTools,
