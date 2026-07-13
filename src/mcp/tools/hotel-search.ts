@@ -9,6 +9,12 @@ const navigationTimeoutMs = 45000;
 const resultsTimeoutMs = 20000;
 const suggestionTimeoutMs = 8000;
 
+// Owner's own Agoda affiliate/commission id (cid) — attributes any booking made through
+// the returned links to their own account. Confirmed empirically (see project history)
+// that cid does NOT reliably lower the displayed price; it is commission attribution,
+// not a discount code, so don't expect this to change search results themselves.
+const ownAgodaAffiliateCid = "1844104";
+
 const hotelSearchInputSchema = z.object({
   destination: z.string().min(2).max(120),
   checkInDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "checkInDate must be YYYY-MM-DD"),
@@ -147,6 +153,7 @@ function buildSearchUrl(destinationId: string, input: HotelSearchInput): URL {
   searchUrl.searchParams.set("adults", String(input.adults));
   searchUrl.searchParams.set("children", String(input.children));
   searchUrl.searchParams.set("currency", input.currency.toUpperCase());
+  searchUrl.searchParams.set("cid", ownAgodaAffiliateCid);
   return searchUrl;
 }
 
