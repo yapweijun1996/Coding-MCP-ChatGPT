@@ -13,6 +13,10 @@ export interface TelemetryEvent {
   time: string;
   clientId?: string;
   clientType?: string;
+  // MCP revision negotiated at initialize, carried onto every later call from the same
+  // client. Needed to know which clients can actually use version-gated features such as
+  // outputSchema (introduced in 2025-06-18) before building against them.
+  protocolVersion?: string;
   userId?: string;
   method: string;
   toolName?: string;

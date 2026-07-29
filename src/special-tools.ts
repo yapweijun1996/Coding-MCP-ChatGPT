@@ -1,16 +1,8 @@
-export const visibleBrowserToolNames = [
-  "open_browser_session",
-  "browser_navigate",
-  "browser_click",
-  "browser_type",
-  "browser_press",
-  "browser_screenshot",
-  "browser_wait",
-  "close_browser_session"
-] as const;
-
-const visibleBrowserToolNameSet = new Set<string>(visibleBrowserToolNames);
-
+// Visible browser control gates one capability: opening a browser window that is actually
+// visible on the server's display. It used to gate a *list of tool names* instead, which meant
+// the whole browser_* family bypassed tool state and skill exposure and was reachable only
+// during a 15/30/60-minute window. Those tools are now ordinary tools behind the normal two
+// gates; what remains time-boxed is the headed mode itself, enforced in open_browser_session.
 export interface VisibleBrowserControlState {
   name: "visible_browser_control";
   label: string;
@@ -44,10 +36,6 @@ function refreshVisibleBrowserControl(now = new Date()): VisibleBrowserControlSt
   return { ...visibleBrowserControl };
 }
 
-export function isVisibleBrowserToolName(name: string): boolean {
-  return visibleBrowserToolNameSet.has(name);
-}
-
 export function getSpecialToolStates(): VisibleBrowserControlState[] {
   return [refreshVisibleBrowserControl()];
 }
@@ -74,12 +62,6 @@ export function disableVisibleBrowserControl(_reason = "disabled"): VisibleBrows
 
 export function isVisibleBrowserControlEnabled(): boolean {
   return refreshVisibleBrowserControl().enabled;
-}
-
-export function assertVisibleBrowserControlEnabled(toolName: string): void {
-  if (isVisibleBrowserToolName(toolName) && !isVisibleBrowserControlEnabled()) {
-    throw new Error("Tool is disabled: visible browser control is off");
-  }
 }
 
 export function consumeVisibleBrowserExpiredCleanup(): boolean {

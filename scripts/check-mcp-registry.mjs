@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { toolRegistry, toolDefinitions } from "../dist/mcp/registry.js";
 import { skillRegistry } from "../dist/skills/registry.js";
-import { visibleBrowserToolNames } from "../dist/special-tools.js";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const packageScripts = packageJson.scripts ?? {};
@@ -135,9 +134,9 @@ for (const skill of skillRegistry) {
 // The real trap is a tool that is in NO skill catalog at all: it can NEVER be exposed, no
 // matter which skills are toggled, and reconnecting the client does not help. That is almost
 // always "added a tool, forgot to register it in src/skills/registry.ts". Turn it into a
-// build-time failure. Visible-browser tools are exempt: they are exposed through the runtime
-// browser-control toggle (visibleBrowserToolNames), not the skill catalog.
-const visibleBrowserToolSet = new Set(visibleBrowserToolNames);
+// build-time failure. The browser_* tools used to be exempt here because they reached
+// tools/list through the visible-browser toggle rather than the skill catalog; they now go
+// through the same two gates as everything else, so the guard covers them too.
 const toolsInAnySkill = new Set();
 for (const skill of skillRegistry) {
   for (const toolName of skill.toolNames) toolsInAnySkill.add(toolName);
@@ -145,7 +144,7 @@ for (const skill of skillRegistry) {
 const orphanedEnabledTools = toolRegistry
   .filter((tool) => tool.enabledByDefault)
   .map((tool) => tool.definition.name)
-  .filter((name) => !visibleBrowserToolSet.has(name) && !toolsInAnySkill.has(name));
+  .filter((name) => !toolsInAnySkill.has(name));
 for (const toolName of orphanedEnabledTools) {
   errors.push(`Tool "${toolName}" is enabledByDefault but is listed in NO skill catalog, so tools/list can never expose it (blocked_by_skill, unfixable by any toggle). Add it to a skill's toolNames in src/skills/registry.ts.`);
 }

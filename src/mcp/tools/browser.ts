@@ -4,6 +4,7 @@ import { createShareArtifact } from "../../share/store.js";
 import { makeShareUrl } from "../result.js";
 import { assertSafePublicUrl } from "../../security/url.js";
 import { installSsrfRouteGuard } from "../../security/playwright-guard.js";
+import { isVisibleBrowserControlEnabled } from "../../special-tools.js";
 import type { Browser, Page } from "playwright";
 import type { ToolModule, ToolResult } from "../types.js";
 
@@ -20,6 +21,10 @@ export interface BrowserSession {
   id: string;
   browser: Browser;
   page: Page;
+  // Headed sessions are the privileged ones: they put a real window on the server's display,
+  // which is what the time-boxed visible-browser control exists to bound. Recorded per session
+  // so control expiry can close those and leave headless automation running.
+  headless: boolean;
   step: number;
   startedAt: string;
   createdBy: string;
@@ -55,7 +60,10 @@ function normalizeConsoleSource(source?: { url?: string; lineNumber?: number; co
 const browserSessions = new Map<string, BrowserSession>();
 
 const openBrowserSessionSchema = z.object({
-  headless: z.boolean().optional().default(false),
+  // Defaults to headless. A headed session is the exception that needs an operator to have
+  // opened the visible-browser window; defaulting to headed would make every ordinary call
+  // fail unless an admin happened to have the toggle on.
+  headless: z.boolean().optional().default(true),
   startUrl: z.string().url().optional(),
   width: z.number().int().min(600).max(3000).optional().default(1366),
   height: z.number().int().min(420).max(2600).optional().default(900),
@@ -188,9 +196,10 @@ async function screenshotAndRespond(
   };
 }
 
-export async function closeAllBrowserSessions(): Promise<string[]> {
+async function closeSessions(shouldClose: (session: BrowserSession) => boolean): Promise<string[]> {
   const closed: string[] = [];
   for (const [id, session] of Array.from(browserSessions.entries())) {
+    if (!shouldClose(session)) continue;
     await session.page.close().catch(() => undefined);
     await session.browser.close().catch(() => undefined);
     browserSessions.delete(id);
@@ -199,28 +208,49 @@ export async function closeAllBrowserSessions(): Promise<string[]> {
   return closed;
 }
 
+export async function closeAllBrowserSessions(): Promise<string[]> {
+  return closeSessions(() => true);
+}
+
+/**
+ * Closes only headed sessions, for when the time-boxed visible-browser control expires.
+ * Headless sessions are ordinary automation gated by tool state and skill exposure like any
+ * other tool, so the control expiring must not kill them — it only revokes permission to have
+ * a real window open on the server's display.
+ */
+export async function closeVisibleBrowserSessions(): Promise<string[]> {
+  return closeSessions((session) => !session.headless);
+}
+
 export const browserTools: ToolModule[] = [
   {
     definition: {
       name: "open_browser_session",
-      description: "Start a visible or headless browser session for step-by-step UI actions.",
+      description: "Start a browser session for step-by-step UI actions (navigate, click, type, screenshot), for flows that the declarative inspect_interaction_flow steps cannot express. Runs headless by default. Always call close_browser_session when finished; at most 10 sessions may be open at once.",
       inputSchema: {
         type: "object",
         properties: {
-          headless: { type: "boolean" },
-          startUrl: { type: "string", format: "uri" },
-          width: { type: "number" },
-          height: { type: "number" },
-          timeoutMs: { type: "number" }
+          headless: { type: "boolean", description: "Run without a visible window. Defaults to true. Passing false opens a real window on the server's display and requires an operator to have turned on visible browser control." },
+          startUrl: { type: "string", format: "uri", description: "Optional absolute http(s) URL to open immediately. Private and reserved hosts are rejected." },
+          width: { type: "integer", minimum: 600, maximum: 3000, description: "Viewport width in CSS pixels. Defaults to 1366." },
+          height: { type: "integer", minimum: 420, maximum: 2600, description: "Viewport height in CSS pixels. Defaults to 900." },
+          timeoutMs: { type: "integer", minimum: 500, maximum: 120000, description: "Navigation timeout in ms for startUrl. Defaults to 20000." }
         },
         required: [],
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: openBrowserSessionSchema,
   handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof openBrowserSessionSchema>;
+      // Headless automation is ordinary tool work. A headed session puts a real window on the
+      // server's display, so it stays behind the operator's time-boxed control — that control
+      // encodes "a human is watching", which only means anything for a window someone can see.
+      if (!parsed.headless && !isVisibleBrowserControlEnabled()) {
+        const message = "A headed browser session requires visible browser control, which an operator must enable from Admin (15, 30, or 60 minutes). Use headless: true for automation that does not need a real window.";
+        return { ok: false, summary: message, artifacts: [], logs: [], errors: [message] };
+      }
       if (browserSessions.size >= MAX_BROWSER_SESSIONS) {
         return { ok: false, summary: "Browser session limit reached. Close an existing session before opening a new one.", artifacts: [], logs: [], errors: ["Too many open browser sessions."] };
       }
@@ -242,6 +272,7 @@ export const browserTools: ToolModule[] = [
         id,
         browser,
         page,
+        headless: parsed.headless,
         step: 0,
         startedAt: new Date().toISOString(),
         createdBy: ctx.clientId,
@@ -319,7 +350,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: browserNavigateSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserNavigateSchema>;
@@ -344,7 +375,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: browserActionSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserActionSchema>;
@@ -372,7 +403,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: browserTypeSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserTypeSchema>;
@@ -402,7 +433,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: browserPressSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserPressSchema>;
@@ -428,7 +459,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: browserScreenshotSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserScreenshotSchema>;
@@ -462,7 +493,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: browserWaitSchema,
     handler: async (input) => {
       const parsed = input as z.infer<typeof browserWaitSchema>;
@@ -492,7 +523,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: closeBrowserSessionSchema,
     handler: async (input) => {
       const parsed = input as z.infer<typeof closeBrowserSessionSchema>;

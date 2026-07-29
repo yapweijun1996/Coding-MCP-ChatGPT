@@ -349,6 +349,8 @@ async function openTemporarySession(url: string, timeoutMs: number): Promise<Tem
     id: `tmp-${Math.random().toString(16).slice(2, 10)}`,
     browser: browser as Browser,
     page,
+    // Always headless above, so this session is never subject to visible-browser control.
+    headless: true,
     step: 0,
     startedAt: new Date().toISOString(),
     createdBy: "agent",

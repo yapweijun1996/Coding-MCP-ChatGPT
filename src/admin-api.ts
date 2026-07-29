@@ -30,10 +30,7 @@ import { listSkillStates, setSkillEnabled } from "./skills/state.js";
 import {
   disableVisibleBrowserControl,
   enableVisibleBrowserControl,
-  getSpecialToolStates,
-  isVisibleBrowserControlEnabled,
-  isVisibleBrowserToolName,
-  visibleBrowserToolNames
+  getSpecialToolStates
 } from "./special-tools.js";
 import { closeAllBrowserSessions } from "./mcp/tools/browser.js";
 import type { EffectiveToolState } from "./tool-state.js";
@@ -478,12 +475,12 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     const activeProjects = projects.filter((project) => project.status !== "deleted");
     const activity = filterActivityForUser(user, listActivity(200));
     const specialTools = getSpecialToolStates();
-    const tools = listEffectiveToolStates().filter((tool) => !isVisibleBrowserToolName(tool.name));
+    const tools = listEffectiveToolStates();
     const counts = projectCounts(projects);
     ok(res, {
       metrics: {
         connectedClients: filterClientsForUser(user, listOAuthClientStatus()).length,
-        enabledTools: tools.filter((tool) => tool.enabled).length + (isVisibleBrowserControlEnabled() ? visibleBrowserToolNames.length : 0),
+        enabledTools: tools.filter((tool) => tool.enabled).length,
         projects: activeProjects.length,
         publishedProjects: counts.published,
         privateProjects: counts.private,
@@ -828,7 +825,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
   api.get("/tools", (_req, res) => {
     const user = res.locals.currentUser as PublicUser;
     if (!requireAdmin(user, res)) return;
-    ok(res, { tools: shapeTools(listEffectiveToolStates().filter((tool) => !isVisibleBrowserToolName(tool.name))) });
+    ok(res, { tools: shapeTools(listEffectiveToolStates()) });
   });
 
   api.post("/tools/:name/toggle", (req, res) => {
@@ -836,10 +833,13 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       const user = res.locals.currentUser as PublicUser;
       if (!requireAdmin(user, res)) return;
       const enabled = readBody(req).enabled === true;
-      if (isVisibleBrowserToolName(req.params.name)) throw new Error("Browser control tools are managed from Special Tools.");
+      // The browser_* tools used to be rejected here and hidden from the list above, because
+      // availability came from the Special Tools timer instead of tool state. Now they are
+      // ordinary tools — Special Tools only governs whether a session may be headed — so the
+      // operator must be able to see and disable them like anything else.
       setToolEnabled(req.params.name, enabled);
       recordActivity({ userId: user.id, clientId: "admin", method: "admin/tools", toolName: req.params.name, ok: true, summary: `${enabled ? "Enabled" : "Disabled"} tool override ${req.params.name}.` });
-      ok(res, { tools: shapeTools(listEffectiveToolStates().filter((tool) => !isVisibleBrowserToolName(tool.name))) });
+      ok(res, { tools: shapeTools(listEffectiveToolStates()) });
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Tool toggle failed.");
     }
