@@ -37,6 +37,11 @@ const supportedProtocolVersions = new Set(["2024-11-05", "2025-03-26", "2025-06-
 // it. clientId alone is an opaque OAuth id; clientType is the per-client analytic the
 // multi-client setup actually needs. In-memory: rebuilt whenever a client re-initializes.
 const clientTypeById = new Map<string, string>();
+// Same pattern as clientTypeById, for the MCP revision negotiated at initialize. Tools/list
+// and tools/call carry no protocolVersion of their own, so without remembering it here we
+// could never tell which revision a given call was made under — and therefore never answer
+// "can this client actually use outputSchema?" (2025-06-18+) from telemetry alone.
+const protocolVersionById = new Map<string, string>();
 const maxArgsPreviewChars = 4000;
 const mcpRateLimitBuckets = new Map<string, { tokens: number; updatedAt: number }>();
 
@@ -224,13 +229,25 @@ export function registerMcpRoutes(app: express.Express, config: ServerConfig): v
         clientTypeById.set(clientId, `${clientInfo.name}${version}`.slice(0, 80));
       }
       const clientType = clientTypeById.get(clientId);
-      recordActivity({ clientId, userId, clientType, method: "initialize", ok: true, summary: `Client initialized: ${clientType ?? "unknown"}` });
       // Echo the client's requested protocol version when we support it, otherwise fall back
       // to our floor. This server is a stateless tools-only request/response endpoint that is
       // compatible with every published MCP revision, so honoring the client's version avoids
       // forcing a downgrade on newer Claude/Gemini clients.
       const requestedVersion = typeof params?.protocolVersion === "string" ? params.protocolVersion : undefined;
       const protocolVersion = requestedVersion && supportedProtocolVersions.has(requestedVersion) ? requestedVersion : "2024-11-05";
+      // Negotiated (not requested) version is what actually governs the session, so that is
+      // what we remember and log. Recorded after negotiation, not before, or the field would
+      // always be empty.
+      protocolVersionById.set(clientId, protocolVersion);
+      recordActivity({
+        clientId,
+        userId,
+        clientType,
+        protocolVersion,
+        method: "initialize",
+        ok: true,
+        summary: `Client initialized: ${clientType ?? "unknown"} (MCP ${protocolVersion}${requestedVersion && requestedVersion !== protocolVersion ? `, requested ${requestedVersion}` : ""})`
+      });
       res.json(jsonRpcResult(request.id, {
         protocolVersion,
         capabilities: {
@@ -245,7 +262,7 @@ export function registerMcpRoutes(app: express.Express, config: ServerConfig): v
     }
 
     if (request.method === "tools/list") {
-      recordActivity({ userId, clientId, method: request.method, ok: true, summary: "Listed tools." });
+      recordActivity({ userId, clientId, protocolVersion: protocolVersionById.get(clientId), method: request.method, ok: true, summary: "Listed tools." });
       const enabledToolNames = new Set(listEffectiveToolStates().filter((tool) => tool.enabled && !isVisibleBrowserToolName(tool.name)).map((tool) => tool.name));
       if (isVisibleBrowserControlEnabled()) {
         for (const name of visibleBrowserToolNames) enabledToolNames.add(name);
@@ -277,6 +294,7 @@ export function registerMcpRoutes(app: express.Express, config: ServerConfig): v
 
       const toolArgs = params.arguments ?? {};
       const clientType = clientTypeById.get(clientId);
+      const protocolVersion = protocolVersionById.get(clientId);
       const { inputBytes, preview } = previewArgs(toolArgs);
       const startedAt = Date.now();
       try {
@@ -297,6 +315,7 @@ export function registerMcpRoutes(app: express.Express, config: ServerConfig): v
           userId,
           clientId,
           clientType,
+          protocolVersion,
           method: request.method,
           toolName: name,
           ok: result.ok,
@@ -316,6 +335,7 @@ export function registerMcpRoutes(app: express.Express, config: ServerConfig): v
           userId,
           clientId,
           clientType,
+          protocolVersion,
           method: request.method,
           toolName: name,
           ok: false,
