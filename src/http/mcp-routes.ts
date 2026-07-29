@@ -4,19 +4,14 @@ import type { ServerConfig } from "../config.js";
 import { toolDefinitions } from "../mcp/registry.js";
 import { callTool } from "../mcp/router.js";
 import type { ToolResult } from "../mcp/types.js";
-import { closeAllBrowserSessions } from "../mcp/tools/browser.js";
+import { closeVisibleBrowserSessions } from "../mcp/tools/browser.js";
 import {
   getClientIdForAccessToken,
   getUserIdForAccessToken,
   isValidAccessToken,
   recordClientUse
 } from "../oauth.js";
-import {
-  consumeVisibleBrowserExpiredCleanup,
-  isVisibleBrowserControlEnabled,
-  isVisibleBrowserToolName,
-  visibleBrowserToolNames
-} from "../special-tools.js";
+import { consumeVisibleBrowserExpiredCleanup } from "../special-tools.js";
 import { getToolAccess, isToolEffectivelyEnabled, listEffectiveToolStates } from "../tool-state.js";
 import {
   getProjectRootForUser,
@@ -122,13 +117,16 @@ function resultToMcpContent(result: ToolResult): Record<string, unknown> {
 
 async function cleanupExpiredVisibleBrowserControl(): Promise<void> {
   if (!consumeVisibleBrowserExpiredCleanup()) return;
-  const closed = await closeAllBrowserSessions();
+  // Only headed sessions. The control governs having a real window open on the server's
+  // display, not browser automation as such — headless sessions are ordinary tool work and
+  // must survive expiry.
+  const closed = await closeVisibleBrowserSessions();
   recordActivity({
     clientId: "system",
     method: "special-tools/expired",
     toolName: "visible_browser_control",
     ok: true,
-    summary: `Visible browser control expired. Closed ${closed.length} browser session(s).`
+    summary: `Visible browser control expired. Closed ${closed.length} headed browser session(s).`
   });
 }
 
@@ -263,10 +261,7 @@ export function registerMcpRoutes(app: express.Express, config: ServerConfig): v
 
     if (request.method === "tools/list") {
       recordActivity({ userId, clientId, protocolVersion: protocolVersionById.get(clientId), method: request.method, ok: true, summary: "Listed tools." });
-      const enabledToolNames = new Set(listEffectiveToolStates().filter((tool) => tool.enabled && !isVisibleBrowserToolName(tool.name)).map((tool) => tool.name));
-      if (isVisibleBrowserControlEnabled()) {
-        for (const name of visibleBrowserToolNames) enabledToolNames.add(name);
-      }
+      const enabledToolNames = new Set(listEffectiveToolStates().filter((tool) => tool.enabled).map((tool) => tool.name));
       res.json(jsonRpcResult(request.id, { tools: toolDefinitions.filter((tool) => enabledToolNames.has(tool.name)) }));
       return;
     }
@@ -279,12 +274,7 @@ export function registerMcpRoutes(app: express.Express, config: ServerConfig): v
         res.json(jsonRpcError(request.id, -32602, "tools/call requires params.name."));
         return;
       }
-      if (isVisibleBrowserToolName(name) && !isVisibleBrowserControlEnabled()) {
-        recordActivity({ userId, clientId, method: request.method, toolName: name, ok: false, summary: "Visible browser control is off." });
-        res.json(jsonRpcError(request.id, -32603, "Tool is disabled: visible browser control is off"));
-        return;
-      }
-      if (!isVisibleBrowserToolName(name) && !isToolEffectivelyEnabled(name)) {
+      if (!isToolEffectivelyEnabled(name)) {
         const access = getToolAccess(name);
         const summary = access.access === "blocked_by_skill" ? "Tool is disabled by skill catalog." : "Tool is disabled.";
         recordActivity({ userId, clientId, method: request.method, toolName: name, ok: false, summary });
