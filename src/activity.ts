@@ -23,6 +23,7 @@ export interface RecordActivityInput {
   ok: boolean;
   summary: string;
   clientType?: string;
+  protocolVersion?: string;
   durationMs?: number;
   errorCode?: string | number;
   errorMessage?: string;

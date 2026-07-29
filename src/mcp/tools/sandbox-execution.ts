@@ -175,12 +175,36 @@ function renderReport(manifest: SandboxManifest) {
   ].join("\n");
 }
 
+// JSON-Schema mirror of createSandboxProfileInputSchema. Kept next to the zod schema so the two
+// stay in sync: the model can only supply what it can see, and zod rejects anything it guessed.
+const sandboxProfileProperties = {
+  kind: { type: "string", enum: ["code_script", "build", "data_job", "experiment"], description: "What this sandbox is for. Use 'experiment' for a one-off logic spike." },
+  title: { type: "string", minLength: 1, maxLength: 200, description: "Short human-readable label for the sandbox." },
+  // "integer", not "number": zod is z.number().int(), so advertising "number" would invite a
+  // float the validator then rejects — the exact see-one-thing/get-another drift this mirror exists to remove.
+  timeoutMs: { type: "integer", minimum: 500, maximum: 600000, description: "Default per-run wall-clock timeout in ms. Defaults to 120000." },
+  maxOutputBytes: { type: "integer", minimum: 1000, maximum: 500000, description: "Max captured stdout/stderr bytes per run; output beyond this is truncated. Defaults to 50000." },
+  maxArtifactBytes: { type: "integer", minimum: 1000, maximum: 52428800, description: "Max size of a single collected artifact file. Defaults to 5242880 (5 MiB)." },
+  cleanupPolicy: { type: "string", enum: ["keep", "cleanup_on_success", "cleanup_always"], description: "When to delete the sandbox directory. Defaults to 'cleanup_on_success'. Use 'keep' if you need to inspect or re-run files afterwards." },
+  allowedCommands: { type: "array", minItems: 1, maxItems: 3, items: { type: "string", enum: ["node", "python3", "npm"] }, description: "Commands runnable in this sandbox. Defaults to all three." }
+} as const;
+
+const sandboxProfileSchemaObject = {
+  type: "object",
+  properties: sandboxProfileProperties,
+  required: ["kind", "title"],
+  additionalProperties: false,
+  description: "Execution profile: limits, allowed commands, and cleanup policy."
+} as const;
+
+const sandboxIdProperty = { type: "string", pattern: "^sandbox_[a-zA-Z0-9_-]{1,80}$", description: "Sandbox id returned by prepare_sandbox_workspace." } as const;
+
 export const sandboxExecutionTools: ToolModule[] = [
   {
     definition: {
       name: "create_sandbox_profile",
-      description: "Create a reviewable sandbox execution profile with command allowlist, time/output/artifact limits, and cleanup policy.",
-      inputSchema: { type: "object", properties: { kind: { type: "string" }, title: { type: "string" }, timeoutMs: { type: "number" }, maxOutputBytes: { type: "number" }, maxArtifactBytes: { type: "number" }, cleanupPolicy: { type: "string" }, allowedCommands: { type: "array", items: { type: "string" } } }, required: ["kind", "title"], additionalProperties: false }
+      description: "Create a reviewable sandbox execution profile with command allowlist, time/output/artifact limits, and cleanup policy. Optional: prepare_sandbox_workspace accepts the same profile object inline, so you usually do not need this tool first.",
+      inputSchema: { type: "object", properties: sandboxProfileProperties, required: ["kind", "title"], additionalProperties: false }
     },
     enabledByDefault: true,
     schema: createSandboxProfileInputSchema,
@@ -192,8 +216,30 @@ export const sandboxExecutionTools: ToolModule[] = [
   {
     definition: {
       name: "prepare_sandbox_workspace",
-      description: "Create a sandbox workspace under artifactRoot with optional input files and a persisted manifest.",
-      inputSchema: { type: "object", properties: { sandboxId: { type: "string" }, profile: { type: "object" }, files: { type: "array" } }, required: ["profile"], additionalProperties: false }
+      description: "Create a sandbox workspace under artifactRoot and write input files into it. Step 1 of 2 for running code: call this with your source file inline, then call run_sandboxed_command with the returned sandboxId.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sandboxId: { ...sandboxIdProperty, description: "Optional explicit sandbox id. Omit to have one generated." },
+          profile: sandboxProfileSchemaObject,
+          files: {
+            type: "array",
+            maxItems: 100,
+            description: "Files to write into the sandbox before running anything. Paths are relative; parent traversal and dot-prefixed segments are rejected.",
+            items: {
+              type: "object",
+              properties: {
+                path: { type: "string", minLength: 1, maxLength: 240, description: "Relative path inside the sandbox, e.g. 'spike.js'." },
+                content: { type: "string", maxLength: 200000, description: "Full file content as UTF-8 text." }
+              },
+              required: ["path", "content"],
+              additionalProperties: false
+            }
+          }
+        },
+        required: ["profile"],
+        additionalProperties: false
+      }
     },
     enabledByDefault: true,
     schema: prepareSandboxWorkspaceInputSchema,
@@ -217,8 +263,31 @@ export const sandboxExecutionTools: ToolModule[] = [
   {
     definition: {
       name: "run_sandboxed_command",
-      description: "Run an allowlisted command inside a prepared sandbox workspace with timeout/output limits and artifact collection.",
-      inputSchema: { type: "object", properties: { sandboxId: { type: "string" }, command: { type: "string" }, args: { type: "array", items: { type: "string" } }, cwd: { type: "string" }, timeoutMs: { type: "number" }, maxOutputBytes: { type: "number" }, collectArtifacts: { type: "array", items: { type: "string" } } }, required: ["sandboxId", "command"], additionalProperties: false }
+      description: "Run an allowlisted command inside a prepared sandbox workspace, without a shell, with timeout and output limits. Step 2 of 2 for running code. stdout/stderr/exitCode come back in structuredContent.run. Runtime: Node 24 (a .js file may use either import or require; a .ts file runs directly via native type stripping) and Python 3.12.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sandboxId: sandboxIdProperty,
+          command: { type: "string", enum: ["node", "python3", "npm"], description: "Executable to run. Must also be present in the sandbox profile's allowedCommands." },
+          args: {
+            type: "array",
+            maxItems: 30,
+            items: { type: "string", minLength: 1, maxLength: 240 },
+            description: "Arguments, e.g. ['spike.js']. For command 'npm' only these exact forms are accepted: ['test'], ['run','build'], ['run','typecheck'], ['run','lint'], ['install','--ignore-scripts']."
+          },
+          cwd: { type: "string", minLength: 1, maxLength: 240, description: "Working directory relative to the sandbox root. Defaults to '.'." },
+          timeoutMs: { type: "integer", minimum: 500, maximum: 600000, description: "Overrides the profile's timeoutMs for this run." },
+          maxOutputBytes: { type: "integer", minimum: 1000, maximum: 500000, description: "Overrides the profile's maxOutputBytes for this run." },
+          collectArtifacts: {
+            type: "array",
+            maxItems: 100,
+            items: { type: "string", minLength: 1, maxLength: 240 },
+            description: "Relative paths of files the run produced that should be recorded. Note: if the profile's cleanupPolicy deletes the sandbox, collected files are removed too — use cleanupPolicy 'keep' when you need them."
+          }
+        },
+        required: ["sandboxId", "command"],
+        additionalProperties: false
+      }
     },
     enabledByDefault: true,
     schema: runSandboxedCommandInputSchema,
@@ -275,7 +344,7 @@ export const sandboxExecutionTools: ToolModule[] = [
     definition: {
       name: "list_sandbox_runs",
       description: "List recent sandbox manifests with profile, status, run count, and latest run metadata.",
-      inputSchema: { type: "object", properties: { limit: { type: "number" } }, additionalProperties: false }
+      inputSchema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 200, description: "Max manifests to return, newest first. Defaults to 50." } }, additionalProperties: false }
     },
     enabledByDefault: true,
     schema: listSandboxRunsInputSchema,
@@ -289,8 +358,8 @@ export const sandboxExecutionTools: ToolModule[] = [
   {
     definition: {
       name: "cleanup_sandbox",
-      description: "Delete a prepared sandbox workspace and its artifacts.",
-      inputSchema: { type: "object", properties: { sandboxId: { type: "string" } }, required: ["sandboxId"], additionalProperties: false }
+      description: "Delete a prepared sandbox workspace and its artifacts. Automatic cleanup only happens at the end of a run, so call this when: cleanupPolicy is 'keep'; or cleanupPolicy is 'cleanup_on_success' and the run failed (failed runs are kept on purpose so you can inspect them); or the sandbox was prepared but never run.",
+      inputSchema: { type: "object", properties: { sandboxId: sandboxIdProperty }, required: ["sandboxId"], additionalProperties: false }
     },
     enabledByDefault: true,
     schema: cleanupSandboxInputSchema,
@@ -305,7 +374,7 @@ export const sandboxExecutionTools: ToolModule[] = [
     definition: {
       name: "export_sandbox_report",
       description: "Export a Markdown report for a sandbox manifest with profile, runs, exit codes, and artifact references.",
-      inputSchema: { type: "object", properties: { sandboxId: { type: "string" }, outputPath: { type: "string" } }, required: ["sandboxId"], additionalProperties: false }
+      inputSchema: { type: "object", properties: { sandboxId: sandboxIdProperty, outputPath: { type: "string", minLength: 1, maxLength: 240, description: "Relative path inside the sandbox to write the Markdown report to. Defaults to 'sandbox-report.md'." } }, required: ["sandboxId"], additionalProperties: false }
     },
     enabledByDefault: true,
     schema: exportSandboxReportInputSchema,

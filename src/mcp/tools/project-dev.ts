@@ -323,6 +323,84 @@ async function listFiles(root: string, start: string, input: z.infer<typeof proj
   return out;
 }
 
+// In-process fallback for search_in_project when ripgrep is unavailable. Deliberately reuses
+// listFiles() above rather than the workspace-root searcher in legacy-tools.ts: that one
+// resolves paths against a *different* root model (ctx.workspaceRoot, not the project's bound
+// workspace), and routing project searches through it would blur a security boundary for no
+// gain. Same root, same traversal rules, same ignore list — only the matching is new.
+async function searchWithoutRipgrep(
+  parsed: z.infer<typeof searchInProjectSchema>,
+  workspace: string,
+  start: string
+): Promise<ToolResult> {
+  let matcher: (line: string) => boolean;
+  if (parsed.useRegex) {
+    let regex: RegExp;
+    try {
+      regex = new RegExp(parsed.query, parsed.caseSensitive ? "" : "i");
+    } catch (error) {
+      const message = `Invalid regular expression: ${error instanceof Error ? error.message : String(error)}`;
+      return { ok: false, summary: message, jobId: parsed.projectId, artifacts: [], logs: [], errors: [message] };
+    }
+    matcher = (line: string) => regex.test(line);
+  } else {
+    const needle = parsed.caseSensitive ? parsed.query : parsed.query.toLowerCase();
+    matcher = (line: string) => (parsed.caseSensitive ? line : line.toLowerCase()).includes(needle);
+  }
+
+  const files = await listFiles(workspace, start, {
+    projectId: parsed.projectId,
+    relativePath: parsed.relativePath,
+    recursive: true,
+    maxDepth: 12,
+    includeHidden: parsed.includeHidden,
+    includeIgnored: false,
+    // Walk a wide net of files to find up to maxResults matching LINES; the cap below is on
+    // matches, not on files scanned.
+    maxResults: 5000
+  } as z.infer<typeof projectPathSchema>);
+
+  const matches: Array<{ path: string; line: number; text: string }> = [];
+  let scanned = 0;
+  let skipped = 0;
+  for (const file of files) {
+    if (matches.length >= parsed.maxResults) break;
+    if (file.type !== "file") continue;
+    // Skip anything large or binary rather than pulling it into memory. rg does this natively;
+    // without the guard a single vendored bundle could blow up the request.
+    if ((file.size ?? 0) > 2 * 1024 * 1024) { skipped += 1; continue; }
+    let content: string;
+    try {
+      content = await readFile(path.join(workspace, file.path), "utf8");
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    if (content.includes("\0")) { skipped += 1; continue; } // NUL byte => treat as binary
+    scanned += 1;
+    const lines = content.split("\n");
+    for (let index = 0; index < lines.length; index += 1) {
+      if (matches.length >= parsed.maxResults) break;
+      if (matcher(lines[index])) {
+        matches.push({ path: file.path, line: index + 1, text: lines[index].slice(0, 400) });
+      }
+    }
+  }
+
+  const summary = matches.length
+    ? `Search completed with ${matches.length} match(es) (ripgrep unavailable, used in-process scan).`
+    : "Search completed with no matches (ripgrep unavailable, used in-process scan).";
+  return {
+    ok: true,
+    summary,
+    jobId: parsed.projectId,
+    artifacts: [],
+    structuredContent: { engine: "in-process", matches, filesScanned: scanned, filesSkipped: skipped, truncated: matches.length >= parsed.maxResults },
+    logs: [JSON.stringify({ engine: "in-process", matches, filesScanned: scanned, filesSkipped: skipped }, null, 2)],
+    errors: []
+  };
+}
+
 function rejectRiskyShell(command: string): void {
   const riskyPatterns = [
     /\brm\s+-[^\n;|&]*r[^\n;|&]*\s+(?:\/|\$HOME|~|\.)/,
@@ -621,8 +699,21 @@ export const projectDevTools: ToolModule[] = [
   {
     definition: {
       name: "search_in_project",
-      description: "Search a project-bound real workspace with ripgrep.",
-      inputSchema: { type: "object", properties: { projectId: { type: "string" }, query: { type: "string" }, relativePath: { type: "string" }, useRegex: { type: "boolean" }, caseSensitive: { type: "boolean" }, includeHidden: { type: "boolean" }, maxResults: { type: "number" } }, required: ["projectId", "query"], additionalProperties: false }
+      description: "Search file contents in a project-bound real workspace. Uses ripgrep when available and falls back to an in-process scan otherwise. node_modules and .git are always excluded. Use list_project_files to find files by name instead of by content.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string", description: "Project whose bound workspace to search." },
+          query: { type: "string", description: "Text to find. Treated as a literal string unless useRegex is true." },
+          relativePath: { type: "string", description: "Optional subdirectory to limit the search to, relative to the workspace root. Defaults to the whole workspace." },
+          useRegex: { type: "boolean", description: "Treat query as a regular expression instead of literal text. Default false." },
+          caseSensitive: { type: "boolean", description: "Match case exactly. Default false (case-insensitive)." },
+          includeHidden: { type: "boolean", description: "Include dotfiles and dot-directories. Default false." },
+          maxResults: { type: "number", description: "Maximum matching lines to return, 1-500. Default 100." }
+        },
+        required: ["projectId", "query"],
+        additionalProperties: false
+      }
     },
     enabledByDefault: true,
     schema: searchInProjectSchema,
@@ -643,11 +734,12 @@ export const projectDevTools: ToolModule[] = [
       } catch (error) {
         const err = error as { code?: unknown; stdout?: unknown; stderr?: unknown };
         if (err.code === 1 || err.code === "1") return { ok: true, summary: "Search completed with no matches.", jobId: parsed.projectId, artifacts: [], logs: [], errors: [] };
-        // `spawn rg ENOENT` means ripgrep is not installed on the server. The agent cannot install
-        // it, so surface an actionable operator-facing message instead of the opaque raw spawn error.
+        // `spawn rg ENOENT` means ripgrep is not on PATH. This returned ok:false for 125/125
+        // calls in production (see docs/tool-failure-baseline.md) because the container never
+        // installed it. ripgrep is now in the Dockerfile, but a missing binary must not be a
+        // hard failure again — degrade to an in-process scan so the agent still gets an answer.
         if (err.code === "ENOENT") {
-          const message = "search_in_project requires ripgrep (rg) on the server PATH, but it is not installed. Ask the operator to install ripgrep, or use list_project_workspace / read_project_file to inspect files instead.";
-          return { ok: false, summary: message, jobId: parsed.projectId, artifacts: [], logs: [], errors: [message] };
+          return await searchWithoutRipgrep(parsed, workspace, start);
         }
         throw error;
       }
