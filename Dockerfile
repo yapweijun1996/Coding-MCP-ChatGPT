@@ -18,8 +18,11 @@ RUN NODE_OPTIONS=--max-old-space-size=2048 npm run build
 
 FROM mcr.microsoft.com/playwright:v1.61.0-noble AS runtime
 
+# ripgrep backs search_in_project. Without it that tool failed 125/125 (100%) in production
+# telemetry with "spawn rg ENOENT" — see docs/tool-failure-baseline.md. Runtime stage only:
+# the build stage runs tsc/vite and never shells out to rg.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends fluidsynth ffmpeg bzip2 xz-utils xvfb \
+  && apt-get install -y --no-install-recommends fluidsynth ffmpeg bzip2 xz-utils xvfb ripgrep \
   && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /app/soundfonts/generaluser-gs \

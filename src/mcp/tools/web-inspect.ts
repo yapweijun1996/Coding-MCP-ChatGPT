@@ -705,12 +705,40 @@ async function handleAccessibility(input: unknown, ctx: ToolContext, allowPrivat
   return toolResult(`Accessibility audit found ${totalViolations} violation(s).`, reportUrl, { reportUrl, url: parsed.url, totalViolations, results });
 }
 
+// chrome-launcher discovers Chrome from a fixed set of well-known install locations, none of
+// which exist in the Playwright base image — audit_lighthouse failed 8/8 (100%) in production
+// telemetry with "The CHROME_PATH environment variable must be set...". Rather than hardcode
+// /ms-playwright/chromium-<build>/chrome-linux/chrome (which breaks on every Playwright bump)
+// we ask Playwright for the browser it already manages, so this stays correct on upgrade and
+// works on dev machines too. Order: explicit CHROME_PATH override -> Playwright's chromium ->
+// chrome-launcher's own discovery.
+async function resolveChromePath(): Promise<string | undefined> {
+  const override = process.env.CHROME_PATH?.trim();
+  if (override) return override;
+  try {
+    const { chromium } = await import("playwright");
+    const executablePath = chromium.executablePath();
+    if (!executablePath) return undefined;
+    // executablePath() reports where the browser *would* live, so verify it is really there
+    // before handing it over — a wrong explicit path is worse than letting chrome-launcher look.
+    const { access } = await import("node:fs/promises");
+    await access(executablePath);
+    return executablePath;
+  } catch {
+    return undefined;
+  }
+}
+
 async function handleLighthouse(input: unknown, ctx: ToolContext, allowPrivateNetwork = false): Promise<ToolResult> {
   const parsed = auditLighthouseSchema.parse(input);
   await guardInspectionUrl(parsed.url, allowPrivateNetwork);
   const lighthouse = (await import("lighthouse")).default;
   const chromeLauncher = await import("chrome-launcher");
-  const chrome = await chromeLauncher.launch({ chromeFlags: ["--headless=new", "--no-sandbox", "--disable-gpu"] });
+  const chromePath = await resolveChromePath();
+  const chrome = await chromeLauncher.launch({
+    chromePath,
+    chromeFlags: ["--headless=new", "--no-sandbox", "--disable-gpu"]
+  });
   try {
     const result = await lighthouse(parsed.url, {
       port: chrome.port,
