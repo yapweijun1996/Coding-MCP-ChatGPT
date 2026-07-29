@@ -1306,6 +1306,8 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
       audioPath: "music/rendered-preview.wav",
       compositionManifestPath: "music/edited-composition-manifest.json",
       useCase: "cafe_background",
+      // render_midi_to_audio output is a procedural preview, not production audio.
+      renderTier: "preview",
       checkLoop: true,
       targetMood: "warm calm jazz"
     }, ctx);
@@ -1319,6 +1321,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
       technicalReport: { format: string; sampleRate: number; bitDepth: number; durationSeconds: number; peak: number; rms: number; silenceGaps: unknown[]; harshHighFrequencyProxy: number; excessiveBassProxy: number };
       loudnessReport: { peak: number; rms: number; estimatedLufs: number; dynamicRange: number };
       loopSeamReport: { checked: boolean; loopable: boolean; seamClickProxy: number };
+      noiseFloorReport: { renderTier: string; noiseToSignalRatio: number; threshold: number; overThreshold: boolean; gated: boolean };
       backgroundSuitabilityScore: number;
       findings: Array<{ severity: string; category: string; message: string; suggestedFix: string }>;
       suggestedFixes: string[];
@@ -1342,6 +1345,11 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     assert.equal(qaPayload.loopSeamReport.loopable, true);
     assert.ok(qaPayload.loopSeamReport.seamClickProxy >= 0);
     assert.ok(qaPayload.backgroundSuitabilityScore >= 90);
+    // The noise floor is still measured and reported for a preview; it just does not gate.
+    assert.equal(qaPayload.noiseFloorReport.renderTier, "preview");
+    assert.equal(qaPayload.noiseFloorReport.threshold, 0.15);
+    assert.ok(qaPayload.noiseFloorReport.noiseToSignalRatio > 0);
+    assert.equal(qaPayload.noiseFloorReport.gated, false);
     assert.deepEqual(qaPayload.findings, []);
     assert.deepEqual(qaPayload.suggestedFixes, []);
     assert.deepEqual(qaPayload.warnings, []);
@@ -1913,6 +1921,7 @@ test("compose_edit_midi creates a shaped piano sketch instead of block-chord pla
       audioPath: "music/piano-quality.wav",
       compositionManifestPath: "music/piano-quality.json",
       useCase: "solo piano sketch",
+      renderTier: "preview",
       checkLoop: false,
       outputPath: "music/piano-quality-qa.json"
     }, ctx);
@@ -1922,6 +1931,30 @@ test("compose_edit_midi creates a shaped piano sketch instead of block-chord pla
     assert.deepEqual(qa.technicalReport.silenceGaps, []);
     assert.equal(qa.musicalityReport.hasPlan, true);
     assert.ok(qa.musicalityReport.mechanicalScore < 0.72);
+
+    // Same audio, default renderTier: the production gate must still fail closed. This pins that
+    // the preview exemption narrows the gate rather than disabling it.
+    const productionQaResult = await inspect!.handler({
+      projectId: project.id,
+      audioPath: "music/piano-quality.wav",
+      compositionManifestPath: "music/piano-quality.json",
+      useCase: "solo piano sketch",
+      checkLoop: false,
+      outputPath: "music/piano-quality-production-qa.json"
+    }, ctx);
+    assert.equal(productionQaResult.ok, false);
+    const productionQa = productionQaResult.structuredContent as {
+      productionSafe: boolean;
+      blockingReasons: string[];
+      noiseFloorReport: { renderTier: string; threshold: number; overThreshold: boolean; gated: boolean };
+    };
+    assert.equal(productionQa.noiseFloorReport.renderTier, "production_candidate");
+    // Solo piano is auto-detected, so the stricter 10% threshold applies.
+    assert.equal(productionQa.noiseFloorReport.threshold, 0.10);
+    assert.equal(productionQa.noiseFloorReport.overThreshold, true);
+    assert.equal(productionQa.noiseFloorReport.gated, true);
+    assert.equal(productionQa.productionSafe, false);
+    assert.ok(productionQa.blockingReasons.some((reason) => reason.includes("Audible noise floor detected")));
 
     const roboticComposition = {
       ...composition,

@@ -409,6 +409,9 @@ const inspectAudioQualityInputSchema = z.object({
   useCase: z.string().min(1).max(240).optional().default("background music"),
   checkLoop: z.boolean().optional().default(true),
   targetMood: z.string().min(1).max(240).optional(),
+  // Defaults to production_candidate so anything that does not declare itself a preview keeps the
+  // strict, fail-closed noise-floor gate.
+  renderTier: z.enum(["preview", "production_candidate"]).optional().default("production_candidate"),
   outputPath: z.string().min(1).max(240).optional().default("music/audio-quality-report.json")
 }).refine((value) => Boolean(value.audioPath || value.compositionManifestPath || value.sessionManifestPath), { message: "audioPath, compositionManifestPath, or sessionManifestPath is required." });
 
@@ -1982,7 +1985,7 @@ function sessionQuality(session?: Record<string, unknown>) {
   };
 }
 
-function qualityForComposition(composition: Composition, options: { audio?: Buffer; useCase: string; checkLoop: boolean; targetMood?: string; session?: Record<string, unknown>; profile?: "solo_piano" | "full_ensemble" }) {
+function qualityForComposition(composition: Composition, options: { audio?: Buffer; useCase: string; checkLoop: boolean; targetMood?: string; session?: Record<string, unknown>; profile?: "solo_piano" | "full_ensemble"; renderTier?: "preview" | "production_candidate" }) {
   const warnings: string[] = [];
   const findings: AudioFinding[] = [];
   const allNotes = Object.values(composition.tracks).flat();
@@ -2016,8 +2019,21 @@ function qualityForComposition(composition: Composition, options: { audio?: Buff
   // Audible noise floor: noise-to-signal ratio > 15% (or > 10% for solo_piano) means the quiet
   // passages carry persistent hiss (typical with Salamander/SoundFont renders after aggressive
   // loudnorm boost). Block as high so productionSafe=false.
+  //
+  // This gate only makes sense for audio that claims to be production audio. render_midi_to_audio
+  // is a procedural preview renderer — it demands acknowledgePreviewOnly and its own status label
+  // is "MIDI preview only. Not production audio." — so its inherent synthesis floor is not a
+  // defect to block on, and the SoundFont attribution above would be simply wrong for it. Preview
+  // renders still get the finding, at low severity, so the number stays visible without gating.
+  const previewTier = options.renderTier === "preview";
   const noiseRatioThreshold = options.profile === "solo_piano" ? 0.10 : 0.15;
-  if (technicalReport.readable && technicalReport.noiseFloorRms > 0.003 && technicalReport.rms > 0 && technicalReport.noiseFloorRms / technicalReport.rms > noiseRatioThreshold) {
+  const noiseRatio = technicalReport.readable && technicalReport.rms > 0 ? Number((technicalReport.noiseFloorRms / technicalReport.rms).toFixed(4)) : undefined;
+  const noiseFloorOverThreshold = technicalReport.readable && technicalReport.noiseFloorRms > 0.003 && technicalReport.rms > 0 && technicalReport.noiseFloorRms / technicalReport.rms > noiseRatioThreshold;
+  // The measurement is always reported, whichever tier it is; only the gating differs. A preview
+  // that never gets a finding still shows its ratio here, so this is a narrower gate, not a
+  // silently dropped check.
+  const noiseFloorReport = { renderTier: previewTier ? "preview" : "production_candidate", noiseFloorRms: technicalReport.noiseFloorRms, noiseToSignalRatio: noiseRatio, threshold: noiseRatioThreshold, overThreshold: noiseFloorOverThreshold, gated: noiseFloorOverThreshold && !previewTier };
+  if (noiseFloorOverThreshold && !previewTier) {
     const profileNote = options.profile === "solo_piano" ? " (solo piano profile uses a stricter 10% threshold)" : "";
     addFinding(findings, "high", "noise_floor", `Audible noise floor detected: noise-to-signal ratio is above ${Math.round(noiseRatioThreshold * 100)}%${profileNote}, likely from SoundFont hiss amplified by loudness normalization.`, "Use renderProfile='normalized' (single ffmpeg loudnorm, no PCM loudness stage) or renderProfile='clean_dry' with no normalization. Do not include room_ambience in the master chain for sparse solo piano.");
   }
@@ -2054,6 +2070,7 @@ function qualityForComposition(composition: Composition, options: { audio?: Buff
     targetMood: options.targetMood,
     technicalReport,
     loudnessReport: { peak: technicalReport.peak, rms: technicalReport.rms, estimatedLufs: technicalReport.estimatedLufs, dynamicRange: technicalReport.dynamicRange, target: "background-friendly, stable perceived loudness" },
+    noiseFloorReport,
     loopSeamReport: { checked: options.checkLoop, loopable: composition.loopable, seamClickProxy: technicalReport.loopSeamClickProxy, startNearZero: technicalReport.startNearZero, endNearZero: technicalReport.endNearZero },
     musicalityReport,
     sessionQualityReport,
@@ -5939,7 +5956,7 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "inspect_audio_quality", description: "Inspect generated audio/MIDI/session manifests for clipping, loudness, silence, harshness, loop seams, transition roughness, and background-music suitability.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, audioPath: { type: "string" }, compositionManifestPath: { type: "string" }, sessionManifestPath: { type: "string" }, useCase: { type: "string" }, checkLoop: { type: "boolean" }, targetMood: { type: "string" }, outputPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "inspect_audio_quality", description: "Inspect generated audio/MIDI/session manifests for clipping, loudness, silence, harshness, loop seams, transition roughness, and background-music suitability.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, audioPath: { type: "string" }, compositionManifestPath: { type: "string" }, sessionManifestPath: { type: "string" }, useCase: { type: "string" }, checkLoop: { type: "boolean" }, targetMood: { type: "string" }, renderTier: { type: "string", enum: ["preview", "production_candidate"], description: "production_candidate (default) applies the strict fail-closed noise-floor gate. Use preview for procedural render_midi_to_audio output, whose synthesis noise floor is inherent and not a production defect." }, outputPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: inspectAudioQualityInputSchema,
     handler: async (input, ctx) => {
@@ -5971,7 +5988,7 @@ export const musicWorkflowTools: ToolModule[] = [
       // Auto-detect solo_piano profile: all tracks resolve to "piano" and no drums/bass present.
       const trackInstrumentSet = new Set(Object.keys(composition.tracks).map((track) => canonicalInstrumentFromTrackKey(track) ?? track));
       const autoProfile: "solo_piano" | "full_ensemble" | undefined = trackInstrumentSet.size > 0 && [...trackInstrumentSet].every((inst) => inst === "piano" || inst === "electric_piano") ? "solo_piano" : undefined;
-      const report = qualityForComposition(composition, { audio, useCase: parsed.useCase, checkLoop: parsed.checkLoop, targetMood: parsed.targetMood, session, profile: autoProfile });
+      const report = qualityForComposition(composition, { audio, useCase: parsed.useCase, checkLoop: parsed.checkLoop, targetMood: parsed.targetMood, session, profile: autoProfile, renderTier: parsed.renderTier });
       const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(report, null, 2)}\n`);
       return { ok: report.ok, summary: `Audio QA found ${report.warnings.length} warning(s).`, jobId: parsed.projectId, artifacts: [file.path], structuredContent: report, logs: [JSON.stringify(report, null, 2)], errors: report.warnings };
     }
