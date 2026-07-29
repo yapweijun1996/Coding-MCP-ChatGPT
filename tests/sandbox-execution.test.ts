@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -134,9 +134,13 @@ test("cleanup-on-success returns artifact bytes inline instead of paths into the
     const runResult = await run!.handler({ sandboxId, command: "node", args: ["script.js"], collectArtifacts: ["result.txt"] }, ctx);
     assert.equal(runResult.ok, true);
 
-    // The workspace really is gone, and no returned path dangles.
-    await assert.rejects(access(path.join(ctx.artifactRoot, "sandboxes", sandboxId)));
-    assert.deepEqual(runResult.artifacts, []);
+    // The workspace really is gone, and every returned path still resolves.
+    const sandboxDir = path.join(ctx.artifactRoot, "sandboxes", sandboxId);
+    await assert.rejects(access(sandboxDir));
+    for (const artifactPath of runResult.artifacts) {
+      await access(artifactPath);
+      assert.ok(!artifactPath.startsWith(`${sandboxDir}${path.sep}`), `${artifactPath} must not point into the deleted workspace`);
+    }
 
     // The collected artifact is still recoverable by the caller.
     const payload = runResult.structuredContent as {
@@ -154,6 +158,35 @@ test("cleanup-on-success returns artifact bytes inline instead of paths into the
       truncated: false,
       omittedBytes: 0
     }]);
+
+    // Run history survives the cleanup: archived manifest, list, and report all still work.
+    const archived = path.join(ctx.artifactRoot, "sandboxes", `${sandboxId}.manifest.json`);
+    assert.equal((runResult.structuredContent as { archivedManifest: string }).archivedManifest, archived);
+    const archivedManifest = JSON.parse(await readFile(archived, "utf8")) as { sandboxId: string; removedAt?: string; runs: Array<{ artifacts: Array<{ path: string }> }> };
+    assert.equal(archivedManifest.sandboxId, sandboxId);
+    assert.ok(archivedManifest.removedAt, "archived manifest records when the workspace was removed");
+    assert.deepEqual(archivedManifest.runs[0]!.artifacts.map((artifact) => artifact.path), ["result.txt"]);
+
+    const list = getToolModule("list_sandbox_runs");
+    const listed = await list!.handler({ limit: 10 }, ctx);
+    const listPayload = listed.structuredContent as { sandboxes: Array<{ sandboxId: string; runCount: number }> };
+    assert.ok(listPayload.sandboxes.some((sandbox) => sandbox.sandboxId === sandboxId && sandbox.runCount === 1), "removed sandbox still listed");
+
+    const report = getToolModule("export_sandbox_report");
+    const reportResult = await report!.handler({ sandboxId }, ctx);
+    assert.equal(reportResult.ok, true);
+    const reportPath = (reportResult.structuredContent as { path: string }).path;
+    // The report goes to a sibling directory, never back inside the deleted workspace.
+    assert.ok(!reportPath.startsWith(`${sandboxDir}${path.sep}`), "report must not resurrect the workspace");
+    assert.match(await readFile(reportPath, "utf8"), /Workspace: removed at /);
+
+    // An explicit cleanup purges the archive too, so the sandbox can actually be forgotten.
+    const cleanup = getToolModule("cleanup_sandbox");
+    await cleanup!.handler({ sandboxId }, ctx);
+    await assert.rejects(access(archived));
+    const afterCleanup = await list!.handler({ limit: 10 }, ctx);
+    const afterPayload = afterCleanup.structuredContent as { sandboxes: Array<{ sandboxId: string }> };
+    assert.ok(!afterPayload.sandboxes.some((sandbox) => sandbox.sandboxId === sandboxId), "purged sandbox no longer listed");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -207,6 +240,70 @@ test("inline artifacts are bounded by maxOutputBytes and report what was omitted
   }
 });
 
+test("archiving prunes the oldest manifests past the 200 cap", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "sandbox-execution-prune-"));
+  try {
+    const ctx = toolContext(root);
+    const prepare = getToolModule("prepare_sandbox_workspace");
+    const run = getToolModule("run_sandboxed_command");
+    const list = getToolModule("list_sandbox_runs");
+    assert.ok(prepare);
+    assert.ok(run);
+
+    // Seed 201 archived manifests with explicit, strictly increasing mtimes so the prune
+    // order is deterministic. Oldest is stale_000, newest is stale_200.
+    const archiveDir = path.join(ctx.artifactRoot, "sandboxes");
+    await mkdir(archiveDir, { recursive: true });
+    const seeded: string[] = [];
+    for (let index = 0; index < 201; index += 1) {
+      const id = `sandbox_stale_${String(index).padStart(3, "0")}`;
+      const file = path.join(archiveDir, `${id}.manifest.json`);
+      await writeFile(file, JSON.stringify({
+        version: 1,
+        sandboxId: id,
+        profile: { kind: "code_script", title: id, timeoutMs: 1000, maxOutputBytes: 1000, maxArtifactBytes: 1000, cleanupPolicy: "cleanup_on_success", allowedCommands: ["node"] },
+        root: path.join(archiveDir, id),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        removedAt: "2026-01-01T00:00:00.000Z",
+        runs: []
+      }), "utf8");
+      const stamp = new Date(Date.UTC(2026, 0, 1) + index * 60000);
+      await utimes(file, stamp, stamp);
+      seeded.push(file);
+    }
+
+    const prepared = await prepare!.handler({
+      profile: { kind: "code_script", title: "Prune trigger", allowedCommands: ["node"], cleanupPolicy: "cleanup_on_success" },
+      files: [{ path: "script.js", content: "console.log('ok');\n" }]
+    }, ctx);
+    const sandboxId = (prepared.structuredContent as { sandboxId: string }).sandboxId;
+
+    const runResult = await run!.handler({ sandboxId, command: "node", args: ["script.js"] }, ctx);
+    assert.equal(runResult.ok, true);
+
+    // 201 seeded + 1 new = 202; the two oldest go, leaving exactly the cap.
+    const payload = runResult.structuredContent as { archivedManifest: string; prunedArchives: string[] };
+    assert.deepEqual(payload.prunedArchives.sort(), [seeded[0]!, seeded[1]!].sort());
+    assert.match(runResult.summary, /Pruned 2 archived manifest\(s\) past the 200 cap\./);
+    await assert.rejects(access(seeded[0]!));
+    await assert.rejects(access(seeded[1]!));
+    await access(seeded[2]!);
+    // The manifest just archived is never a prune candidate, even against older mtimes.
+    await access(payload.archivedManifest);
+
+    const remaining = (await readdir(archiveDir)).filter((name) => name.endsWith(".manifest.json"));
+    assert.equal(remaining.length, 200);
+
+    const listed = await list!.handler({ limit: 200 }, ctx);
+    const listPayload = listed.structuredContent as { sandboxes: Array<{ sandboxId: string }> };
+    assert.equal(listPayload.sandboxes.length, 200);
+    assert.ok(listPayload.sandboxes.some((sandbox) => sandbox.sandboxId === sandboxId));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("cleanup_always removes the workspace even when the run throws after the manifest is read", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "sandbox-execution-always-"));
   try {
@@ -227,6 +324,8 @@ test("cleanup_always removes the workspace even when the run throws after the ma
       /not allowed by sandbox profile/
     );
     await assert.rejects(access(path.join(ctx.artifactRoot, "sandboxes", sandboxId)));
+    // A sandbox that never completed a run must not leave an archived manifest behind.
+    await assert.rejects(access(path.join(ctx.artifactRoot, "sandboxes", `${sandboxId}.manifest.json`)));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

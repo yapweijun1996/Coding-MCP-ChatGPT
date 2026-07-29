@@ -78,6 +78,8 @@ interface SandboxManifest {
     stderr: string;
     artifacts: Array<{ path: string; size: number }>;
   }>;
+  /** Set when a cleanup policy deleted the workspace; the manifest then lives in the archive. */
+  removedAt?: string;
 }
 
 function sandboxesRoot(artifactRoot: string): string {
@@ -90,6 +92,20 @@ function sandboxRoot(artifactRoot: string, sandboxId: string): string {
 
 function manifestPath(root: string): string {
   return path.join(root, "sandbox-manifest.json");
+}
+
+const MANIFEST_ARCHIVE_SUFFIX = ".manifest.json";
+/** Upper bound on archived manifests; the oldest are pruned past this. */
+const MAX_ARCHIVED_MANIFESTS = 200;
+
+/** Manifest copy kept outside the workspace so cleanup policies do not erase run history. */
+function archivedManifestPath(artifactRoot: string, id: string): string {
+  return path.join(sandboxesRoot(artifactRoot), `${id}${MANIFEST_ARCHIVE_SUFFIX}`);
+}
+
+/** Reports for a removed workspace land here instead of resurrecting the deleted root. */
+function archivedReportRoot(artifactRoot: string, id: string): string {
+  return path.join(sandboxesRoot(artifactRoot), `${id}.reports`);
 }
 
 function sandboxId(): string {
@@ -125,6 +141,52 @@ async function readManifest(root: string): Promise<SandboxManifest> {
 
 async function writeManifest(manifest: SandboxManifest): Promise<void> {
   await atomicWrite(manifestPath(manifest.root), `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+function archivedSandboxId(fileName: string): string {
+  return fileName.slice(0, -MANIFEST_ARCHIVE_SUFFIX.length);
+}
+
+/**
+ * Cap the archive: cleanup policies never call cleanup_sandbox, so without this every run
+ * would leave a manifest behind forever and list_sandbox_runs would read them all on every
+ * call. Oldest-first by mtime, and `protect` (the manifest just archived) is always kept.
+ */
+async function pruneArchivedManifests(artifactRoot: string, keep: number, protect: string): Promise<string[]> {
+  const root = sandboxesRoot(artifactRoot);
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const names = entries.filter((entry) => entry.isFile() && entry.name.startsWith("sandbox_") && entry.name.endsWith(MANIFEST_ARCHIVE_SUFFIX)).map((entry) => path.join(root, entry.name));
+  if (names.length <= keep) return [];
+  const dated = await Promise.all(names.filter((file) => file !== protect).map(async (file) => {
+    const info = await stat(file).catch(() => undefined);
+    return { file, mtimeMs: info?.mtimeMs ?? 0 };
+  }));
+  // Newest first, name as a deterministic tiebreak when timestamps collide.
+  dated.sort((left, right) => right.mtimeMs - left.mtimeMs || right.file.localeCompare(left.file));
+  const stale = dated.slice(Math.max(keep - 1, 0));
+  for (const entry of stale) {
+    await rm(entry.file, { force: true });
+    await rm(archivedReportRoot(artifactRoot, archivedSandboxId(path.basename(entry.file))), { recursive: true, force: true });
+  }
+  return stale.map((entry) => entry.file);
+}
+
+/**
+ * Persist the manifest next to the workspace instead of inside it, for the cleanup paths
+ * where the workspace is about to be deleted. Writing it inside first would be a disk write
+ * whose only fate is `rm`, and the run would then vanish from list_sandbox_runs entirely.
+ */
+async function archiveManifest(artifactRoot: string, manifest: SandboxManifest): Promise<{ path: string; pruned: string[] }> {
+  const target = archivedManifestPath(artifactRoot, manifest.sandboxId);
+  await atomicWrite(target, `${JSON.stringify(manifest, null, 2)}\n`);
+  return { path: target, pruned: await pruneArchivedManifests(artifactRoot, MAX_ARCHIVED_MANIFESTS, target) };
+}
+
+/** Read a live workspace manifest, falling back to the archived copy of a removed workspace. */
+async function loadManifest(artifactRoot: string, id: string): Promise<SandboxManifest> {
+  const live = await readManifest(sandboxRoot(artifactRoot, id)).catch(() => undefined);
+  if (live) return live;
+  return JSON.parse(await readFile(archivedManifestPath(artifactRoot, id), "utf8")) as SandboxManifest;
 }
 
 function validateArgs(command: z.infer<typeof sandboxCommandSchema>, args: string[]) {
@@ -191,13 +253,19 @@ async function readArtifactsInline(root: string, artifacts: Array<{ path: string
 async function listManifests(artifactRoot: string, limit: number) {
   const root = sandboxesRoot(artifactRoot);
   const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
-  const manifests: SandboxManifest[] = [];
+  // Live workspaces first, so a re-prepared sandbox id wins over its archived predecessor.
+  const manifests = new Map<string, SandboxManifest>();
   for (const entry of entries) {
-    if (!entry.isDirectory() || !entry.name.startsWith("sandbox_")) continue;
+    if (!entry.isDirectory() || !entry.name.startsWith("sandbox_") || entry.name.includes(".")) continue;
     const manifest = await readManifest(path.join(root, entry.name)).catch(() => undefined);
-    if (manifest) manifests.push(manifest);
+    if (manifest) manifests.set(manifest.sandboxId, manifest);
   }
-  return manifests.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, limit);
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.startsWith("sandbox_") || !entry.name.endsWith(MANIFEST_ARCHIVE_SUFFIX)) continue;
+    const manifest = await readFile(path.join(root, entry.name), "utf8").then((raw) => JSON.parse(raw) as SandboxManifest).catch(() => undefined);
+    if (manifest && !manifests.has(manifest.sandboxId)) manifests.set(manifest.sandboxId, manifest);
+  }
+  return [...manifests.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, limit);
 }
 
 function renderReport(manifest: SandboxManifest) {
@@ -207,6 +275,7 @@ function renderReport(manifest: SandboxManifest) {
     `Kind: ${manifest.profile.kind}`,
     `Title: ${manifest.profile.title}`,
     `Cleanup policy: ${manifest.profile.cleanupPolicy}`,
+    `Workspace: ${manifest.removedAt ? `removed at ${manifest.removedAt} (artifacts were returned inline by the run)` : manifest.root}`,
     "",
     "## Runs",
     ...(manifest.runs.length ? manifest.runs.map((run) => `- ${run.id}: ${run.command} ${run.args.join(" ")} => ${run.ok ? "ok" : "failed"} exit=${run.exitCode} artifacts=${run.artifacts.map((artifact) => artifact.path).join(", ") || "none"}`) : ["- No runs recorded."]),
@@ -307,21 +376,31 @@ export const sandboxExecutionTools: ToolModule[] = [
         };
         manifest.runs.push(run);
         manifest.updatedAt = run.finishedAt;
-        await writeManifest(manifest);
         const removesWorkspace = (run.ok && manifest.profile.cleanupPolicy === "cleanup_on_success") || manifest.profile.cleanupPolicy === "cleanup_always";
-        // The workspace is about to disappear, so hand the artifact bytes back inline and
-        // report no on-disk paths rather than paths that no longer resolve.
+        // The workspace is about to disappear, so hand the artifact bytes back inline; the
+        // returned paths then point only at what outlives the rm, never into the deleted root.
         const collectedArtifacts = removesWorkspace ? await readArtifactsInline(root, artifacts, maxOutputBytes) : [];
+        let archivedManifest: string | undefined;
+        let prunedArchives: string[] = [];
         if (removesWorkspace) {
+          manifest.removedAt = run.finishedAt;
+          // Archive before deleting: the copy outside the workspace is what survives the rm,
+          // so list_sandbox_runs and export_sandbox_report still see this run.
+          const archived = await archiveManifest(ctx.artifactRoot, manifest);
+          archivedManifest = archived.path;
+          prunedArchives = archived.pruned;
           await rm(root, { recursive: true, force: true });
           cleaned = true;
+        } else {
+          await writeManifest(manifest);
         }
-        const cleanupNote = removesWorkspace ? ` Workspace removed by ${manifest.profile.cleanupPolicy}; collected artifacts returned inline.` : "";
+        const pruneNote = prunedArchives.length ? ` Pruned ${prunedArchives.length} archived manifest(s) past the ${MAX_ARCHIVED_MANIFESTS} cap.` : "";
+        const cleanupNote = removesWorkspace ? ` Workspace removed by ${manifest.profile.cleanupPolicy}; collected artifacts returned inline and run history archived.${pruneNote}` : "";
         return {
           ok: run.ok,
           summary: `Sandbox ${parsed.sandboxId} run ${run.ok ? "succeeded" : "failed"}.${cleanupNote}`,
-          artifacts: removesWorkspace ? [] : [manifestPath(root), ...artifacts.map((artifact) => path.join(root, artifact.path))],
-          structuredContent: { sandboxId: parsed.sandboxId, run, workspaceRemoved: removesWorkspace, collectedArtifacts },
+          artifacts: archivedManifest ? [archivedManifest] : [manifestPath(root), ...artifacts.map((artifact) => path.join(root, artifact.path))],
+          structuredContent: { sandboxId: parsed.sandboxId, run, workspaceRemoved: removesWorkspace, archivedManifest, prunedArchives, collectedArtifacts },
           logs: [run.stdout, run.stderr].filter(Boolean),
           errors: run.ok ? [] : [run.stderr || `exit code ${run.exitCode}`]
         };
@@ -351,7 +430,7 @@ export const sandboxExecutionTools: ToolModule[] = [
   {
     definition: {
       name: "cleanup_sandbox",
-      description: "Delete a prepared sandbox workspace and its artifacts.",
+      description: "Delete a prepared sandbox workspace, its artifacts, and any archived run history.",
       inputSchema: { type: "object", properties: { sandboxId: { type: "string" } }, required: ["sandboxId"], additionalProperties: false }
     },
     enabledByDefault: true,
@@ -359,7 +438,11 @@ export const sandboxExecutionTools: ToolModule[] = [
     handler: async (input, ctx) => {
       const parsed = cleanupSandboxInputSchema.parse(input);
       const root = sandboxRoot(ctx.artifactRoot, parsed.sandboxId);
+      // Purge the archived manifest and reports too, otherwise an explicit cleanup would
+      // leave the sandbox visible in list_sandbox_runs with no way to remove it.
       await rm(root, { recursive: true, force: true });
+      await rm(archivedManifestPath(ctx.artifactRoot, parsed.sandboxId), { force: true });
+      await rm(archivedReportRoot(ctx.artifactRoot, parsed.sandboxId), { recursive: true, force: true });
       return { ok: true, summary: `Cleaned up sandbox ${parsed.sandboxId}.`, artifacts: [], structuredContent: { sandboxId: parsed.sandboxId, removed: true }, logs: [], errors: [] };
     }
   },
@@ -373,12 +456,16 @@ export const sandboxExecutionTools: ToolModule[] = [
     schema: exportSandboxReportInputSchema,
     handler: async (input, ctx) => {
       const parsed = exportSandboxReportInputSchema.parse(input);
-      const root = sandboxRoot(ctx.artifactRoot, parsed.sandboxId);
-      const manifest = await readManifest(root);
+      const manifest = await loadManifest(ctx.artifactRoot, parsed.sandboxId);
       const markdown = renderReport(manifest);
-      const target = path.join(root, safeRelativePath(parsed.outputPath));
+      const relative = safeRelativePath(parsed.outputPath);
+      // A removed workspace still has an archived manifest; write its report to a sibling
+      // directory rather than recreating the workspace the cleanup policy just deleted.
+      const reportRoot = manifest.removedAt ? archivedReportRoot(ctx.artifactRoot, parsed.sandboxId) : sandboxRoot(ctx.artifactRoot, parsed.sandboxId);
+      const target = path.join(reportRoot, relative);
+      await mkdir(path.dirname(target), { recursive: true });
       await atomicWrite(target, markdown);
-      return { ok: true, summary: `Exported sandbox report for ${parsed.sandboxId}.`, artifacts: [target], structuredContent: { path: target, markdown }, logs: [markdown], errors: [] };
+      return { ok: true, summary: `Exported sandbox report for ${parsed.sandboxId}.`, artifacts: [target], structuredContent: { path: target, markdown, workspaceRemoved: Boolean(manifest.removedAt) }, logs: [markdown], errors: [] };
     }
   }
 ];
