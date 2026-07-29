@@ -182,13 +182,36 @@ Preferred professional path:
 3. For non-piano ensembles, use `install_free_soundfont_pack` for the v1 free GeneralUser GS candidate, or `discover_soundfont_packs` to inspect existing `.sf2`, `.sf3`, and `.sfz` assets. `install_free_soundfont_pack` now **auto-registers** the installed pack into `music/jazz-instrument-packs.json` as a `general_midi` pack and returns `autoRegistered`/`readyPackIds`, so you can render with the same pack id immediately — no separate `manage_jazz_instrument_packs` step is required for the free pack. A `general_midi` pack covers every instrument role (piano, cello, violin, strings, bass, drums...), so one GeneralUser GS install renders a full ensemble; `midiBuffer` emits the per-track Program Change events FluidSynth needs to voice each instrument correctly.
 4. For your own/third-party packs, register a commercial-safe SoundFont or SFZ pack with `manage_jazz_instrument_packs`, including source URL, license text path, README path, attribution, SHA-256, redistribution notes, `productionUseApproved`, and `qualityTier`.
 5. Use `edit_midi` only if arrangement cleanup is needed.
-   - For multi-instrument requests (e.g. a cello + piano duet), run `validate_music_ensemble` with `requiredInstruments` before rendering. It fails closed when any requested instrument has zero notes, when the instruments never play simultaneously (a sequential handoff instead of a real ensemble), or when a long single-instrument stretch is not marked as an intentional solo (pass `soloInstruments`). It reports per-track note count and first/last note time so misleading output is caught before publishing. The same gate is available inline on `compose_edit_midi` via the optional `ensembleRequirement` field, which flips the result to `ok:false` (instead of a misleading success) when the requirement is not met; omit it to keep default/solo behaviour.
+   - For multi-instrument requests (e.g. a cello + piano duet), run `validate_music_ensemble` with `requiredInstruments` before rendering. It fails closed when any requested instrument has zero notes, when the instruments never play simultaneously (a sequential handoff instead of a real ensemble), or when a long single-instrument stretch is not marked as an intentional solo (pass `soloInstruments`). It reports per-track note count and first/last note time so misleading output is caught before publishing. The same gate is available inline on `compose_edit_midi` via the optional `ensembleRequirement` field, which flips the result to `ok:false` (instead of a misleading success) when the requirement is not met; omit it to keep default/solo behaviour. Independently of that opt-in gate, `compose_edit_midi` always returns `ensembleQa` (per-instrument note count, GM program, first-note time, overlap), so a missing or late voice is visible without opting in.
 6. Run `check_music_render_environment` to detect `sfizz_render`, FluidSynth, FFmpeg, SoX, and available `.sf2`/`.sf3`/`.sfz` candidates.
 7. Render the complete V1 handoff with `render_production_music`; it creates MIDI stems, rendered WAV stems, a stem-mixed `music/production.wav`, FFmpeg-encoded `music/preview.mp3`, `LICENSES.md`, a JSON pipeline report, and a page with Play Preview / Download WAV / Download MP3 controls.
-8. Run `inspect_audio_quality`.
+8. Run `inspect_audio_quality`, passing `renderReportPath` so the render tier comes from the renderer's own report (see the noise-floor note below) rather than from a claim in the call.
 9. Export with `export_music_project` when an additional package manifest/playlist handoff is needed.
 
 `render_production_music` is the preferred V1 production path. It requires a registered `production_candidate` instrument pack, an offline renderer (`sfizz_render` for SFZ or FluidSynth for `.sf2`/`.sf3`), and FFmpeg for MP3 export. If those requirements are missing, it returns `preview_only` and the user-facing label must be “MIDI preview only. Not production audio.” `render_midi_with_soundfont` remains the lower-level production-candidate renderer for WAV/stem creation. `render_midi_to_audio` is the built-in procedural ("WebAudio-style") synth and is **fail-closed**: it refuses by default and only emits audio when called with `acknowledgePreviewOnly: true`, producing an explicitly throwaway, non-deliverable scratch preview. Without that flag it returns `ok:false` and points to `install_free_soundfont_pack` → `render_production_music`/`render_midi_with_soundfont`. The `extend_music_arrangement` / `extend_original_music_arrangement` tools follow the same rule: with `renderAudio: true` but no `acknowledgePreviewOnly`, they skip the procedural preview and return a `previewWarning` instead of writing fake audio. Procedural output must never be used for finished music, professional music, public listening demos, or production handoff pages.
+
+### Noise-floor gate and render tiers
+
+`inspect_audio_quality` fails closed on an audible noise floor: noise-to-signal above 15%, or above
+10% when it auto-detects a solo-piano composition. That gate is meant for audio that claims to be
+production audio — SoundFont hiss amplified by loudness normalization — and it is wrong for the
+procedural preview path, whose synthesis floor is inherent and involves no SoundFont at all.
+
+The tier is therefore taken from the renderer, not the caller. Pass `renderReportPath` and the
+report's `qualityTier` decides: `preview_only` (what `render_midi_to_audio` writes) relaxes the gate,
+and anything else keeps it strict. Only an explicit `preview_only` downgrades — a missing,
+unreadable, or unrecognised tier falls through to the strict path, so a malformed report is not a
+bypass. `renderTier` remains as a fallback for callers with no report to point at, defaulting to
+`production_candidate`, and is ignored when a report is supplied.
+
+The measurement is reported either way, in `noiseFloorReport`: `{ renderTier, renderTierSource
+("render_report" | "declared" | "default"), noiseFloorRms, noiseToSignalRatio, threshold,
+overThreshold, gated }`. A preview still shows its ratio — the gate is narrowed, not dropped — and
+`renderTierSource` makes a renderer-backed verdict distinguishable from a caller's claim.
+
+Requesting `pads` or `strings` from `compose_edit_midi` routes to the generated `pad` track. Ask for
+a voice the composition cannot produce and it materialises as an empty track, which
+`render_production_music` then rejects as a silent stem rather than publishing it.
 
 Instrument pack roles cover `realistic_piano`, `upright_bass`, `brush_drums`, `room_ambience`, plus `cello`, `violin`, and `strings` as first-class per-instrument roles, and `chamber_ensemble` and `orchestral_sketch` as registerable ensemble roles. `cello`, `violin`, and `strings` each route from their own track names and render to their own stem, so a cello + piano duet produces a dedicated `cello.wav` next to `piano.wav` and the mixed `production.wav` — cello/violin/strings are no longer folded into the pad/ambience stem. `chamber_ensemble` and `orchestral_sketch` packs can be registered and selected via `instrumentPackMap`, but no track currently auto-routes to them (they are reserved for explicit ensemble mapping); orchestral/chamber arrangements today render through the `strings`/`cello`/`violin` roles. Register a pack per required role (use `instrumentPackMap`, e.g. `{ "realistic_piano": "...", "cello": "..." }`); a composition needing a role with no ready pack fails closed on coverage. Every rendered stem is RMS-validated (`stemValidations` in the report); `render_production_music` refuses to publish if any requested stem is effectively silent, so a missing/empty instrument can never ship as a misleading mix.
 
@@ -197,6 +220,47 @@ GeneralUser GS is the v1 built-in free SoundFont candidate and uses license key 
 For V1 piano rendering, prefer a registered `realistic_piano` SFZ/SoundFont such as a license-cleared Salamander Grand Piano or FreePats-style piano pack. Do not redistribute raw sample libraries unless the license explicitly allows redistribution. DecentSampler or Decent Samples libraries may be referenced only when source URL, license text, README, attribution, redistribution notes, and commercial-use flags are stored in project metadata and `LICENSES.md`.
 
 Do not commit large `.sf2`, `.sf3`, SFZ sample sets, or other instrument binaries into git. Store local packs in project data or a configured workspace path such as `.music-packs/`, then register metadata and attribution before rendering or export.
+
+## Sandbox execution workflow
+
+Two calls to run code: `prepare_sandbox_workspace` (profile + input files) then
+`run_sandboxed_command`. The runtime is Node 24 and Python 3.12, no shell, with the profile's
+timeout and output limits enforced.
+
+**Cleanup fires only at the end of a run, and only for the policies that ask for it.** The default
+policy is `cleanup_on_success`, so:
+
+| profile `cleanupPolicy` | outcome | workspace |
+| --- | --- | --- |
+| `keep` | any | kept |
+| `cleanup_on_success` | run succeeded | removed |
+| `cleanup_on_success` | run failed | **kept on purpose**, so you can inspect it |
+| `cleanup_always` | run finished or threw | removed |
+| `cleanup_always` | never run | kept |
+
+Call `cleanup_sandbox` for every row that says "kept" — a failed run is the normal case when you are
+using a sandbox to find out whether code works, so this is not a rare path.
+
+**Collected artifacts survive cleanup.** When a policy removes the workspace, `run_sandboxed_command`
+reads the files named in `collectArtifacts` *before* deleting and returns their contents in
+`structuredContent.collectedArtifacts` — `{ path, size, encoding: "utf8" | "base64", content,
+truncated, omittedBytes }`. The total inlined bytes are capped by `maxOutputBytes` (base64 counted
+after expansion), and anything cut reports `truncated` plus `omittedBytes` rather than being dropped
+silently. Use `cleanupPolicy: "keep"` when you need the files on disk, or when they are larger than
+that budget. On the cleanup path the returned `artifacts` array contains no paths into the deleted
+workspace.
+
+**Run history outlives the workspace.** Before deleting, the manifest is archived to
+`<artifactRoot>/sandboxes/<sandboxId>.manifest.json` with a `removedAt` stamp, so a cleaned-up run
+still appears in `list_sandbox_runs` and can still be exported with `export_sandbox_report` (whose
+output then lands in a sibling `<sandboxId>.reports/` directory rather than recreating the deleted
+root). `cleanup_sandbox` purges the archive and reports too, so an explicit cleanup really forgets
+the sandbox.
+
+The archive is capped at **200 manifests** — the same as `list_sandbox_runs`' maximum `limit`, so one
+call can always page the whole archive. Past the cap the oldest are pruned by mtime and reported in
+the run summary and `structuredContent.prunedArchives`. This is a retention policy: run history
+beyond the 200 most recently archived sandboxes is deleted permanently.
 
 ## Refactor hint workflow
 

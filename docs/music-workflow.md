@@ -475,5 +475,8 @@ There is no objective metric for "is the music good," so check the slice that *i
 - **`inspect_audio_quality`** — treat `productionSafe`, `loopSeamClickProxy`/comb (≈0 = no phase smearing),
   `harshHighFrequencyProxy`, `mechanicalScore` (≈0 = human), `noiseFloorRms`, `dynamicRange` as the ears you
   don't have. A `silenceRatio` spike at the *start* means a section went inaudible (gotcha 3/4), not "it's fine."
+  Pass `renderReportPath` so the render tier comes from the renderer's `qualityTier` stamp: the noise-floor
+  gate blocks production renders but not `preview_only` output, whose synthesis floor is inherent. Read
+  `noiseFloorReport.renderTierSource` to tell a renderer-backed verdict from a caller's `renderTier` claim.
 - **Ritard check** — if you wrote tempo-slowdown meta events, the rendered duration must exceed `bars×60/BPM`.
 - **ebur128** for authoritative integrated LUFS / true-peak / LRA (the tool's `estimatedLufs` is a rough proxy).
