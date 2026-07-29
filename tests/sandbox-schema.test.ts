@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { getToolModule } from "../src/mcp/registry.js";
+import { callTool } from "../src/mcp/router.js";
 import { skillRegistry } from "../src/skills/registry.js";
 
 interface JsonSchemaNode {
@@ -102,8 +106,17 @@ function zodRequiredFields(name: string): string[] {
   return Object.entries(shape!).filter(([, field]) => !field.isOptional()).map(([key]) => key).sort();
 }
 
+const sandboxToolNames = [
+  "create_sandbox_profile",
+  "prepare_sandbox_workspace",
+  "run_sandboxed_command",
+  "list_sandbox_runs",
+  "cleanup_sandbox",
+  "export_sandbox_report"
+];
+
 test("sandbox tools: every zod-required field is also required in the JSON-Schema", () => {
-  for (const name of ["create_sandbox_profile", "prepare_sandbox_workspace", "run_sandboxed_command"]) {
+  for (const name of sandboxToolNames) {
     const schema = inputSchemaOf(name);
     const advertised = [...(schema.required ?? [])].sort();
     assert.deepEqual(advertised, zodRequiredFields(name), `${name}: JSON-Schema required[] must match zod's non-optional fields`);
@@ -127,6 +140,8 @@ test("sandbox tools: integer-constrained fields are advertised as integer, not n
     assert.equal(run.properties?.[field]?.type, "integer", `run_sandboxed_command.${field}`);
   }
 
+  assert.equal(inputSchemaOf("list_sandbox_runs").properties?.limit?.type, "integer", "list_sandbox_runs.limit");
+
   // Proof the distinction is load-bearing: a float is what "number" would have invited.
   assert.throws(
     () => zodParse("run_sandboxed_command", { sandboxId: "sandbox_abc123", command: "node", timeoutMs: 1500.5 }),
@@ -140,4 +155,50 @@ test("sandbox-execution skill documents the two-call spike recipe", () => {
   assert.match(pack!.protocolMarkdown, /Quick logic spike/);
   assert.ok(pack!.toolNames.includes("prepare_sandbox_workspace"));
   assert.ok(pack!.toolNames.includes("run_sandboxed_command"));
+});
+
+// Behavioural, not schema — but it belongs with the others: a description that misstates
+// behaviour misleads the agent exactly as badly as a missing enum. cleanup_sandbox was
+// documented as "only needed for cleanupPolicy 'keep'", which is wrong in the two cases
+// pinned below; believing it leaks a sandbox on every failed run.
+test("cleanup_sandbox's description matches when cleanup actually happens", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "sandbox-cleanup-"));
+  const ctx = {
+    publicBaseUrl: "https://example.test",
+    workspaceRoot: path.join(root, "workspace"),
+    commandTimeoutMs: 30000,
+    shareRoot: path.join(root, "shares"),
+    artifactRoot: path.join(root, "artifacts"),
+    feedbackRoot: path.join(root, "feedback"),
+    projectRoot: path.join(root, "projects"),
+    clientId: "test-client"
+  } as never;
+  const sandboxDir = (id: string) => path.join(root, "artifacts", "sandboxes", id);
+  const exists = async (target: string) => Boolean(await stat(target).catch(() => null));
+
+  async function prepare(title: string, cleanupPolicy: string, files?: Array<{ path: string; content: string }>): Promise<string> {
+    const result = await callTool("prepare_sandbox_workspace", { profile: { kind: "experiment", title, cleanupPolicy }, ...(files ? { files } : {}) }, ctx);
+    assert.equal(result.ok, true, `prepare ${title}`);
+    return (result.structuredContent as { sandboxId: string }).sandboxId;
+  }
+
+  try {
+    const passing = await prepare("passes", "cleanup_on_success", [{ path: "fine.js", content: "console.log('ok');" }]);
+    await callTool("run_sandboxed_command", { sandboxId: passing, command: "node", args: ["fine.js"] }, ctx);
+    assert.equal(await exists(sandboxDir(passing)), false, "cleanup_on_success removes the sandbox after a SUCCESSFUL run");
+
+    const failing = await prepare("fails", "cleanup_on_success", [{ path: "boom.js", content: "process.exit(3);" }]);
+    const failed = await callTool("run_sandboxed_command", { sandboxId: failing, command: "node", args: ["boom.js"] }, ctx);
+    assert.equal(failed.ok, false, "the run really did fail");
+    assert.equal(await exists(sandboxDir(failing)), true, "a FAILED run is kept on purpose — cleanup_sandbox is required here");
+
+    const neverRun = await prepare("never run", "cleanup_always");
+    assert.equal(await exists(sandboxDir(neverRun)), true, "cleanup only fires at the end of a run, so an unrun sandbox persists");
+
+    const description = getToolModule("cleanup_sandbox")?.definition.description ?? "";
+    assert.match(description, /failed/i, "the description must warn that failed runs are not auto-cleaned");
+    assert.match(description, /never run|prepared but never/i, "the description must warn that an unrun sandbox persists");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

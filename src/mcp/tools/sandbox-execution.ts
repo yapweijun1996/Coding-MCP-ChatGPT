@@ -344,7 +344,7 @@ export const sandboxExecutionTools: ToolModule[] = [
     definition: {
       name: "list_sandbox_runs",
       description: "List recent sandbox manifests with profile, status, run count, and latest run metadata.",
-      inputSchema: { type: "object", properties: { limit: { type: "number" } }, additionalProperties: false }
+      inputSchema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 200, description: "Max manifests to return, newest first. Defaults to 50." } }, additionalProperties: false }
     },
     enabledByDefault: true,
     schema: listSandboxRunsInputSchema,
@@ -358,8 +358,8 @@ export const sandboxExecutionTools: ToolModule[] = [
   {
     definition: {
       name: "cleanup_sandbox",
-      description: "Delete a prepared sandbox workspace and its artifacts.",
-      inputSchema: { type: "object", properties: { sandboxId: { type: "string" } }, required: ["sandboxId"], additionalProperties: false }
+      description: "Delete a prepared sandbox workspace and its artifacts. Automatic cleanup only happens at the end of a run, so call this when: cleanupPolicy is 'keep'; or cleanupPolicy is 'cleanup_on_success' and the run failed (failed runs are kept on purpose so you can inspect them); or the sandbox was prepared but never run.",
+      inputSchema: { type: "object", properties: { sandboxId: sandboxIdProperty }, required: ["sandboxId"], additionalProperties: false }
     },
     enabledByDefault: true,
     schema: cleanupSandboxInputSchema,
@@ -374,7 +374,7 @@ export const sandboxExecutionTools: ToolModule[] = [
     definition: {
       name: "export_sandbox_report",
       description: "Export a Markdown report for a sandbox manifest with profile, runs, exit codes, and artifact references.",
-      inputSchema: { type: "object", properties: { sandboxId: { type: "string" }, outputPath: { type: "string" } }, required: ["sandboxId"], additionalProperties: false }
+      inputSchema: { type: "object", properties: { sandboxId: sandboxIdProperty, outputPath: { type: "string", minLength: 1, maxLength: 240, description: "Relative path inside the sandbox to write the Markdown report to. Defaults to 'sandbox-report.md'." } }, required: ["sandboxId"], additionalProperties: false }
     },
     enabledByDefault: true,
     schema: exportSandboxReportInputSchema,
