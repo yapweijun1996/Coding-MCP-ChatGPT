@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -149,6 +150,44 @@ async function collectArtifacts(root: string, paths: string[], maxArtifactBytes:
   return artifacts;
 }
 
+interface InlineArtifact {
+  path: string;
+  size: number;
+  encoding: "utf8" | "base64";
+  content: string;
+  truncated: boolean;
+  omittedBytes: number;
+}
+
+/**
+ * Read collected artifacts into memory before the workspace is deleted, so a cleanup
+ * policy does not destroy the very files the caller asked for. `budgetBytes` caps the
+ * total raw bytes inlined across all artifacts; anything beyond it is reported as
+ * truncated rather than silently dropped.
+ */
+async function readArtifactsInline(root: string, artifacts: Array<{ path: string; size: number }>, budgetBytes: number): Promise<InlineArtifact[]> {
+  const inlined: InlineArtifact[] = [];
+  let remaining = Math.max(budgetBytes, 0);
+  for (const artifact of artifacts) {
+    const buffer = await readFile(resolveInside(root, artifact.path)).catch(() => undefined);
+    if (!buffer) continue;
+    const encoding: "utf8" | "base64" = isUtf8(buffer) && !buffer.includes(0) ? "utf8" : "base64";
+    // base64 inflates 4/3, so spend the byte budget on the encoded form, not the raw bytes.
+    const affordableRawBytes = encoding === "utf8" ? remaining : Math.floor(remaining / 4) * 3;
+    const slice = buffer.subarray(0, Math.min(buffer.byteLength, affordableRawBytes));
+    inlined.push({
+      path: artifact.path,
+      size: buffer.byteLength,
+      encoding,
+      content: slice.toString(encoding),
+      truncated: slice.byteLength < buffer.byteLength,
+      omittedBytes: buffer.byteLength - slice.byteLength
+    });
+    remaining = Math.max(remaining - (encoding === "utf8" ? slice.byteLength : Math.ceil(slice.byteLength / 3) * 4), 0);
+  }
+  return inlined;
+}
+
 async function listManifests(artifactRoot: string, limit: number) {
   const root = sandboxesRoot(artifactRoot);
   const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
@@ -225,50 +264,73 @@ export const sandboxExecutionTools: ToolModule[] = [
     handler: async (input, ctx) => {
       const parsed = runSandboxedCommandInputSchema.parse(input);
       const root = sandboxRoot(ctx.artifactRoot, parsed.sandboxId);
+      // A failure before this point leaves the workspace on disk on purpose: the cleanup
+      // policy is unknown until the manifest is read, and cleanup_sandbox can remove it.
       const manifest = await readManifest(root);
-      if (!manifest.profile.allowedCommands.includes(parsed.command)) throw new Error(`Command ${parsed.command} is not allowed by sandbox profile.`);
-      validateArgs(parsed.command, parsed.args);
-      const cwd = resolveInside(root, parsed.cwd);
-      const timeoutMs = parsed.timeoutMs ?? manifest.profile.timeoutMs;
-      const maxOutputBytes = parsed.maxOutputBytes ?? manifest.profile.maxOutputBytes;
-      const startedAt = new Date().toISOString();
-      let stdout = "";
-      let stderr = "";
-      let exitCode: number | null = 0;
-      let timedOut = false;
+      let cleaned = false;
       try {
-        const result = await execFileAsync(parsed.command, parsed.args, { cwd, timeout: timeoutMs, maxBuffer: maxOutputBytes * 2, env: childEnv() });
-        stdout = result.stdout;
-        stderr = result.stderr;
-      } catch (error) {
-        const err = error as NodeJS.ErrnoException & { stdout?: unknown; stderr?: unknown; code?: unknown; killed?: boolean };
-        stdout = typeof err.stdout === "string" ? err.stdout : "";
-        stderr = typeof err.stderr === "string" ? err.stderr : (error instanceof Error ? error.message : "Unknown sandbox execution error.");
-        exitCode = typeof err.code === "number" ? err.code : null;
-        timedOut = Boolean(err.killed) || /timeout/i.test(String(err.message));
+        if (!manifest.profile.allowedCommands.includes(parsed.command)) throw new Error(`Command ${parsed.command} is not allowed by sandbox profile.`);
+        validateArgs(parsed.command, parsed.args);
+        const cwd = resolveInside(root, parsed.cwd);
+        const timeoutMs = parsed.timeoutMs ?? manifest.profile.timeoutMs;
+        const maxOutputBytes = parsed.maxOutputBytes ?? manifest.profile.maxOutputBytes;
+        const startedAt = new Date().toISOString();
+        let stdout = "";
+        let stderr = "";
+        let exitCode: number | null = 0;
+        let timedOut = false;
+        try {
+          const result = await execFileAsync(parsed.command, parsed.args, { cwd, timeout: timeoutMs, maxBuffer: maxOutputBytes * 2, env: childEnv() });
+          stdout = result.stdout;
+          stderr = result.stderr;
+        } catch (error) {
+          const err = error as NodeJS.ErrnoException & { stdout?: unknown; stderr?: unknown; code?: unknown; killed?: boolean };
+          stdout = typeof err.stdout === "string" ? err.stdout : "";
+          stderr = typeof err.stderr === "string" ? err.stderr : (error instanceof Error ? error.message : "Unknown sandbox execution error.");
+          exitCode = typeof err.code === "number" ? err.code : null;
+          timedOut = Boolean(err.killed) || /timeout/i.test(String(err.message));
+        }
+        const artifacts = await collectArtifacts(root, parsed.collectArtifacts, manifest.profile.maxArtifactBytes);
+        const run = {
+          id: `run_${manifest.runs.length + 1}`,
+          command: parsed.command,
+          args: parsed.args,
+          cwd: path.relative(root, cwd) || ".",
+          exitCode,
+          ok: exitCode === 0 && !timedOut,
+          timedOut,
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          stdout: trim(stdout, maxOutputBytes),
+          stderr: trim(stderr, maxOutputBytes),
+          artifacts
+        };
+        manifest.runs.push(run);
+        manifest.updatedAt = run.finishedAt;
+        await writeManifest(manifest);
+        const removesWorkspace = (run.ok && manifest.profile.cleanupPolicy === "cleanup_on_success") || manifest.profile.cleanupPolicy === "cleanup_always";
+        // The workspace is about to disappear, so hand the artifact bytes back inline and
+        // report no on-disk paths rather than paths that no longer resolve.
+        const collectedArtifacts = removesWorkspace ? await readArtifactsInline(root, artifacts, maxOutputBytes) : [];
+        if (removesWorkspace) {
+          await rm(root, { recursive: true, force: true });
+          cleaned = true;
+        }
+        const cleanupNote = removesWorkspace ? ` Workspace removed by ${manifest.profile.cleanupPolicy}; collected artifacts returned inline.` : "";
+        return {
+          ok: run.ok,
+          summary: `Sandbox ${parsed.sandboxId} run ${run.ok ? "succeeded" : "failed"}.${cleanupNote}`,
+          artifacts: removesWorkspace ? [] : [manifestPath(root), ...artifacts.map((artifact) => path.join(root, artifact.path))],
+          structuredContent: { sandboxId: parsed.sandboxId, run, workspaceRemoved: removesWorkspace, collectedArtifacts },
+          logs: [run.stdout, run.stderr].filter(Boolean),
+          errors: run.ok ? [] : [run.stderr || `exit code ${run.exitCode}`]
+        };
+      } finally {
+        // cleanup_always must hold even when the run throws before the normal cleanup.
+        if (!cleaned && manifest.profile.cleanupPolicy === "cleanup_always") {
+          await rm(root, { recursive: true, force: true }).catch(() => {});
+        }
       }
-      const artifacts = await collectArtifacts(root, parsed.collectArtifacts, manifest.profile.maxArtifactBytes);
-      const run = {
-        id: `run_${manifest.runs.length + 1}`,
-        command: parsed.command,
-        args: parsed.args,
-        cwd: path.relative(root, cwd) || ".",
-        exitCode,
-        ok: exitCode === 0 && !timedOut,
-        timedOut,
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        stdout: trim(stdout, maxOutputBytes),
-        stderr: trim(stderr, maxOutputBytes),
-        artifacts
-      };
-      manifest.runs.push(run);
-      manifest.updatedAt = run.finishedAt;
-      await writeManifest(manifest);
-      if ((run.ok && manifest.profile.cleanupPolicy === "cleanup_on_success") || manifest.profile.cleanupPolicy === "cleanup_always") {
-        await rm(root, { recursive: true, force: true });
-      }
-      return { ok: run.ok, summary: `Sandbox ${parsed.sandboxId} run ${run.ok ? "succeeded" : "failed"}.`, artifacts: [manifestPath(root), ...artifacts.map((artifact) => path.join(root, artifact.path))], structuredContent: { sandboxId: parsed.sandboxId, run }, logs: [run.stdout, run.stderr].filter(Boolean), errors: run.ok ? [] : [run.stderr || `exit code ${run.exitCode}`] };
     }
   },
   {
