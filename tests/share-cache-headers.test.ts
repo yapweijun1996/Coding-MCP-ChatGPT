@@ -17,20 +17,20 @@ test("public shares must revalidate (no stale republish window)", () => {
   // anyone_with_link, access-gated route
   const a = fakeRes();
   setShareCacheHeaders(a, "anyone_with_link", false);
-  assert.equal((a as any).headers["Cache-Control"], "public, no-cache");
+  assert.equal(a.headers["Cache-Control"], "public, no-cache");
 
   // public route (homepage etc.) regardless of shareAccess
   const b = fakeRes();
   setShareCacheHeaders(b, "private", true);
-  assert.equal((b as any).headers["Cache-Control"], "public, no-cache");
+  assert.equal(b.headers["Cache-Control"], "public, no-cache");
 
   // Regression guard: the old policy let republished content go stale for up to 24h.
-  assert.ok(!/(max-age=\d|stale-while-revalidate)/.test((a as any).headers["Cache-Control"]));
+  assert.ok(!/(max-age=\d|stale-while-revalidate)/.test(a.headers["Cache-Control"]));
 });
 
 test("private shares are never cached", () => {
   const r = fakeRes();
   setShareCacheHeaders(r, "private", false);
-  assert.equal((r as any).headers["Cache-Control"], "private, no-store");
-  assert.equal((r as any).headers["Vary"], "Cookie");
+  assert.equal(r.headers["Cache-Control"], "private, no-store");
+  assert.equal(r.headers["Vary"], "Cookie");
 });

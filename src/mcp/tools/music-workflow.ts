@@ -16,12 +16,10 @@ import {
   keyNameFromFifths,
   limitWav,
   normalizeWav,
-  parsePcmWav,
   sha256Hex,
   slugifyMusicExportPart,
   varLen,
-  wavAnalysis,
-  type PcmWavInfo
+  wavAnalysis
 } from "./music-workflow-utils.js";
 
 const execFileAsync = promisify(execFile);
