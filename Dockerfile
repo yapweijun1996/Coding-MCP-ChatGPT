@@ -120,7 +120,15 @@ EXPOSE 6859
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:' + (process.env.PORT || '6859') + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 
-# xvfb-run gives every process a real DISPLAY. Only agoda_search_hotels launches Chromium
-# non-headless (Agoda's bot mitigation blocks headless Chromium there); every other browser
-# tool in this image still launches headless and is unaffected by the wrapper being present.
-CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1280x1024x24", "node", "dist/server.js"]
+# The server needs a real DISPLAY: only agoda_search_hotels launches Chromium non-headless
+# (Agoda's bot mitigation blocks headless Chromium there); every other browser tool in this
+# image launches headless and does not care.
+#
+# Xvfb is started explicitly rather than via `xvfb-run`. In this image xvfb-run starts the X
+# server but never execs COMMAND when the container has no TTY — verified by running
+# `xvfb-run --auto-servernum sh -c 'echo MARKER; touch /tmp/ran_marker'` in a one-off
+# container: zero output, no marker file, exit 0. Under `docker run -d` that means node never
+# starts, the container sits there with only the wrapper and Xvfb alive, and the healthcheck
+# fails forever with no logs to explain it. `exec` keeps node as PID 1 so it still receives
+# SIGTERM for the graceful shutdown path.
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp & export DISPLAY=:99; exec node dist/server.js"]
