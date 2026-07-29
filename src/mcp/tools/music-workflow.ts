@@ -407,9 +407,12 @@ const inspectAudioQualityInputSchema = z.object({
   useCase: z.string().min(1).max(240).optional().default("background music"),
   checkLoop: z.boolean().optional().default(true),
   targetMood: z.string().min(1).max(240).optional(),
-  // Defaults to production_candidate so anything that does not declare itself a preview keeps the
-  // strict, fail-closed noise-floor gate.
-  renderTier: z.enum(["preview", "production_candidate"]).optional().default("production_candidate"),
+  // Render report from the renderer that produced audioPath. Its qualityTier stamp outranks the
+  // renderTier below, so the tier is evidence from the renderer rather than a caller's claim.
+  renderReportPath: z.string().min(1).max(240).optional(),
+  // Fallback when no render report is available. Absent means production_candidate: anything that
+  // cannot show it is a preview keeps the strict, fail-closed noise-floor gate.
+  renderTier: z.enum(["preview", "production_candidate"]).optional(),
   outputPath: z.string().min(1).max(240).optional().default("music/audio-quality-report.json")
 }).refine((value) => Boolean(value.audioPath || value.compositionManifestPath || value.sessionManifestPath), { message: "audioPath, compositionManifestPath, or sessionManifestPath is required." });
 
@@ -1983,7 +1986,20 @@ function sessionQuality(session?: Record<string, unknown>) {
   };
 }
 
-function qualityForComposition(composition: Composition, options: { audio?: Buffer; useCase: string; checkLoop: boolean; targetMood?: string; session?: Record<string, unknown>; profile?: "solo_piano" | "full_ensemble"; renderTier?: "preview" | "production_candidate" }) {
+/**
+ * Decide the render tier from the renderer's own report instead of the caller's word.
+ * Only an explicit preview_only stamp downgrades the gate; an unreadable, missing, or
+ * unrecognised tier falls through to the strict production path.
+ */
+function renderTierFromReport(report?: Record<string, unknown>): "preview" | "production_candidate" | undefined {
+  if (!report) return undefined;
+  const nested = report.renderReport as Record<string, unknown> | undefined;
+  const tier = report.qualityTier ?? nested?.qualityTier;
+  if (tier === undefined) return undefined;
+  return tier === "preview_only" ? "preview" : "production_candidate";
+}
+
+function qualityForComposition(composition: Composition, options: { audio?: Buffer; useCase: string; checkLoop: boolean; targetMood?: string; session?: Record<string, unknown>; profile?: "solo_piano" | "full_ensemble"; renderTier?: "preview" | "production_candidate"; renderTierSource?: "render_report" | "declared" | "default" }) {
   const warnings: string[] = [];
   const findings: AudioFinding[] = [];
   const allNotes = Object.values(composition.tracks).flat();
@@ -2018,7 +2034,7 @@ function qualityForComposition(composition: Composition, options: { audio?: Buff
   // passages carry persistent hiss (typical with Salamander/SoundFont renders after aggressive
   // loudnorm boost). Block as high so productionSafe=false.
   //
-  // This gate only makes sense for audio that claims to be production audio. render_midi_to_audio
+  // This gate only makes sense for audio that is production audio. render_midi_to_audio
   // is a procedural preview renderer — it demands acknowledgePreviewOnly and its own status label
   // is "MIDI preview only. Not production audio." — so its inherent synthesis floor is not a
   // defect to block on, and the SoundFont attribution above would be simply wrong for it. Preview
@@ -2030,7 +2046,8 @@ function qualityForComposition(composition: Composition, options: { audio?: Buff
   // The measurement is always reported, whichever tier it is; only the gating differs. A preview
   // that never gets a finding still shows its ratio here, so this is a narrower gate, not a
   // silently dropped check.
-  const noiseFloorReport = { renderTier: previewTier ? "preview" : "production_candidate", noiseFloorRms: technicalReport.noiseFloorRms, noiseToSignalRatio: noiseRatio, threshold: noiseRatioThreshold, overThreshold: noiseFloorOverThreshold, gated: noiseFloorOverThreshold && !previewTier };
+  // renderTierSource makes a renderer-stamped verdict distinguishable from a caller's claim.
+  const noiseFloorReport = { renderTier: previewTier ? "preview" : "production_candidate", renderTierSource: options.renderTierSource ?? "default", noiseFloorRms: technicalReport.noiseFloorRms, noiseToSignalRatio: noiseRatio, threshold: noiseRatioThreshold, overThreshold: noiseFloorOverThreshold, gated: noiseFloorOverThreshold && !previewTier };
   if (noiseFloorOverThreshold && !previewTier) {
     const profileNote = options.profile === "solo_piano" ? " (solo piano profile uses a stricter 10% threshold)" : "";
     addFinding(findings, "high", "noise_floor", `Audible noise floor detected: noise-to-signal ratio is above ${Math.round(noiseRatioThreshold * 100)}%${profileNote}, likely from SoundFont hiss amplified by loudness normalization.`, "Use renderProfile='normalized' (single ffmpeg loudnorm, no PCM loudness stage) or renderProfile='clean_dry' with no normalization. Do not include room_ambience in the master chain for sparse solo piano.");
@@ -5954,7 +5971,7 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "inspect_audio_quality", description: "Inspect generated audio/MIDI/session manifests for clipping, loudness, silence, harshness, loop seams, transition roughness, and background-music suitability.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, audioPath: { type: "string" }, compositionManifestPath: { type: "string" }, sessionManifestPath: { type: "string" }, useCase: { type: "string" }, checkLoop: { type: "boolean" }, targetMood: { type: "string" }, renderTier: { type: "string", enum: ["preview", "production_candidate"], description: "production_candidate (default) applies the strict fail-closed noise-floor gate. Use preview for procedural render_midi_to_audio output, whose synthesis noise floor is inherent and not a production defect." }, outputPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "inspect_audio_quality", description: "Inspect generated audio/MIDI/session manifests for clipping, loudness, silence, harshness, loop seams, transition roughness, and background-music suitability.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, audioPath: { type: "string" }, compositionManifestPath: { type: "string" }, sessionManifestPath: { type: "string" }, useCase: { type: "string" }, checkLoop: { type: "boolean" }, targetMood: { type: "string" }, renderReportPath: { type: "string", description: "Render report written by the renderer that produced audioPath. Its qualityTier stamp decides the render tier and overrides renderTier." }, renderTier: { type: "string", enum: ["preview", "production_candidate"], description: "Fallback tier when no renderReportPath is given; ignored when one is. Defaults to production_candidate, which applies the strict fail-closed noise-floor gate. preview suits procedural render_midi_to_audio output, whose synthesis noise floor is inherent and not a production defect." }, outputPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: inspectAudioQualityInputSchema,
     handler: async (input, ctx) => {
@@ -5986,7 +6003,13 @@ export const musicWorkflowTools: ToolModule[] = [
       // Auto-detect solo_piano profile: all tracks resolve to "piano" and no drums/bass present.
       const trackInstrumentSet = new Set(Object.keys(composition.tracks).map((track) => canonicalInstrumentFromTrackKey(track) ?? track));
       const autoProfile: "solo_piano" | "full_ensemble" | undefined = trackInstrumentSet.size > 0 && [...trackInstrumentSet].every((inst) => inst === "piano" || inst === "electric_piano") ? "solo_piano" : undefined;
-      const report = qualityForComposition(composition, { audio, useCase: parsed.useCase, checkLoop: parsed.checkLoop, targetMood: parsed.targetMood, session, profile: autoProfile, renderTier: parsed.renderTier });
+      // The renderer's stamp outranks parsed.renderTier, so declaring "preview" cannot talk a
+      // production render past the gate when a render report is supplied.
+      const renderReport = parsed.renderReportPath ? JSON.parse(await readProjectFile(ctx.projectRoot, parsed.projectId, parsed.renderReportPath, 2 * 1024 * 1024)) as Record<string, unknown> : undefined;
+      const stampedTier = renderTierFromReport(renderReport);
+      const renderTier = stampedTier ?? parsed.renderTier ?? "production_candidate";
+      const renderTierSource = stampedTier ? "render_report" as const : parsed.renderTier ? "declared" as const : "default" as const;
+      const report = qualityForComposition(composition, { audio, useCase: parsed.useCase, checkLoop: parsed.checkLoop, targetMood: parsed.targetMood, session, profile: autoProfile, renderTier, renderTierSource });
       const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(report, null, 2)}\n`);
       return { ok: report.ok, summary: `Audio QA found ${report.warnings.length} warning(s).`, jobId: parsed.projectId, artifacts: [file.path], structuredContent: report, logs: [JSON.stringify(report, null, 2)], errors: report.warnings };
     }

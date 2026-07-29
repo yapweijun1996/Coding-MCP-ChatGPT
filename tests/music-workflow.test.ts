@@ -1321,7 +1321,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
       technicalReport: { format: string; sampleRate: number; bitDepth: number; durationSeconds: number; peak: number; rms: number; silenceGaps: unknown[]; harshHighFrequencyProxy: number; excessiveBassProxy: number };
       loudnessReport: { peak: number; rms: number; estimatedLufs: number; dynamicRange: number };
       loopSeamReport: { checked: boolean; loopable: boolean; seamClickProxy: number };
-      noiseFloorReport: { renderTier: string; noiseToSignalRatio: number; threshold: number; overThreshold: boolean; gated: boolean };
+      noiseFloorReport: { renderTier: string; renderTierSource: string; noiseToSignalRatio: number; threshold: number; overThreshold: boolean; gated: boolean };
       backgroundSuitabilityScore: number;
       findings: Array<{ severity: string; category: string; message: string; suggestedFix: string }>;
       suggestedFixes: string[];
@@ -1347,6 +1347,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     assert.ok(qaPayload.backgroundSuitabilityScore >= 90);
     // The noise floor is still measured and reported for a preview; it just does not gate.
     assert.equal(qaPayload.noiseFloorReport.renderTier, "preview");
+    assert.equal(qaPayload.noiseFloorReport.renderTierSource, "declared");
     assert.equal(qaPayload.noiseFloorReport.threshold, 0.15);
     assert.ok(qaPayload.noiseFloorReport.noiseToSignalRatio > 0);
     assert.equal(qaPayload.noiseFloorReport.gated, false);
@@ -1921,7 +1922,8 @@ test("compose_edit_midi creates a shaped piano sketch instead of block-chord pla
       audioPath: "music/piano-quality.wav",
       compositionManifestPath: "music/piano-quality.json",
       useCase: "solo piano sketch",
-      renderTier: "preview",
+      // Tier comes from the renderer's own report, not from a claim in this call.
+      renderReportPath: "music/piano-quality-render.json",
       checkLoop: false,
       outputPath: "music/piano-quality-qa.json"
     }, ctx);
@@ -1946,15 +1948,35 @@ test("compose_edit_midi creates a shaped piano sketch instead of block-chord pla
     const productionQa = productionQaResult.structuredContent as {
       productionSafe: boolean;
       blockingReasons: string[];
-      noiseFloorReport: { renderTier: string; threshold: number; overThreshold: boolean; gated: boolean };
+      noiseFloorReport: { renderTier: string; renderTierSource: string; threshold: number; overThreshold: boolean; gated: boolean };
     };
     assert.equal(productionQa.noiseFloorReport.renderTier, "production_candidate");
+    assert.equal(productionQa.noiseFloorReport.renderTierSource, "default");
     // Solo piano is auto-detected, so the stricter 10% threshold applies.
     assert.equal(productionQa.noiseFloorReport.threshold, 0.10);
     assert.equal(productionQa.noiseFloorReport.overThreshold, true);
     assert.equal(productionQa.noiseFloorReport.gated, true);
     assert.equal(productionQa.productionSafe, false);
     assert.ok(productionQa.blockingReasons.some((reason) => reason.includes("Audible noise floor detected")));
+
+    // The renderer's stamp outranks the caller: declaring "preview" against a production report
+    // must not talk the same audio past the gate.
+    await writeProjectFile(ctx.projectRoot, project.id, "music/claimed-preview-render.json", `${JSON.stringify({ renderer: "render_midi_with_soundfont", qualityTier: "production_candidate", productionReady: true }, null, 2)}\n`);
+    const spoofedQaResult = await inspect!.handler({
+      projectId: project.id,
+      audioPath: "music/piano-quality.wav",
+      compositionManifestPath: "music/piano-quality.json",
+      useCase: "solo piano sketch",
+      renderReportPath: "music/claimed-preview-render.json",
+      renderTier: "preview",
+      checkLoop: false,
+      outputPath: "music/claimed-preview-qa.json"
+    }, ctx);
+    assert.equal(spoofedQaResult.ok, false);
+    const spoofedQa = spoofedQaResult.structuredContent as { noiseFloorReport: { renderTier: string; renderTierSource: string; gated: boolean } };
+    assert.equal(spoofedQa.noiseFloorReport.renderTierSource, "render_report");
+    assert.equal(spoofedQa.noiseFloorReport.renderTier, "production_candidate");
+    assert.equal(spoofedQa.noiseFloorReport.gated, true);
 
     const roboticComposition = {
       ...composition,
