@@ -4528,8 +4528,14 @@ function instrumentForTrack(track: string): z.infer<typeof instrumentSchema> {
   return "piano";
 }
 
+// Map a requested track name onto the name buildComposition actually emits. Getting this wrong is
+// silent: buildMidiComposition deletes tracks it cannot match and then materialises an empty one,
+// so a requested "pads" would drop the generated pad notes and publish a silent stem instead.
 function normalizeTrackName(track: string) {
-  return track === "brush_drums" ? "drums" : track === "upright_bass" || track === "acoustic_bass" ? "bass" : track;
+  if (track === "brush_drums") return "drums";
+  if (track === "upright_bass" || track === "acoustic_bass") return "bass";
+  if (track === "pads" || track === "strings") return "pad";
+  return track;
 }
 
 function buildMidiComposition(input: z.infer<typeof composeEditMidiInputSchema>): Composition & { sectionMap: Array<Record<string, unknown>>; trackList: Array<Record<string, unknown>>; chordChart: Array<Record<string, unknown>>; warnings: string[]; editableOperations: string[] } {
@@ -4864,6 +4870,10 @@ export const musicWorkflowTools: ToolModule[] = [
       const ensembleReport = parsed.ensembleRequirement
         ? analyzeEnsemble(composition, parsed.ensembleRequirement)
         : undefined;
+      // issue_0147: always expose ensemble QA (per-instrument noteCount, channel/program, first-note
+      // time, overlap) so a missing or late voice is visible without opting into the fail-closed
+      // gate above. This guarantee used to live on compose_music and moved here with it.
+      const ensembleQa = buildEnsembleQa(composition, composition.instruments);
       const [manifestFile, midiFile] = await Promise.all([
         writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(composition, null, 2)}\n`),
         writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(composition), "audio/midi")
@@ -4876,8 +4886,8 @@ export const musicWorkflowTools: ToolModule[] = [
           : `Ensemble requirement not met: ${ensembleReport!.failures.length} blocking issue(s). MIDI written for inspection but not safe to publish.`,
         jobId: parsed.projectId,
         artifacts: [manifestFile.path, midiFile.path],
-        structuredContent: { midiPath: midiFile.path, manifestPath: manifestFile.path, trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart, warnings: composition.warnings, editableOperations: composition.editableOperations, ensembleReport },
-        logs: [JSON.stringify({ trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart, ensembleReport }, null, 2)],
+        structuredContent: { midiPath: midiFile.path, manifestPath: manifestFile.path, trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart, warnings: composition.warnings, editableOperations: composition.editableOperations, ensembleReport, ensembleQa },
+        logs: [JSON.stringify({ trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart, ensembleReport, ensembleQa }, null, 2)],
         errors: ensembleOk ? [] : ensembleReport!.failures
       };
     }
