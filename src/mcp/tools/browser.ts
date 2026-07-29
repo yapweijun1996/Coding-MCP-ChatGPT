@@ -217,7 +217,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: openBrowserSessionSchema,
   handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof openBrowserSessionSchema>;
@@ -319,7 +319,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: browserNavigateSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserNavigateSchema>;
@@ -344,7 +344,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: browserActionSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserActionSchema>;
@@ -372,7 +372,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: browserTypeSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserTypeSchema>;
@@ -402,7 +402,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: browserPressSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserPressSchema>;
@@ -428,7 +428,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: browserScreenshotSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof browserScreenshotSchema>;
@@ -462,7 +462,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: browserWaitSchema,
     handler: async (input) => {
       const parsed = input as z.infer<typeof browserWaitSchema>;
@@ -492,7 +492,7 @@ export const browserTools: ToolModule[] = [
         additionalProperties: false
       }
     },
-    enabledByDefault: false,
+    enabledByDefault: true,
     schema: closeBrowserSessionSchema,
     handler: async (input) => {
       const parsed = input as z.infer<typeof closeBrowserSessionSchema>;

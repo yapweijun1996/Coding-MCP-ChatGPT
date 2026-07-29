@@ -1403,7 +1403,15 @@ Use this skill to inspect an existing webpage and rebuild it as a validated stat
       "audit_lighthouse",
       "inspect_interaction_flow",
       "inspect_local_project",
-      "check_url"
+      "check_url",
+      "open_browser_session",
+      "browser_navigate",
+      "browser_click",
+      "browser_type",
+      "browser_press",
+      "browser_screenshot",
+      "browser_wait",
+      "close_browser_session"
     ],
     protocolMarkdown: `# Browser QA
 
@@ -1412,6 +1420,7 @@ Use this skill to validate runtime, layout, accessibility, and interaction behav
 - Check console errors, page errors, failed requests, and horizontal overflow.
 - Use \`inspect_3d_scene_visuals\` for WebGL/Three.js pages that need canvas, lighting, framing, clipping, overlay, mobile, or multi-view visual QA.
 - Use accessibility and Lighthouse audits when the request needs quality evidence.
+- Use \`open_browser_session\` plus \`browser_navigate\`/\`browser_click\`/\`browser_type\`/\`browser_press\`/\`browser_screenshot\`/\`browser_wait\` for manual step-by-step UI actions that declarative \`inspect_interaction_flow\` steps can't express. Always call \`close_browser_session\` when finished.
 - Report blocking errors separately from warnings.`
   },
   {
