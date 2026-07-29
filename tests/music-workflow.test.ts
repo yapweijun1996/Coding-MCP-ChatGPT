@@ -68,6 +68,59 @@ const simplePianoMusicXml = `<?xml version="1.0" encoding="UTF-8"?>
   </part>
 </score-partwise>`;
 
+// compose_music was removed in "Remove generic music composition tool"; compose_edit_midi is its
+// successor and delegates to the same buildComposition, so the manifest it writes is a superset.
+// The parameter names differ, so map them in one place instead of at every call site.
+const COMPOSE_TRACK_ALIASES: Record<string, string> = { brushes: "brush_drums", sax_like_lead: "lead", mallets: "pads" };
+
+type ComposeCueInput = {
+  projectId: string;
+  title?: string;
+  style?: string;
+  mood?: string;
+  tempo?: number;
+  key?: string;
+  durationSeconds?: number;
+  useCase?: string;
+  instruments?: string[];
+  complexity?: string;
+  loopable?: boolean;
+  sections?: string[];
+  ensembleRequirement?: Record<string, unknown>;
+  outputManifestPath?: string;
+  outputMidiPath?: string;
+};
+
+/**
+ * Compose a test cue through compose_edit_midi using the old compose_music argument shape.
+ * Returns the tool result plus the composition manifest it wrote, because compose_edit_midi
+ * deliberately summarises its structuredContent instead of echoing every note back.
+ */
+async function composeTestCue(ctx: ToolContext, input: ComposeCueInput) {
+  const compose = getToolModule("compose_edit_midi");
+  assert.ok(compose, "compose_edit_midi must be registered");
+  const manifestPath = input.outputManifestPath ?? "music/composition-manifest.json";
+  const result = await compose.handler({
+    projectId: input.projectId,
+    ...(input.style ? { style: input.style } : {}),
+    ...(input.mood ? { mood: input.mood } : {}),
+    ...(input.tempo ? { tempoBpm: input.tempo } : {}),
+    ...(input.key ? { key: input.key } : {}),
+    // compose_edit_midi's floor is 10s; compose_music allowed 5s.
+    ...(input.durationSeconds ? { durationSec: Math.max(10, input.durationSeconds) } : {}),
+    ...(input.instruments ? { tracks: input.instruments.map((name) => COMPOSE_TRACK_ALIASES[name] ?? name) } : {}),
+    ...(input.sections ? { sections: input.sections } : {}),
+    constraints: { loopable: input.loopable ?? true },
+    ...(input.ensembleRequirement ? { ensembleRequirement: input.ensembleRequirement } : {}),
+    outputManifestPath: manifestPath,
+    outputMidiPath: input.outputMidiPath ?? "music/composition.mid"
+  }, ctx);
+  const composition = result.ok
+    ? JSON.parse(await readProjectFile(ctx.projectRoot, input.projectId, manifestPath)) as Record<string, never>
+    : undefined;
+  return { result, composition };
+}
+
 async function importTestMusicXml(
   ctx: ToolContext,
   projectId: string,
@@ -1145,7 +1198,6 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "Music project", createdByClientId: "composer" });
     const styleBrief = getToolModule("create_music_style_brief");
-    const compose = getToolModule("compose_music");
     const edit = getToolModule("edit_midi");
     const render = getToolModule("render_midi_to_audio");
     const harmony = getToolModule("generate_jazz_harmony");
@@ -1157,7 +1209,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     const exportProject = getToolModule("export_music_project");
     const exportAssets = getToolModule("export_music_assets");
     const audition = getToolModule("audition_music_variations");
-    for (const [name, tool] of Object.entries({ styleBrief, compose, edit, render, harmony, drums, inspect, licenseManifest, packManager, soundfontRender, exportProject, exportAssets, audition })) assert.ok(tool, `${name} registered`);
+    for (const [name, tool] of Object.entries({ styleBrief, edit, render, harmony, drums, inspect, licenseManifest, packManager, soundfontRender, exportProject, exportAssets, audition })) assert.ok(tool, `${name} registered`);
 
     const briefResult = await styleBrief!.handler({
       projectId: project.id,
@@ -1169,7 +1221,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     assert.match(briefPayload.legalBoundary, /do not copy/i);
     assert.ok(briefPayload.instruments.includes("piano"));
 
-    const composeResult = await compose!.handler({
+    const { result: composeResult, composition: composedManifest } = await composeTestCue(ctx, {
       projectId: project.id,
       title: "Warm Cafe Loop",
       style: "cafe_jazz",
@@ -1186,7 +1238,7 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
     const midiPath = await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/composition.mid");
     const midi = await readFile(midiPath);
     assert.equal(midi.subarray(0, 4).toString("ascii"), "MThd");
-    const composition = composeResult.structuredContent as { chordProgression: string[]; tracks: Record<string, unknown[]>; license: { output: string } };
+    const composition = composedManifest as unknown as { chordProgression: string[]; tracks: Record<string, unknown[]>; license: { output: string } };
     assert.ok(composition.chordProgression.includes("Dm9"));
     assert.ok(composition.tracks.piano.length > 0);
     assert.equal(composition.license.output, "generated_original");
@@ -1794,19 +1846,17 @@ test("music workflow composes, edits, renders, audits, and exports music assets"
   }
 });
 
-test("compose_music creates a shaped piano sketch instead of block-chord placeholders", async () => {
+test("compose_edit_midi creates a shaped piano sketch instead of block-chord placeholders", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "music-compose-quality-"));
   try {
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "Piano compose quality", createdByClientId: "composer" });
-    const compose = getToolModule("compose_music");
     const render = getToolModule("render_midi_to_audio");
     const inspect = getToolModule("inspect_audio_quality");
-    assert.ok(compose);
     assert.ok(render);
     assert.ok(inspect);
 
-    const composeResult = await compose!.handler({
+    const { result: composeResult, composition: composedManifest } = await composeTestCue(ctx, {
       projectId: project.id,
       title: "Glass Study Sketch",
       style: "smooth_piano",
@@ -1822,7 +1872,7 @@ test("compose_music creates a shaped piano sketch instead of block-chord placeho
       outputMidiPath: "music/piano-quality.mid"
     }, ctx);
     assert.equal(composeResult.ok, true);
-    const composition = composeResult.structuredContent as {
+    const composition = composedManifest as unknown as {
       durationSeconds: number;
       tempo: number;
       tracks: Record<string, Array<{ startBeat: number; durationBeats: number; velocity: number }>>;
@@ -1917,7 +1967,7 @@ test("compose_music creates a shaped piano sketch instead of block-chord placeho
     assert.ok(roboticQa.blockingReasons.some((reason) => reason.includes("Robotic music output is banned")));
     assert.ok(roboticQa.findings.some((finding) => finding.severity === "high" && finding.message.includes("Robotic music output is banned")));
 
-    const shortComposeResult = await compose!.handler({
+    const { result: shortComposeResult, composition: shortComposition } = await composeTestCue(ctx, {
       projectId: project.id,
       title: "Short Non Loop",
       style: "smooth_piano",
@@ -1929,15 +1979,20 @@ test("compose_music creates a shaped piano sketch instead of block-chord placeho
       outputMidiPath: "music/short-form.mid"
     }, ctx);
     assert.equal(shortComposeResult.ok, true);
-    const shortComposition = shortComposeResult.structuredContent as {
+    const shortPlan = shortComposition as unknown as {
       durationSeconds: number;
       tempo: number;
       compositionPlan: { form: Array<{ name: string; bars: number }> };
-      sections: Array<{ name: string; bars: number }>;
     };
-    const expectedBars = Math.max(4, Math.round(Math.round(shortComposition.durationSeconds / 60 * shortComposition.tempo) / 4));
-    assert.equal(shortComposition.compositionPlan.form.reduce((sum, section) => sum + section.bars, 0), expectedBars);
-    assert.equal(shortComposition.sections.reduce((sum, section) => sum + section.bars, 0), expectedBars);
+    // The plan's form still has to add up to the bars implied by tempo and duration.
+    const expectedBars = Math.max(4, Math.round(Math.round(shortPlan.durationSeconds / 60 * shortPlan.tempo) / 4));
+    assert.equal(shortPlan.compositionPlan.form.reduce((sum, section) => sum + section.bars, 0), expectedBars);
+    // compose_edit_midi replaces the plan's sections with the caller's section list, so the old
+    // "sections sum to the same bars" invariant is now a section-map/duration coherence check.
+    const shortSections = (shortComposeResult.structuredContent as { sectionMap: Array<{ startBeat: number; endBeat: number }> }).sectionMap;
+    assert.ok(shortSections.length > 0);
+    assert.equal(shortSections[0]!.startBeat, 0);
+    assert.ok(shortSections.every((section, index) => index === 0 || section.startBeat === shortSections[index - 1]!.endBeat), "section map is contiguous");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -2185,12 +2240,10 @@ test("free production render pipeline creates WAV, MP3, stems, licenses, and tru
   try {
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "Production pipeline", createdByClientId: "producer" });
-	    const compose = getToolModule("compose_music");
 	    const packManager = getToolModule("manage_jazz_instrument_packs");
 	    const environmentCheck = getToolModule("check_music_render_environment");
 	    const productionRender = getToolModule("render_production_music");
 	    const exportProject = getToolModule("export_music_project");
-	    assert.ok(compose);
 	    assert.ok(packManager);
 	    assert.ok(environmentCheck);
 	    assert.ok(productionRender);
@@ -2206,7 +2259,7 @@ test("free production render pipeline creates WAV, MP3, stems, licenses, and tru
     assert.equal(emptyEnvironmentPayload.productionSupport.statusLabel, "MIDI preview only. Not production audio.");
     assert.ok(emptyEnvironmentPayload.productionSupport.reasons.some((reason) => reason.includes("No ready")));
 
-    await compose!.handler({
+    await composeTestCue(ctx, {
       projectId: project.id,
       title: "Free Production Cue",
       style: "smooth_piano",
@@ -2438,17 +2491,15 @@ test("render_production_music publishes MP3 when production WAV exceeds media as
   try {
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "Large production WAV", createdByClientId: "producer" });
-    const compose = getToolModule("compose_music");
     const packManager = getToolModule("manage_jazz_instrument_packs");
     const productionRender = getToolModule("render_production_music");
-    assert.ok(compose);
     assert.ok(packManager);
     assert.ok(productionRender);
 
     process.env.PATH = `${await installFakeFluidSynth(root)}:${await installFakeFfmpeg(root)}:${oldPath}`;
     process.env.FAKE_FFMPEG_LARGE_WAV = String(101 * 1024 * 1024);
 
-    await compose!.handler({
+    await composeTestCue(ctx, {
       projectId: project.id,
       title: "Long Solo Piano",
       style: "smooth_piano",
@@ -2529,17 +2580,15 @@ test("render_production_music does not relabel a GeneralUser fallback as request
   try {
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "Salamander unavailable", createdByClientId: "producer" });
-    const compose = getToolModule("compose_music");
     const packManager = getToolModule("manage_jazz_instrument_packs");
     const productionRender = getToolModule("render_production_music");
-    assert.ok(compose);
     assert.ok(packManager);
     assert.ok(productionRender);
 
     process.env.PATH = `${await installFakeFluidSynth(root)}:${await installFakeFfmpeg(root)}:${oldPath}`;
     process.env.MUSIC_SOUNDFONT_DIR = path.join(root, "empty-soundfonts");
 
-    await compose!.handler({
+    await composeTestCue(ctx, {
       projectId: project.id,
       title: "Requested Salamander Cue",
       style: "smooth_piano",
@@ -2611,14 +2660,12 @@ test("export_music_project creates a music package with README, playlist, checks
   try {
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "Cafe export", createdByClientId: "producer" });
-    const compose = getToolModule("compose_music");
     const render = getToolModule("render_midi_to_audio");
     const exportProject = getToolModule("export_music_project");
-    assert.ok(compose);
     assert.ok(render);
     assert.ok(exportProject);
 
-    await compose!.handler({
+    await composeTestCue(ctx, {
       projectId: project.id,
       title: "Cafe Jazz Pack",
       style: "cafe_jazz",
@@ -2748,14 +2795,12 @@ test("export_music_project fails when requested encoded formats are missing", as
   try {
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "Format gate", createdByClientId: "producer" });
-    const compose = getToolModule("compose_music");
     const render = getToolModule("render_midi_to_audio");
     const exportProject = getToolModule("export_music_project");
-    assert.ok(compose);
     assert.ok(render);
     assert.ok(exportProject);
 
-    await compose!.handler({
+    await composeTestCue(ctx, {
       projectId: project.id,
       title: "Format Gate Cue",
       style: "cafe_jazz",
@@ -2919,14 +2964,12 @@ test("render_midi_with_soundfont blocks missing renderer and unsafe packs", asyn
   try {
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "SoundFont gate", createdByClientId: "producer" });
-    const compose = getToolModule("compose_music");
     const packManager = getToolModule("manage_jazz_instrument_packs");
     const soundfontRender = getToolModule("render_midi_with_soundfont");
-    assert.ok(compose);
     assert.ok(packManager);
     assert.ok(soundfontRender);
 
-	    const composeResult = await compose!.handler({
+	    const { composition: composedManifest } = await composeTestCue(ctx, {
 	      projectId: project.id,
 	      title: "SoundFont Gate Cue",
 	      style: "cafe_jazz",
@@ -2934,7 +2977,7 @@ test("render_midi_with_soundfont blocks missing renderer and unsafe packs", asyn
 	      outputManifestPath: "music/soundfont-gate.json",
 	      outputMidiPath: "music/soundfont-gate.mid"
 	    }, ctx);
-	    const gateComposition = composeResult.structuredContent as Record<string, unknown> & { tracks: Record<string, unknown[]> };
+	    const gateComposition = composedManifest as unknown as Record<string, unknown> & { tracks: Record<string, unknown[]> };
 	    await writeProjectFile(ctx.projectRoot, project.id, "music/soundfont-gate-piano-only.json", `${JSON.stringify({ ...gateComposition, instruments: ["piano"], tracks: { piano: gateComposition.tracks.piano ?? [] } }, null, 2)}\n`);
     const sf2 = fakeSoundfontBytes();
     await writeProjectAsset(ctx.projectRoot, project.id, "instruments/unsafe.sf2", sf2, "audio/soundfont");
@@ -3128,14 +3171,12 @@ test("music audition publisher accepts direct version metadata and returns conti
   try {
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "Direct audition", createdByClientId: "producer" });
-    const compose = getToolModule("compose_music");
     const render = getToolModule("render_midi_to_audio");
     const publishDemo = getToolModule("publish_music_audition_demo");
-    assert.ok(compose);
     assert.ok(render);
     assert.ok(publishDemo);
 
-    await compose!.handler({
+    await composeTestCue(ctx, {
       projectId: project.id,
       title: "Direct A",
       style: "cafe_jazz",
@@ -3149,7 +3190,7 @@ test("music audition publisher accepts direct version metadata and returns conti
       outputAudioPath: "music/direct-a.wav",
       sampleRate: 12000
     }, ctx);
-    await compose!.handler({
+    await composeTestCue(ctx, {
       projectId: project.id,
       title: "Direct B",
       style: "bossa_nova",
@@ -3272,12 +3313,10 @@ test("extend_original_music_arrangement creates long-form section map and origin
   try {
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "Original arrangement", createdByClientId: "arranger" });
-    const compose = getToolModule("compose_music");
     const extendOriginal = getToolModule("extend_original_music_arrangement");
-    assert.ok(compose);
     assert.ok(extendOriginal);
 
-    await compose!.handler({
+    await composeTestCue(ctx, {
       projectId: project.id,
       title: "Selected Cafe Sketch",
       style: "cafe_jazz",
@@ -3494,9 +3533,8 @@ test("issue_0146: render_midi_with_soundfont reads a registry written under a no
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "Registry discovery", createdByClientId: "producer" });
     const installer = getToolModule("install_free_soundfont_pack");
-    const compose = getToolModule("compose_music");
     const render = getToolModule("render_midi_with_soundfont");
-    assert.ok(installer && compose && render);
+    assert.ok(installer && render);
 
     restoreFetch = installMockFetch({ "GeneralUser-GS.sf2": fakeSoundfontBytes(), "LICENSE.txt": "GeneralUser GS license fixture\n", "README.md": "# GeneralUser GS fixture\n" });
     const install = await installer!.handler({ projectId: project.id, packId: "generaluser_gs" }, ctx);
@@ -3508,7 +3546,7 @@ test("issue_0146: render_midi_with_soundfont reads a registry written under a no
     await writeProjectFile(ctx.projectRoot, project.id, "music/instrument-packs.json", registryJson);
     await rm(await getProjectStoredFilePath(ctx.projectRoot, project.id, "music/jazz-instrument-packs.json"), { force: true });
 
-    await compose!.handler({
+    await composeTestCue(ctx, {
       projectId: project.id,
       instruments: ["piano", "cello"],
       durationSeconds: 12,
@@ -3548,12 +3586,11 @@ test("issue_0141: registered assets SoundFont renders by pack id and path", asyn
   try {
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "Assets SoundFont", createdByClientId: "producer" });
-    const compose = getToolModule("compose_music");
     const packManager = getToolModule("manage_jazz_instrument_packs");
     const soundfontRender = getToolModule("render_midi_with_soundfont");
-    assert.ok(compose && packManager && soundfontRender);
+    assert.ok(packManager && soundfontRender);
 
-    await compose!.handler({
+    await composeTestCue(ctx, {
       projectId: project.id,
       instruments: ["piano"],
       durationSeconds: 8,
@@ -3650,15 +3687,13 @@ test("buildEnsembleQa: a requested-but-empty voice is reported missing with a wa
   assert.equal(qa.overlapFromBeat0, false, "a single sounding voice is not an overlap");
 });
 
-test("issue_0147: compose_music always surfaces ensembleQa proving both requested voices", async () => {
+test("issue_0147: compose_edit_midi always surfaces ensembleQa proving both requested voices", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "music-ensemble-qa-"));
   try {
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "Ensemble QA", createdByClientId: "composer" });
-    const compose = getToolModule("compose_music");
-    assert.ok(compose);
     // No ensembleRequirement passed — QA must appear by default, not only under the opt-in gate.
-    const result = await compose!.handler({
+    const { result } = await composeTestCue(ctx, {
       projectId: project.id,
       instruments: ["piano", "cello"],
       durationSeconds: 16,
@@ -4375,12 +4410,11 @@ test("render_midi_with_soundfont: renderProfile=clean_dry reports noiseBedApplie
   try {
     const ctx = toolContext(root);
     const project = await createProject(ctx.projectRoot, { title: "Clean Dry Render", createdByClientId: "composer" });
-    const compose = getToolModule("compose_music");
     const packManager = getToolModule("manage_jazz_instrument_packs");
     const soundfontRender = getToolModule("render_midi_with_soundfont");
-    assert.ok(compose && packManager && soundfontRender);
+    assert.ok(packManager && soundfontRender);
 
-    await compose!.handler({
+    await composeTestCue(ctx, {
       projectId: project.id,
       instruments: ["piano"],
       durationSeconds: 8,
