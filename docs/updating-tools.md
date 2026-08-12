@@ -19,7 +19,7 @@ ChatGPT caches the tool list within a single conversation and does not support l
 A tool only appears in `tools/list` when **all three** are true. Miss one and it is silently
 hidden (`blocked_by_skill` / `blocked_by_tool`); reconnecting does not help.
 
-1. **Register it** in `src/mcp/tools/index.ts` (`allToolModules`).
+1. **Register it** in `src/mcp/tools/index.ts` (`toolGroupLoaders`), then run `npm run generate:tool-manifest`.
 2. **Enable it**: `enabledByDefault: true` on the tool module (use `false` for maintainer/admin-only
    tools you do not want exposed to clients).
 3. **Catalog it**: add the tool name to an **enabled** skill's `toolNames` in

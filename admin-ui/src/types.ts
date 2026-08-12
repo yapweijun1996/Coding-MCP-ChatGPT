@@ -202,6 +202,65 @@ export interface SettingsResult extends ApiResult {
   registrationSettings?: RegistrationSettings;
 }
 
+export type StorageQuotaState = "unlimited" | "ok" | "warning" | "over_quota";
+
+export interface StorageUsage {
+  bytes: number;
+  files: number;
+  directories: number;
+}
+
+export interface StorageQuotaStatus {
+  state: StorageQuotaState;
+  usedBytes: number;
+  quotaBytes: number | null;
+  remainingBytes: number | null;
+  percentUsed: number | null;
+}
+
+export interface StorageProjectUsage {
+  id: string;
+  title: string;
+  status: string;
+  projectBytes: number;
+  workspaceBytes: number;
+  totalBytes: number;
+  quota: StorageQuotaStatus;
+}
+
+export interface StorageScopeReport {
+  id: string;
+  label: string;
+  projectCount: number;
+  projectUsage: StorageUsage;
+  workspaceUsage: StorageUsage;
+  totalBytes: number;
+  quota: StorageQuotaStatus;
+  projects: StorageProjectUsage[];
+}
+
+export interface StorageReport {
+  generatedAt: string;
+  scopes: StorageScopeReport[];
+  artifactUsage: StorageUsage;
+  shareUsage: StorageUsage;
+  telemetryUsage: StorageUsage;
+  totals: {
+    projectBytes: number;
+    workspaceBytes: number;
+    artifactBytes: number;
+    shareBytes: number;
+    telemetryBytes: number;
+    totalBytes: number;
+  };
+  globalQuota: StorageQuotaStatus;
+  warnings: string[];
+}
+
+export interface StorageResult extends ApiResult {
+  storage: StorageReport;
+}
+
 export interface RegistrationSettings {
   allowRegistration: boolean;
   requireApproval: true;
@@ -241,8 +300,28 @@ export interface TelemetryMetric {
   errorRate: number;
   p50Ms: number | null;
   p95Ms: number | null;
+  p99Ms: number | null;
   maxMs: number | null;
   avgMs: number | null;
+}
+
+export interface TelemetryValueSummary {
+  samples: number;
+  p50: number | null;
+  p95: number | null;
+  p99: number | null;
+  max: number | null;
+  avg: number | null;
+}
+
+export interface TelemetryPerformanceSummary {
+  queueWaitMs: TelemetryValueSummary;
+  executionMs: TelemetryValueSummary;
+  queueDepth: TelemetryValueSummary;
+  eventLoopDelayMs: TelemetryValueSummary;
+  rssBytes: TelemetryValueSummary;
+  toolListCount: TelemetryValueSummary;
+  toolListBytes: TelemetryValueSummary;
 }
 
 export interface TelemetryErrorSample {
@@ -262,6 +341,8 @@ export interface TelemetrySummary {
   errorRate: number;
   byTool: TelemetryMetric[];
   byClient: TelemetryMetric[];
+  byFailureCategory: TelemetryMetric[];
+  performance: TelemetryPerformanceSummary;
   recentErrors: TelemetryErrorSample[];
 }
 

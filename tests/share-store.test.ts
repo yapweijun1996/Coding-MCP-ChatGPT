@@ -62,3 +62,23 @@ test("created shares are readable in the same process", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("share metadata preserves project ownership across rehydration", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "share-"));
+  try {
+    await initializeShareStore(root);
+    const rec = await createShareArtifact({
+      shareRoot: root,
+      title: "Project report",
+      summary: "S",
+      filename: "project-report.html",
+      html: "<i>x</i>",
+      projectId: "project-123"
+    });
+    await initializeShareStore(root);
+    const got = await readShareArtifact(rec.id, rec.filename);
+    assert.equal(got?.record.projectId, "project-123");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { assertSafePublicUrl, safeFetch } from "../security/url.js";
 import { installSsrfRouteGuard } from "../security/playwright-guard.js";
+import { bindAbort, signalWithTimeout, throwIfAborted } from "../shared/abort.js";
 
 export type WebCaptureMode = "single_page" | "same_origin_depth_1";
 export type CaptureViewport = "desktop" | "tablet" | "mobile";
@@ -138,9 +139,9 @@ export async function readWebpageCapture(captureRoot: string, captureId: string)
   }
 }
 
-async function readRobotsTxt(origin: string, timeoutMs: number): Promise<{ warnings: string[]; disallowRules: string[] }> {
+async function readRobotsTxt(origin: string, timeoutMs: number, signal?: AbortSignal): Promise<{ warnings: string[]; disallowRules: string[] }> {
   try {
-    const response = await safeFetch(new URL("/robots.txt", origin), { signal: AbortSignal.timeout(Math.min(timeoutMs, 10000)) });
+    const response = await safeFetch(new URL("/robots.txt", origin), { signal: signalWithTimeout(signal, Math.min(timeoutMs, 10000)) });
     if (response.status === 404) return { warnings: ["robots.txt was not found."], disallowRules: [] };
     if (!response.ok) return { warnings: [`robots.txt returned ${response.status}.`], disallowRules: [] };
     const text = await response.text();
@@ -156,6 +157,7 @@ async function readRobotsTxt(origin: string, timeoutMs: number): Promise<{ warni
     }
     return { warnings: [], disallowRules };
   } catch (error) {
+    throwIfAborted(signal);
     const message = error instanceof Error ? error.message : "Unable to read robots.txt.";
     return { warnings: [`Unable to confirm robots.txt: ${message}`], disallowRules: [] };
   }
@@ -165,9 +167,11 @@ function isRobotsDisallowed(url: URL, rules: string[]): boolean {
   return rules.some((rule) => rule !== "/" && url.pathname.startsWith(rule)) || rules.includes("/");
 }
 
-async function collectPage(targetUrl: URL, viewport: CaptureViewport, options: WebCaptureOptions): Promise<CapturedPage> {
+async function collectPage(targetUrl: URL, viewport: CaptureViewport, options: WebCaptureOptions, signal?: AbortSignal): Promise<CapturedPage> {
+  throwIfAborted(signal);
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true });
+  const unbindAbort = bindAbort(signal, () => browser.close());
   const preset = viewportPresets[viewport];
   const resourceStarts = new Map<string, number>();
   const resources: CapturedResource[] = [];
@@ -311,18 +315,20 @@ async function collectPage(targetUrl: URL, viewport: CaptureViewport, options: W
       screenshotDataUrl
     };
   } finally {
-    await browser.close();
+    unbindAbort();
+    await browser.close().catch(() => undefined);
   }
 }
 
-export async function captureWebpage(options: WebCaptureOptions): Promise<WebpageCapture> {
+export async function captureWebpage(options: WebCaptureOptions, signal?: AbortSignal): Promise<WebpageCapture> {
+  throwIfAborted(signal);
   const source = await assertSafePublicUrl(options.url);
   const warnings: string[] = [];
   const issues: string[] = [];
   let disallowRules: string[] = [];
 
   if (options.respectRobotsTxt) {
-    const robots = await readRobotsTxt(source.origin, options.timeoutMs);
+    const robots = await readRobotsTxt(source.origin, options.timeoutMs, signal);
     warnings.push(...robots.warnings);
     disallowRules = robots.disallowRules;
     if (isRobotsDisallowed(source, disallowRules)) {
@@ -331,9 +337,10 @@ export async function captureWebpage(options: WebCaptureOptions): Promise<Webpag
   }
 
   const targetUrls = [source];
-  const firstPage = await collectPage(source, options.viewports[0], options);
+  const firstPage = await collectPage(source, options.viewports[0], options, signal);
   if (options.mode === "same_origin_depth_1") {
     for (const link of firstPage.links) {
+      throwIfAborted(signal);
       if (targetUrls.length >= options.maxPages) break;
       if (!link.sameOrigin) continue;
       const candidate = await assertSafePublicUrl(link.href);
@@ -349,8 +356,9 @@ export async function captureWebpage(options: WebCaptureOptions): Promise<Webpag
   const pages: CapturedPage[] = [firstPage];
   for (const targetUrl of targetUrls) {
     for (const viewport of options.viewports) {
+      throwIfAborted(signal);
       if (targetUrl.toString() === source.toString() && viewport === options.viewports[0]) continue;
-      pages.push(await collectPage(targetUrl, viewport, options));
+      pages.push(await collectPage(targetUrl, viewport, options, signal));
     }
   }
 

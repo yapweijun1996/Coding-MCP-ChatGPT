@@ -1,9 +1,17 @@
 import { isUtf8 } from "node:buffer";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
+import {
+  assertSafeProjectAssetPath,
+  getProjectFileContentType,
+  getProjectStoredFilePath,
+  importProjectAssetFromLocalFile
+} from "../../projects/store.js";
 import { atomicWrite } from "../../shared/atomic-write.js";
 import { childEnv } from "../child-env.js";
 import type { ToolModule } from "../types.js";
@@ -48,6 +56,13 @@ const listSandboxRunsInputSchema = z.object({
 
 const cleanupSandboxInputSchema = z.object({
   sandboxId: z.string().regex(/^sandbox_[a-zA-Z0-9_-]{1,80}$/)
+});
+
+const promoteSandboxArtifactToProjectInputSchema = z.object({
+  projectId: z.string().min(8).max(80),
+  sandboxId: z.string().regex(/^sandbox_[a-zA-Z0-9_-]{1,80}$/),
+  sourceArtifactPath: z.string().min(1).max(240),
+  destinationPath: z.string().min(1).max(240)
 });
 
 const exportSandboxReportInputSchema = z.object({
@@ -120,7 +135,10 @@ function trim(value: string, maxBytes: number): string {
 
 function safeRelativePath(relativePath: string): string {
   if (path.isAbsolute(relativePath)) throw new Error("Sandbox paths must be relative.");
-  const normalized = path.posix.normalize(relativePath.replaceAll("\\", "/"));
+  const portable = relativePath.replaceAll("\\", "/");
+  const rawParts = portable.split("/").filter(Boolean);
+  if (rawParts.some((part) => part === ".." || part.startsWith("."))) throw new Error("Parent traversal and hidden path segments are not allowed.");
+  const normalized = path.posix.normalize(portable);
   const parts = normalized.split("/").filter(Boolean);
   if (!parts.length) throw new Error("Sandbox path must include a filename or directory.");
   if (parts.some((part) => part === ".." || part.startsWith("."))) throw new Error("Parent traversal and hidden path segments are not allowed.");
@@ -210,6 +228,37 @@ async function collectArtifacts(root: string, paths: string[], maxArtifactBytes:
     artifacts.push({ path: safe, size: fileStat.size });
   }
   return artifacts;
+}
+
+async function sha256File(filePath: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
+
+async function requireLiveManifest(artifactRoot: string, id: string): Promise<SandboxManifest> {
+  const root = sandboxRoot(artifactRoot, id);
+  try {
+    const manifest = await readManifest(root);
+    if (manifest.removedAt) throw new Error(`Cannot promote artifacts from removed sandbox ${id}.`);
+    if (manifest.sandboxId !== id || path.resolve(manifest.root) !== path.resolve(root)) {
+      throw new Error(`Sandbox ${id} manifest identity does not match its live workspace.`);
+    }
+    return manifest;
+  } catch (error) {
+    if (error instanceof Error && /removed sandbox|manifest identity/.test(error.message)) throw error;
+    const archived = await loadManifest(artifactRoot, id).catch(() => undefined);
+    if (archived?.removedAt) throw new Error(`Cannot promote artifacts from removed sandbox ${id}.`);
+    throw new Error(`Cannot promote artifact because live sandbox ${id} is unavailable.`);
+  }
+}
+
+function findRegisteredArtifact(manifest: SandboxManifest, artifactPath: string): { path: string; size: number } | undefined {
+  for (let runIndex = manifest.runs.length - 1; runIndex >= 0; runIndex -= 1) {
+    const artifact = manifest.runs[runIndex]!.artifacts.find((entry) => entry.path === artifactPath);
+    if (artifact) return artifact;
+  }
+  return undefined;
 }
 
 interface InlineArtifact {
@@ -479,6 +528,88 @@ export const sandboxExecutionTools: ToolModule[] = [
           await rm(root, { recursive: true, force: true }).catch(() => {});
         }
       }
+    }
+  },
+  {
+    definition: {
+      name: "promote_sandbox_artifact_to_project",
+      description: "Copy a collected artifact from a live sandbox directly into project asset storage. The source must be registered in the sandbox manifest and still exist inside that sandbox. The server verifies size and SHA-256 after copying and returns metadata only; binary bytes and Base64 are never returned to the model.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string", minLength: 8, maxLength: 80, description: "Destination project id." },
+          sandboxId: sandboxIdProperty,
+          sourceArtifactPath: { type: "string", minLength: 1, maxLength: 240, description: "Relative path of an artifact previously recorded by run_sandboxed_command.collectArtifacts." },
+          destinationPath: { type: "string", minLength: 1, maxLength: 240, description: "Safe project-relative asset path, such as 'music/render.mid' or 'audio/final.wav'." }
+        },
+        required: ["projectId", "sandboxId", "sourceArtifactPath", "destinationPath"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: promoteSandboxArtifactToProjectInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = promoteSandboxArtifactToProjectInputSchema.parse(input);
+      const sourceArtifactPath = safeRelativePath(parsed.sourceArtifactPath);
+      const destinationPath = assertSafeProjectAssetPath(parsed.destinationPath);
+      const manifest = await requireLiveManifest(ctx.artifactRoot, parsed.sandboxId);
+      const registeredArtifact = findRegisteredArtifact(manifest, sourceArtifactPath);
+      if (!registeredArtifact) {
+        throw new Error(`Artifact ${sourceArtifactPath} is not registered in sandbox ${parsed.sandboxId}.`);
+      }
+
+      const root = sandboxRoot(ctx.artifactRoot, parsed.sandboxId);
+      const sourcePath = resolveInside(root, sourceArtifactPath);
+      const sourceStat = await lstat(sourcePath).catch(() => undefined);
+      if (!sourceStat?.isFile() || sourceStat.isSymbolicLink()) {
+        throw new Error(`Registered artifact ${sourceArtifactPath} no longer exists as a regular file in the live sandbox.`);
+      }
+      const [realRoot, realSource] = await Promise.all([realpath(root), realpath(sourcePath)]);
+      if (realSource !== realRoot && !realSource.startsWith(`${realRoot}${path.sep}`)) {
+        throw new Error(`Registered artifact ${sourceArtifactPath} resolves outside the live sandbox.`);
+      }
+      if (sourceStat.size !== registeredArtifact.size) {
+        throw new Error(`Registered artifact ${sourceArtifactPath} size changed after collection: manifest=${registeredArtifact.size}, actual=${sourceStat.size}.`);
+      }
+
+      const sourceContentType = getProjectFileContentType(sourceArtifactPath);
+      const contentType = getProjectFileContentType(destinationPath);
+      if (sourceContentType === "application/octet-stream" || sourceContentType !== contentType) {
+        throw new Error(`Artifact type ${sourceContentType} does not match destination type ${contentType}.`);
+      }
+
+      const sourceSha256 = await sha256File(sourcePath);
+      const file = await importProjectAssetFromLocalFile(ctx.projectRoot, parsed.projectId, destinationPath, sourcePath, contentType);
+      const destinationStoredPath = await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, file.path);
+      const [sourceSha256AfterCopy, destinationSha256] = await Promise.all([
+        sha256File(sourcePath),
+        sha256File(destinationStoredPath)
+      ]);
+      if (sourceSha256AfterCopy !== sourceSha256 || destinationSha256 !== sourceSha256) {
+        throw new Error(`SHA-256 verification failed while promoting ${sourceArtifactPath}.`);
+      }
+      if (file.size !== registeredArtifact.size) {
+        throw new Error(`Size verification failed while promoting ${sourceArtifactPath}: source=${registeredArtifact.size}, destination=${file.size}.`);
+      }
+
+      const promoted = {
+        projectId: parsed.projectId,
+        sandboxId: parsed.sandboxId,
+        sourceArtifactPath,
+        destinationPath: file.path,
+        size: file.size,
+        sha256: destinationSha256,
+        contentType,
+        verified: { registered: true, liveSandbox: true, size: true, sha256: true }
+      };
+      return {
+        ok: true,
+        summary: `Promoted ${sourceArtifactPath} to project asset ${file.path} with verified size and SHA-256.`,
+        artifacts: [file.path],
+        structuredContent: promoted,
+        logs: [JSON.stringify(promoted)],
+        errors: []
+      };
     }
   },
   {

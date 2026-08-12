@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { getToolModule } from "../src/mcp/registry.js";
 import type { ToolContext } from "../src/mcp/types.js";
+import { createProject, getProjectStoredFilePath } from "../src/projects/store.js";
 import { skillRegistry } from "../src/skills/registry.js";
 
 function toolContext(root: string): ToolContext {
@@ -103,6 +105,147 @@ test("sandbox execution rejects commands outside the profile allowlist", async (
     await assert.rejects(
       run!.handler({ sandboxId, command: "python3", args: ["script.py"] }, ctx),
       /not allowed by sandbox profile/
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("promote_sandbox_artifact_to_project copies registered binary artifacts byte-for-byte without returning content", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "sandbox-promote-success-"));
+  try {
+    const ctx = toolContext(root);
+    const prepare = getToolModule("prepare_sandbox_workspace");
+    const run = getToolModule("run_sandboxed_command");
+    const promote = getToolModule("promote_sandbox_artifact_to_project");
+    assert.ok(prepare);
+    assert.ok(run);
+    assert.ok(promote);
+
+    const project = await createProject(ctx.projectRoot, { title: "Promoted music assets", createdByClientId: "sandbox-test" });
+    const fixtures = [
+      { source: "out/render.mid", destination: "music/render.mid", contentType: "audio/midi", bytes: Buffer.from([0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, 0, 0x60, 0x4d, 0x54, 0x72, 0x6b, 0, 0, 0, 4, 0, 0xff, 0x2f, 0]) },
+      { source: "out/render.wav", destination: "music/render.wav", contentType: "audio/wav", bytes: Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WAVE")]) },
+      { source: "out/preview.mp3", destination: "music/preview.mp3", contentType: "audio/mpeg", bytes: Buffer.from([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0]) },
+      { source: "out/piano.sf2", destination: "music/piano.sf2", contentType: "audio/soundfont", bytes: Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("sfbk")]) }
+    ];
+    const script = [
+      "const fs = require('node:fs');",
+      "fs.mkdirSync('out', { recursive: true });",
+      ...fixtures.map((fixture) => `fs.writeFileSync(${JSON.stringify(fixture.source)}, Buffer.from(${JSON.stringify([...fixture.bytes])}));`)
+    ].join("\n");
+    const prepared = await prepare!.handler({
+      profile: { kind: "code_script", title: "Binary artifact producer", allowedCommands: ["node"], cleanupPolicy: "keep" },
+      files: [{ path: "produce.js", content: `${script}\n` }]
+    }, ctx);
+    const sandboxId = (prepared.structuredContent as { sandboxId: string }).sandboxId;
+    const runResult = await run!.handler({
+      sandboxId,
+      command: "node",
+      args: ["produce.js"],
+      collectArtifacts: fixtures.map((fixture) => fixture.source)
+    }, ctx);
+    assert.equal(runResult.ok, true);
+
+    for (const fixture of fixtures) {
+      const result = await promote!.handler({
+        projectId: project.id,
+        sandboxId,
+        sourceArtifactPath: fixture.source,
+        destinationPath: fixture.destination
+      }, ctx);
+      assert.equal(result.ok, true);
+      assert.deepEqual(result.artifacts, [fixture.destination]);
+      const payload = result.structuredContent as {
+        sourceArtifactPath: string;
+        destinationPath: string;
+        size: number;
+        sha256: string;
+        contentType: string;
+        verified: { registered: boolean; liveSandbox: boolean; size: boolean; sha256: boolean };
+        content?: unknown;
+        base64?: unknown;
+      };
+      assert.equal(payload.sourceArtifactPath, fixture.source);
+      assert.equal(payload.destinationPath, fixture.destination);
+      assert.equal(payload.size, fixture.bytes.length);
+      assert.equal(payload.sha256, createHash("sha256").update(fixture.bytes).digest("hex"));
+      assert.equal(payload.contentType, fixture.contentType);
+      assert.deepEqual(payload.verified, { registered: true, liveSandbox: true, size: true, sha256: true });
+      assert.equal(payload.content, undefined);
+      assert.equal(payload.base64, undefined);
+
+      const storedPath = await getProjectStoredFilePath(ctx.projectRoot, project.id, fixture.destination);
+      assert.deepEqual(await readFile(storedPath), fixture.bytes);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("promote_sandbox_artifact_to_project fails closed for unsafe, unregistered, changed, missing, or removed sources", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "sandbox-promote-deny-"));
+  try {
+    const ctx = toolContext(root);
+    const prepare = getToolModule("prepare_sandbox_workspace");
+    const run = getToolModule("run_sandboxed_command");
+    const promote = getToolModule("promote_sandbox_artifact_to_project");
+    assert.ok(prepare);
+    assert.ok(run);
+    assert.ok(promote);
+
+    const project = await createProject(ctx.projectRoot, { title: "Promotion failures", createdByClientId: "sandbox-test" });
+    const midiBytes = [0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, 0, 0x60, 0x4d, 0x54, 0x72, 0x6b, 0, 0, 0, 4, 0, 0xff, 0x2f, 0];
+    const prepared = await prepare!.handler({
+      profile: { kind: "code_script", title: "Promotion deny fixture", allowedCommands: ["node"], cleanupPolicy: "keep" },
+      files: [{
+        path: "produce.js",
+        content: `const fs = require('node:fs');\nfs.writeFileSync('registered.mid', Buffer.from(${JSON.stringify(midiBytes)}));\nfs.writeFileSync('unregistered.mid', Buffer.from(${JSON.stringify(midiBytes)}));\n`
+      }]
+    }, ctx);
+    const sandboxId = (prepared.structuredContent as { sandboxId: string }).sandboxId;
+    await run!.handler({ sandboxId, command: "node", args: ["produce.js"], collectArtifacts: ["registered.mid"] }, ctx);
+    const promoteBase = { projectId: project.id, sandboxId, destinationPath: "music/output.mid" };
+
+    await assert.rejects(
+      promote!.handler({ ...promoteBase, sourceArtifactPath: "unregistered.mid" }, ctx),
+      /not registered/
+    );
+    await assert.rejects(
+      promote!.handler({ ...promoteBase, sourceArtifactPath: "../registered.mid" }, ctx),
+      /Parent traversal/
+    );
+    await assert.rejects(
+      promote!.handler({ ...promoteBase, sourceArtifactPath: "nested/../registered.mid" }, ctx),
+      /Parent traversal/
+    );
+    await assert.rejects(
+      promote!.handler({ ...promoteBase, sourceArtifactPath: "registered.mid", destinationPath: "../escape.mid" }, ctx),
+      /Parent traversal/
+    );
+
+    const registeredPath = path.join(ctx.artifactRoot, "sandboxes", sandboxId, "registered.mid");
+    await writeFile(registeredPath, Buffer.from([...midiBytes, 0]));
+    await assert.rejects(
+      promote!.handler({ ...promoteBase, sourceArtifactPath: "registered.mid" }, ctx),
+      /size changed/
+    );
+    await rm(registeredPath);
+    await assert.rejects(
+      promote!.handler({ ...promoteBase, sourceArtifactPath: "registered.mid" }, ctx),
+      /no longer exists as a regular file/
+    );
+
+    const removedPrepared = await prepare!.handler({
+      profile: { kind: "code_script", title: "Removed sandbox fixture", allowedCommands: ["node"], cleanupPolicy: "cleanup_on_success" },
+      files: [{ path: "produce.js", content: `require('node:fs').writeFileSync('removed.mid', Buffer.from(${JSON.stringify(midiBytes)}));\n` }]
+    }, ctx);
+    const removedSandboxId = (removedPrepared.structuredContent as { sandboxId: string }).sandboxId;
+    const removedRun = await run!.handler({ sandboxId: removedSandboxId, command: "node", args: ["produce.js"], collectArtifacts: ["removed.mid"] }, ctx);
+    assert.equal((removedRun.structuredContent as { workspaceRemoved: boolean }).workspaceRemoved, true);
+    await assert.rejects(
+      promote!.handler({ projectId: project.id, sandboxId: removedSandboxId, sourceArtifactPath: "removed.mid", destinationPath: "music/removed.mid" }, ctx),
+      /removed sandbox/
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -336,6 +479,7 @@ test("sandbox-execution skill exposes tools through core, coding, and debug skil
     "create_sandbox_profile",
     "prepare_sandbox_workspace",
     "run_sandboxed_command",
+    "promote_sandbox_artifact_to_project",
     "list_sandbox_runs",
     "cleanup_sandbox",
     "export_sandbox_report"

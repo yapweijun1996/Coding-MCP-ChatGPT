@@ -1,22 +1,31 @@
-import { allToolModules } from "./tools/index.js";
+import { LazyToolRuntime, type ToolGroupRuntimeState } from "./lazy-registry.js";
+import { toolManifest } from "./tool-manifest.generated.js";
+import { hotToolGroupIds, toolGroupLoaders, type ToolGroupId } from "./tools/index.js";
 import type { ToolDefinition, ToolModule } from "./types.js";
 
-export const toolRegistry: ToolModule[] = allToolModules;
+const runtime = new LazyToolRuntime(toolManifest, toolGroupLoaders);
 
-const toolByName = new Map<string, ToolModule>();
-for (const tool of toolRegistry) {
-  if (toolByName.has(tool.definition.name)) {
-    throw new Error(`Duplicate MCP tool registration: ${tool.definition.name}`);
-  }
-  toolByName.set(tool.definition.name, tool);
+// Top-level await makes the selected common groups genuinely hot before any caller can use
+// the synchronous registry API. Every other handler remains behind its dynamic import.
+await runtime.warm(hotToolGroupIds);
+
+export const toolRegistry: ToolModule[] = runtime.list();
+export const toolDefinitions: ToolDefinition[] = toolManifest.map((entry) => entry.definition);
+
+/** Returns a loaded module or a definition-preserving lazy proxy. */
+export function getToolModule(name: string): ToolModule | undefined {
+  return runtime.get(name);
 }
 
-export const toolDefinitions: ToolDefinition[] = toolRegistry.map((tool) => tool.definition);
-
-export function getToolModule(name: string): ToolModule | undefined {
-  return toolByName.get(name);
+/** Loads the owning handler group and returns its real zod schema and handler. */
+export function loadToolModule(name: string): Promise<ToolModule | undefined> {
+  return runtime.load(name);
 }
 
 export function hasToolModule(name: string): boolean {
-  return toolByName.has(name);
+  return runtime.has(name);
+}
+
+export function getToolGroupRuntimeStates(): Record<ToolGroupId, ToolGroupRuntimeState> {
+  return runtime.states();
 }

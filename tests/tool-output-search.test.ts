@@ -116,6 +116,79 @@ test("tool output search indexes project outputs, issues, fix learnings, and man
   }
 });
 
+test("#0179 build and ingest create nested index directories", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "tool-output-search-nested-"));
+  try {
+    const ctx = toolContext(root);
+    const build = getToolModule("build_tool_output_search_index");
+    const ingest = getToolModule("ingest_tool_output_record");
+    assert.ok(build);
+    assert.ok(ingest);
+
+    const buildPath = "reports/search/index.json";
+    const buildResult = await build.handler({
+      includeFeedbackIssues: false,
+      includeFixLearnings: false,
+      outputPath: buildPath
+    }, ctx);
+    assert.equal(buildResult.ok, true);
+    const builtIndex = JSON.parse(await readFile(path.join(ctx.feedbackRoot, buildPath), "utf8")) as { records: unknown[] };
+    assert.deepEqual(builtIndex.records, []);
+
+    const ingestPath = "ingested/tool-output/index.json";
+    const ingestResult = await ingest.handler({
+      indexPath: ingestPath,
+      record: {
+        id: "manual:nested-index",
+        kind: "tool_log",
+        title: "Nested index regression",
+        text: "The shared writeIndex path creates every missing parent directory."
+      }
+    }, ctx);
+    assert.equal(ingestResult.ok, true);
+    const ingestedIndex = JSON.parse(await readFile(path.join(ctx.feedbackRoot, ingestPath), "utf8")) as { records: Array<{ id: string }> };
+    assert.deepEqual(ingestedIndex.records.map((record) => record.id), ["manual:nested-index"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("tool output search paths cannot escape feedbackRoot", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "tool-output-search-traversal-"));
+  try {
+    const ctx = toolContext(root);
+    const build = getToolModule("build_tool_output_search_index");
+    const ingest = getToolModule("ingest_tool_output_record");
+    assert.ok(build);
+    assert.ok(ingest);
+
+    await assert.rejects(
+      build.handler({
+        includeFeedbackIssues: false,
+        includeFixLearnings: false,
+        outputPath: "../escaped-build-index.json"
+      }, ctx),
+      /must stay inside feedbackRoot/
+    );
+    await assert.rejects(
+      ingest.handler({
+        indexPath: "../escaped-ingest-index.json",
+        record: {
+          id: "manual:escaped-index",
+          kind: "tool_log",
+          title: "Escaped index",
+          text: "This record must not be written outside feedbackRoot."
+        }
+      }, ctx),
+      /must stay inside feedbackRoot/
+    );
+    await assert.rejects(readFile(path.join(root, "escaped-build-index.json")), { code: "ENOENT" });
+    await assert.rejects(readFile(path.join(root, "escaped-ingest-index.json")), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("tool-output-search skill exposes tools through core, coding, and debug skills", () => {
   const toolNames = [
     "build_tool_output_search_index",

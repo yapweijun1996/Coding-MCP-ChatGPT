@@ -25,6 +25,9 @@ export interface SkillStateFile {
 let statePath = path.join(process.cwd(), ".state", "skill-state.json");
 let loaded = false;
 let enabledSkills = new Set<string>();
+// Consumers that derive a large view from both skill and tool state can use this
+// monotonic revision as a cheap cache key instead of repeatedly walking every skill.
+let stateRevision = 0;
 
 function defaultEnabledSkillIds(): string[] {
   return skillRegistry.filter((skill) => skill.enabledByDefault).map((skill) => skill.id);
@@ -67,12 +70,14 @@ export function initializeSkillState(pathname: string): void {
   loaded = false;
   enabledSkills = new Set();
   loadState();
+  stateRevision += 1;
 }
 
 export function resetSkillStateForTests(pathname?: string): void {
   if (pathname) statePath = pathname;
   loaded = true;
   enabledSkills = new Set(defaultEnabledSkillIds());
+  stateRevision += 1;
 }
 
 export function isSkillEnabled(id: string): boolean {
@@ -88,6 +93,11 @@ export function setSkillEnabled(id: string, enabled: boolean): void {
   if (enabled) enabledSkills.add(id);
   else enabledSkills.delete(id);
   persistState();
+  stateRevision += 1;
+}
+
+export function getSkillStateRevision(): number {
+  return stateRevision;
 }
 
 export function listSkillStates(): SkillState[] {

@@ -124,8 +124,8 @@ test("aggregateEvents computes per-tool and per-client metrics with percentiles"
     id: "x", time: "2026-06-20T10:00:00.000Z", method: "tools/call", clientId: "c", ok: true, ...overrides
   });
   const events: TelemetryEvent[] = [
-    mk({ toolName: "run_build", clientType: "claude", ok: true, durationMs: 100 }),
-    mk({ toolName: "run_build", clientType: "claude", ok: false, durationMs: 200, errorMessage: "boom", time: "2026-06-20T10:05:00.000Z" }),
+    mk({ toolName: "run_build", clientType: "claude", ok: true, durationMs: 100, queueWaitMs: 25, executionMs: 75, queueDepth: 3 }),
+    mk({ toolName: "run_build", clientType: "claude", ok: false, durationMs: 200, queueWaitMs: 50, executionMs: 150, queueDepth: 2, errorMessage: "boom", failureCategory: "environment", time: "2026-06-20T10:05:00.000Z" }),
     mk({ toolName: "run_build", clientType: "gemini", ok: true, durationMs: 300 }),
     mk({ toolName: "run_build", clientType: "gemini", ok: true, durationMs: 900 }),
     mk({ toolName: "list_projects", clientType: "claude", ok: true, durationMs: 10 }),
@@ -148,6 +148,11 @@ test("aggregateEvents computes per-tool and per-client metrics with percentiles"
   // Per-client split present.
   assert.ok(agg.byClient.find((m) => m.key === "claude"));
   assert.ok(agg.byClient.find((m) => m.key === "gemini"));
+  assert.equal(agg.byFailureCategory[0]?.key, "environment");
+  assert.equal(agg.performance.queueWaitMs.p50, 25);
+  assert.equal(agg.performance.queueWaitMs.p95, 50);
+  assert.equal(agg.performance.executionMs.max, 150);
+  assert.equal(agg.performance.queueDepth.samples, 2);
   // Recent errors captured with message.
   assert.equal(agg.recentErrors.length, 1);
   assert.equal(agg.recentErrors[0].errorMessage, "boom");

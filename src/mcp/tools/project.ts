@@ -34,9 +34,10 @@ import {
 } from "../../projects/store.js";
 import type { ProjectManifest, ProjectStatus, ProjectSummary, ProjectTaskEvidenceLink, ProjectTaskGraphNode, ProjectTaskHistoryItem, ProjectTaskItem, ProjectTaskPriority, ProjectTaskStatus, ReviewFinding } from "../../projects/store.js";
 import { buildProjectPublishOptions, projectShareAccessSchema } from "../../projects/publish-policy.js";
+import { throwIfAborted } from "../../shared/abort.js";
 import { makeShareUrl } from "../result.js";
 import type { ToolModule } from "../types.js";
-import { inspectWebpageUrl, renderWebpageInspectionReport, summarizeBrowserInspection } from "./web-inspect.js";
+import type { ViewportResult } from "./web-inspect.js";
 
 const maxBase64AssetChars = 40 * 1024 * 1024;
 const maxImportedImageBytes = 10 * 1024 * 1024;
@@ -831,7 +832,7 @@ async function fetchProjectAsset(url: string, relativePath: string): Promise<{ b
   throw new Error("Asset import exceeded the redirect limit.");
 }
 
-function withoutScreenshots(results: Awaited<ReturnType<typeof inspectWebpageUrl>>) {
+function withoutScreenshots(results: ViewportResult[]) {
   return results.map(({ screenshotDataUrl: _screenshotDataUrl, ...result }) => result);
 }
 
@@ -2607,7 +2608,7 @@ export const projectTools: ToolModule[] = [
   {
     definition: {
       name: "write_project_asset",
-      description: "Write a binary image or PPTX asset inside a persistent project from raw base64 content.",
+      description: "Compatibility tool: write a binary image or PPTX asset inside a persistent project from explicit raw base64 content. For a file from the ChatGPT conversation or image_gen, use promote_conversation_file_to_project instead so the original bytes can be streamed without Base64.",
       inputSchema: {
         type: "object",
         properties: {
@@ -2632,13 +2633,13 @@ export const projectTools: ToolModule[] = [
   {
     definition: {
       name: "import_project_asset_from_local_file",
-      description: "Import an image or PPTX file that already exists inside this server's own workspace directory into a persistent project. This does NOT reach files in a separate ChatGPT/client sandbox (e.g. /mnt/data) — the server and the client run in different filesystems. For a file only available on the client side, use write_project_asset with base64 content, or import_project_asset_from_url if it is reachable over HTTPS.",
+      description: "Import an image or PPTX file that already exists inside this server's own workspace directory into a persistent project. This does NOT reach files in a separate ChatGPT/client sandbox (e.g. /mnt/data) — the server and the client run in different filesystems. For a file from the ChatGPT conversation or image_gen, use promote_conversation_file_to_project; use import_project_asset_from_url only when the source is an independently reachable safe HTTPS URL.",
       inputSchema: {
         type: "object",
         properties: {
           projectId: { type: "string" },
           relativePath: { type: "string", description: "Project-relative asset path, e.g. assets/character.png." },
-          sourcePath: { type: "string", description: "Absolute or relative path to the asset, but it must resolve inside this server's workspace directory. Client-side sandbox paths (e.g. /mnt/data/...) will not resolve — use write_project_asset or import_project_asset_from_url instead." },
+          sourcePath: { type: "string", description: "Absolute or relative path to the asset, but it must resolve inside this server's workspace directory. Client-side sandbox paths (e.g. /mnt/data/...) will not resolve — use promote_conversation_file_to_project instead." },
           contentType: { type: "string", description: "Optional MIME type, e.g. image/png." }
         },
         required: ["projectId", "relativePath", "sourcePath"],
@@ -2686,7 +2687,7 @@ export const projectTools: ToolModule[] = [
   {
     definition: {
       name: "import_project_asset_from_url",
-      description: "Import an HTTPS image or PPTX asset into a persistent project after private-network and MIME validation.",
+      description: "Import an independently reachable HTTPS image or PPTX asset into a persistent project after private-network and MIME validation. For ChatGPT attachments or image_gen outputs, use promote_conversation_file_to_project so the connector file reference is handled natively.",
       inputSchema: {
         type: "object",
         properties: {
@@ -2819,6 +2820,7 @@ export const projectTools: ToolModule[] = [
       });
       const files = [];
       for (const fileInput of parsed.files) {
+        throwIfAborted(ctx.abortSignal);
         files.push(await writeProjectFile(ctx.projectRoot, project.id, fileInput.path, fileInput.content));
       }
 
@@ -2854,13 +2856,14 @@ export const projectTools: ToolModule[] = [
       let browserInspection: Record<string, unknown> | undefined;
       let inspectionReportUrl: string | undefined;
       if (parsed.browserValidation) {
+        const { inspectWebpageUrl, renderWebpageInspectionReport, summarizeBrowserInspection } = await import("./web-inspect.js");
         const browserResults = await inspectWebpageUrl(published.publishedUrl!, {
           viewports: ["desktop", "tablet", "mobile"],
           waitUntil: "networkidle",
           screenshot: true,
           fullPage: false,
           maxIssues: 12
-        });
+        }, ctx.abortSignal);
         const inspectionReport = renderWebpageInspectionReport(published.publishedUrl!, browserResults);
         const inspectionShare = await createShareArtifact({
           shareRoot: ctx.shareRoot,
@@ -2868,7 +2871,8 @@ export const projectTools: ToolModule[] = [
           summary: `Browser validation for ${project.id}.`,
           filename: `delivery-inspection-${project.id}.html`,
           html: inspectionReport,
-          ownerUserId: ctx.userId
+          ownerUserId: ctx.userId,
+          projectId: project.id
         });
         inspectionReportUrl = makeShareUrl(ctx.publicBaseUrl, inspectionShare.id, inspectionShare.filename);
         const inspectionWithoutScreenshots = withoutScreenshots(browserResults);
@@ -2964,6 +2968,7 @@ export const projectTools: ToolModule[] = [
     schema: screenshotProjectInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof screenshotProjectInputSchema>;
+      const { inspectWebpageUrl, renderWebpageInspectionReport, summarizeBrowserInspection } = await import("./web-inspect.js");
       const publishPolicy = agentPublishPolicy(ctx);
       const published = await publishProject(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, parsed.entryFile, publishPolicy.options);
       const results = await inspectWebpageUrl(published.publishedUrl!, {
@@ -2973,16 +2978,18 @@ export const projectTools: ToolModule[] = [
         fullPage: parsed.fullPage,
         timeoutMs: parsed.timeoutMs,
         maxIssues: 12
-      });
+      }, ctx.abortSignal);
       const screenshotUrls: string[] = [];
       for (const result of results) {
+        throwIfAborted(ctx.abortSignal);
         if (!result.screenshotDataUrl) continue;
         const screenshot = bufferFromDataUrl(result.screenshotDataUrl);
         const artifact = await createArtifact({
           artifactRoot: ctx.artifactRoot,
           filename: `${parsed.projectId}-${result.viewport}-screenshot.jpg`,
           contentType: screenshot.contentType,
-          content: screenshot.buffer
+          content: screenshot.buffer,
+          projectId: parsed.projectId
         });
         const screenshotUrl = makeArtifactUrl(ctx.contentBaseUrl ?? ctx.publicBaseUrl, artifact.id, artifact.filename);
         result.screenshotUrl = screenshotUrl;
@@ -2995,7 +3002,8 @@ export const projectTools: ToolModule[] = [
         summary: `Screenshot inspection for ${parsed.projectId}.`,
         filename: `project-screenshots-${parsed.projectId}.html`,
         html: reportHtml,
-        ownerUserId: ctx.userId
+        ownerUserId: ctx.userId,
+        projectId: parsed.projectId
       });
       const reportUrl = makeShareUrl(ctx.publicBaseUrl, reportShare.id, reportShare.filename);
       const resultForLogs = withoutScreenshots(results);
@@ -3101,6 +3109,7 @@ export const projectTools: ToolModule[] = [
         }
 
         if (parsed.browserValidation) {
+          const { inspectWebpageUrl, summarizeBrowserInspection } = await import("./web-inspect.js");
           const publishPolicy = agentPublishPolicy(ctx);
           const published = await publishProject(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, validation.entryFile, publishPolicy.options);
           attempt.publishedUrl = published.publishedUrl;
@@ -3110,7 +3119,7 @@ export const projectTools: ToolModule[] = [
             screenshot: true,
             fullPage: false,
             maxIssues: 12
-          });
+          }, ctx.abortSignal);
           const inspectionWithoutScreenshots = withoutScreenshots(browserResults);
           const inspection = {
             ...summarizeBrowserInspection(inspectionWithoutScreenshots),

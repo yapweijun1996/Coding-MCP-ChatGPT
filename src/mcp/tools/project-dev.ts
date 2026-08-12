@@ -21,7 +21,9 @@ import {
 import { buildProjectPublishOptions } from "../../projects/publish-policy.js";
 import type { ToolContext, ToolModule, ToolResult } from "../types.js";
 import { childEnv, gitChildEnv } from "../child-env.js";
-import { webInspectTools } from "./web-inspect.js";
+import { getStoragePolicy, withStorageQuota } from "../../storage/manager.js";
+import { bindAbort, signalWithTimeout, throwIfAborted } from "../../shared/abort.js";
+import { execFileAbortable } from "../../shared/process.js";
 
 const execFileAsync = promisify(execFile);
 const maxLogBytes = 60000;
@@ -471,32 +473,69 @@ async function runProcessWithInput(file: string, args: string[], cwd: string, in
   });
 }
 
-async function runNpmCommand(workspace: string, command: NpmProjectCommand, timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
+async function runNpmCommand(workspace: string, command: NpmProjectCommand, timeoutMs: number, signal?: AbortSignal): Promise<{ stdout: string; stderr: string }> {
   const args = command === "npm install"
     ? ["install"]
     : command === "npm test"
       ? ["test"]
       : ["run", command.replace("npm run ", "")];
-  return execFileAsync(npmExecutable(), args, { cwd: workspace, timeout: timeoutMs, maxBuffer: 1024 * 1024, env: childEnv() });
+  return execFileAbortable(npmExecutable(), args, { cwd: workspace, timeoutMs, maxBufferBytes: 1024 * 1024, env: childEnv(), signal });
+}
+
+async function npmCommandPreflight(workspace: string, command: NpmProjectCommand): Promise<{ ok: true } | { ok: false; message: string; availableScripts: string[] }> {
+  if (command === "npm install") return { ok: true };
+  const scriptName = command === "npm test" ? "test" : command.replace("npm run ", "");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(path.join(workspace, "package.json"), "utf8"));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return {
+      ok: false,
+      message: code === "ENOENT" ? "package.json is missing; cannot run an npm script." : "package.json is not valid JSON; cannot determine available npm scripts.",
+      availableScripts: []
+    };
+  }
+  const scripts = parsed && typeof parsed === "object" && !Array.isArray(parsed) && "scripts" in parsed
+    ? (parsed as { scripts?: unknown }).scripts
+    : undefined;
+  const availableScripts = scripts && typeof scripts === "object" && !Array.isArray(scripts)
+    ? Object.entries(scripts).filter((entry): entry is [string, string] => typeof entry[1] === "string").map(([name]) => name).sort()
+    : [];
+  if (availableScripts.includes(scriptName)) return { ok: true };
+  return {
+    ok: false,
+    message: `npm script \"${scriptName}\" is not defined. Available scripts: ${availableScripts.length ? availableScripts.join(", ") : "(none)"}.`,
+    availableScripts
+  };
 }
 
 function outputFromExecutionError(error: unknown): { stdout: string; stderr: string; code?: string | number | null; message: string } {
   const err = error as { stdout?: unknown; stderr?: unknown; code?: unknown; signal?: unknown; message?: unknown };
+  const stdout = typeof err.stdout === "string" ? trimOutput(err.stdout) : "";
+  const stderr = typeof err.stderr === "string" ? trimOutput(err.stderr) : "";
+  const baseMessage = typeof err.message === "string" ? err.message : "Command failed.";
+  // execFileAbortable intentionally keeps output on structured fields. Include the most
+  // useful stream in the bounded human-facing error too, preserving the old contract and
+  // making failures diagnosable without parsing structuredContent.
+  const message = trimOutput([baseMessage, stderr || stdout].filter(Boolean).join(" "), 4000);
   return {
-    stdout: typeof err.stdout === "string" ? trimOutput(err.stdout) : "",
-    stderr: typeof err.stderr === "string" ? trimOutput(err.stderr) : "",
+    stdout,
+    stderr,
     code: typeof err.code === "string" || typeof err.code === "number" || err.code === null ? err.code : undefined,
-    message: typeof err.message === "string" ? trimOutput(err.message, 4000) : "Command failed."
+    message
   };
 }
 
-async function waitForHttp(url: string, timeoutMs: number): Promise<void> {
+async function waitForHttp(url: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(url, { method: "HEAD" });
+      throwIfAborted(signal);
+      const response = await fetch(url, { method: "HEAD", signal: signalWithTimeout(signal, Math.min(1000, timeoutMs)) });
       if (response.ok) return;
     } catch {
+      throwIfAborted(signal);
       // keep polling until timeout
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -504,17 +543,19 @@ async function waitForHttp(url: string, timeoutMs: number): Promise<void> {
   throw new Error(`Local server did not become healthy within ${timeoutMs}ms.`);
 }
 
-function startWorkspaceServer(workspace: string, input: { script: "dev" | "start"; host: string; port: number; path: string }): { process: ReturnType<typeof spawn>; url: string; logs: string[] } {
+function startWorkspaceServer(workspace: string, input: { script: "dev" | "start"; host: string; port: number; path: string }, signal?: AbortSignal): { process: ReturnType<typeof spawn>; url: string; logs: string[] } {
   const args = ["run", input.script];
   if (input.script === "dev") args.push("--", "--host", input.host, "--port", String(input.port));
   const proc = spawn(npmExecutable(), args, {
     cwd: workspace,
     env: childEnv({ PORT: String(input.port), HOST: input.host }),
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
+    signal
   });
   const logs = [`Started npm run ${input.script} on ${input.host}:${input.port}`];
   proc.stdout?.on("data", (chunk) => logs.push(`[stdout] ${chunk.toString("utf8").trim()}`));
   proc.stderr?.on("data", (chunk) => logs.push(`[stderr] ${chunk.toString("utf8").trim()}`));
+  proc.on("error", (error) => logs.push(`[process] ${error.message}`));
   const normalizedPath = input.path.startsWith("/") ? input.path : `/${input.path}`;
   return { process: proc, url: `http://${input.host}:${input.port}${normalizedPath}`, logs };
 }
@@ -527,11 +568,12 @@ function viewportSize(viewport: z.infer<typeof recordProjectWorkspaceVideoSchema
   return { width: 1440, height: 900, isMobile: false };
 }
 
-async function maybeConvertWebmToMp4(webmPath: string, mp4Path: string, timeoutMs: number): Promise<void> {
+async function maybeConvertWebmToMp4(webmPath: string, mp4Path: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
   await execFileAsync(process.env.FFMPEG_PATH || "ffmpeg", ["-y", "-i", webmPath, "-movflags", "faststart", mp4Path], {
     timeout: timeoutMs,
     maxBuffer: 1024 * 1024,
-    env: childEnv()
+    env: childEnv(),
+    signal
   });
 }
 
@@ -540,6 +582,7 @@ async function copyPublishedDist(ctx: ToolContext, projectId: string, distRoot: 
   async function walk(current: string): Promise<void> {
     const entries = await readdir(current, { withFileTypes: true });
     for (const entry of entries) {
+      throwIfAborted(ctx.abortSignal);
       if (entry.name.startsWith(".")) continue;
       const absolutePath = path.join(current, entry.name);
       if (entry.isDirectory()) await walk(absolutePath);
@@ -552,6 +595,7 @@ async function copyPublishedDist(ctx: ToolContext, projectId: string, distRoot: 
   await clearProjectFiles(ctx.projectRoot, projectId);
   const written = [];
   for (const file of files.sort()) {
+    throwIfAborted(ctx.abortSignal);
     const extension = path.extname(file).toLowerCase();
     const absolutePath = path.join(distRoot, file);
     if (textPublishExtensions.has(extension)) written.push(await writeProjectFile(ctx.projectRoot, projectId, file, await readFile(absolutePath, "utf8")));
@@ -794,8 +838,14 @@ export const projectDevTools: ToolModule[] = [
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof npmCommandSchema>;
       const workspace = await resolveProjectWorkspace(ctx, parsed.projectId);
+      const preflight = await npmCommandPreflight(workspace, parsed.command);
+      if (!preflight.ok) {
+        const report = { command: parsed.command, cwd: workspace, message: preflight.message, availableScripts: preflight.availableScripts, failureCategory: "environment" };
+        await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "run_project_npm_command", ok: false, summary: preflight.message, details: report });
+        return { ok: false, summary: preflight.message, jobId: parsed.projectId, artifacts: [], structuredContent: report, logs: [], errors: [preflight.message] };
+      }
       try {
-        const { stdout, stderr } = await runNpmCommand(workspace, parsed.command, parsed.timeoutMs);
+        const { stdout, stderr } = await runNpmCommand(workspace, parsed.command, parsed.timeoutMs, ctx.abortSignal);
         const logs = [trimOutput(stdout), trimOutput(stderr)].filter(Boolean);
         await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "run_project_npm_command", ok: true, summary: `${parsed.command} finished.`, details: { command: parsed.command, cwd: workspace, logs } });
         return { ok: true, summary: `${parsed.command} finished.`, jobId: parsed.projectId, artifacts: [], structuredContent: { command: parsed.command, cwd: workspace, exitCode: 0 }, logs, errors: [] };
@@ -822,8 +872,18 @@ export const projectDevTools: ToolModule[] = [
       const safePath = assertSafeWorkspaceAssetPath(parsed.relativePath);
       const buffer = decodePureBase64(parsed.contentBase64);
       const absolutePath = await safeResolveInside(workspace, safePath);
-      await mkdir(path.dirname(absolutePath), { recursive: true });
-      await writeFile(absolutePath, buffer);
+      const previousStat = await stat(absolutePath).catch(() => undefined);
+      await withStorageQuota({
+        projectRoot: ctx.projectRoot,
+        projectDirectory: path.join(ctx.projectRoot, parsed.projectId),
+        workspaceRoot: ctx.workspaceRoot,
+        workspacePath: workspace,
+        additionalBytes: Math.max(0, buffer.byteLength - (previousStat?.size ?? 0)),
+        policy: ctx.storagePolicy ?? getStoragePolicy()
+      }, async () => {
+        await mkdir(path.dirname(absolutePath), { recursive: true });
+        await writeFile(absolutePath, buffer);
+      });
       const fileStat = await stat(absolutePath);
       const file = { path: safePath, size: fileStat.size, contentType: contentTypeForWorkspaceAsset(safePath), modifiedAt: fileStat.mtime.toISOString() };
       await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "write_project_workspace_asset", ok: true, summary: `Wrote workspace asset ${safePath}.`, details: file });
@@ -849,8 +909,18 @@ export const projectDevTools: ToolModule[] = [
       if (!sourceStat.isFile()) throw new Error("sourcePath must point to a file.");
       if (sourceStat.size > maxWorkspaceAssetBytes) throw new Error("Workspace asset exceeds 100 MiB.");
       const absolutePath = await safeResolveInside(workspace, safePath);
-      await mkdir(path.dirname(absolutePath), { recursive: true });
-      await copyFile(source.target, absolutePath);
+      const previousStat = await stat(absolutePath).catch(() => undefined);
+      await withStorageQuota({
+        projectRoot: ctx.projectRoot,
+        projectDirectory: path.join(ctx.projectRoot, parsed.projectId),
+        workspaceRoot: ctx.workspaceRoot,
+        workspacePath: workspace,
+        additionalBytes: Math.max(0, sourceStat.size - (previousStat?.size ?? 0)),
+        policy: ctx.storagePolicy ?? getStoragePolicy()
+      }, async () => {
+        await mkdir(path.dirname(absolutePath), { recursive: true });
+        await copyFile(source.target, absolutePath);
+      });
       const fileStat = await stat(absolutePath);
       const file = { path: safePath, size: fileStat.size, contentType: contentTypeForWorkspaceAsset(safePath), sourcePath: source.relativePath, modifiedAt: fileStat.mtime.toISOString() };
       await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "import_project_workspace_asset_from_local_file", ok: true, summary: `Imported workspace asset ${safePath}.`, details: file });
@@ -867,6 +937,7 @@ export const projectDevTools: ToolModule[] = [
     schema: inspectProjectWorkspaceSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof inspectProjectWorkspaceSchema>;
+      const { webInspectTools } = await import("./web-inspect.js");
       const workspace = await resolveProjectWorkspace(ctx, parsed.projectId);
       const inspectTool = webInspectTools.find((tool) => tool.definition.name === "inspect_local_project");
       if (!inspectTool) throw new Error("inspect_local_project tool is not registered.");
@@ -914,16 +985,17 @@ export const projectDevTools: ToolModule[] = [
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof recordProjectWorkspaceVideoSchema>;
       const workspace = await resolveProjectWorkspace(ctx, parsed.projectId);
-      const server = startWorkspaceServer(workspace, parsed);
+      const server = startWorkspaceServer(workspace, parsed, ctx.abortSignal);
       const videoDir = path.join(os.tmpdir(), `coding-mcp-video-${parsed.projectId}-${Date.now()}`);
       await mkdir(videoDir, { recursive: true });
       const consoleErrors: string[] = [];
       const pageErrors: string[] = [];
       try {
-        await waitForHttp(server.url, 30000);
+        await waitForHttp(server.url, 30000, ctx.abortSignal);
         const { chromium } = await import("playwright");
         const size = viewportSize(parsed.viewport, parsed.width, parsed.height);
         const browser = await chromium.launch({ headless: true });
+        const unbindAbort = bindAbort(ctx.abortSignal, () => browser.close());
         let videoPath: string | undefined;
         try {
           const context = await browser.newContext({
@@ -942,10 +1014,11 @@ export const projectDevTools: ToolModule[] = [
           await context.close();
           videoPath = video ? await video.path() : undefined;
         } finally {
-          await browser.close();
+          unbindAbort();
+          await browser.close().catch(() => undefined);
         }
         if (!videoPath) throw new Error("Playwright did not produce a video file.");
-        const webmArtifact = await createArtifact({ artifactRoot: ctx.artifactRoot, filename: `${parsed.projectId}-recording.webm`, contentType: "video/webm", content: await readFile(videoPath) });
+        const webmArtifact = await createArtifact({ artifactRoot: ctx.artifactRoot, filename: `${parsed.projectId}-recording.webm`, contentType: "video/webm", content: await readFile(videoPath), projectId: parsed.projectId });
         const webmArtifactUrl = makeArtifactUrl(ctx.contentBaseUrl ?? ctx.publicBaseUrl, webmArtifact.id, webmArtifact.filename);
         let artifactUrl = webmArtifactUrl;
         let format = "webm";
@@ -954,8 +1027,8 @@ export const projectDevTools: ToolModule[] = [
         if (parsed.format === "mp4") {
           try {
             const mp4Path = path.join(videoDir, `${parsed.projectId}-recording.mp4`);
-            await maybeConvertWebmToMp4(videoPath, mp4Path, Math.max(30000, parsed.durationMs * 3));
-            const mp4Artifact = await createArtifact({ artifactRoot: ctx.artifactRoot, filename: `${parsed.projectId}-recording.mp4`, contentType: "video/mp4", content: await readFile(mp4Path) });
+            await maybeConvertWebmToMp4(videoPath, mp4Path, Math.max(30000, parsed.durationMs * 3), ctx.abortSignal);
+            const mp4Artifact = await createArtifact({ artifactRoot: ctx.artifactRoot, filename: `${parsed.projectId}-recording.mp4`, contentType: "video/mp4", content: await readFile(mp4Path), projectId: parsed.projectId });
             artifactUrl = makeArtifactUrl(ctx.contentBaseUrl ?? ctx.publicBaseUrl, mp4Artifact.id, mp4Artifact.filename);
             artifacts.unshift(artifactUrl);
             format = "mp4";

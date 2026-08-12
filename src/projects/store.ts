@@ -1,15 +1,23 @@
-import { randomUUID } from "node:crypto";
-import { cp, mkdir, open, readFile, readdir, rm, stat } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { cp, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { TextDecoder } from "node:util";
 import { withKeyedLock } from "../shared/keyed-lock.js";
 import { atomicWrite } from "../shared/atomic-write.js";
+import { getStoragePolicy, measureDirectory, purgeProjectStorage, withStorageQuota } from "../storage/manager.js";
+import { forgetSharesForProject } from "../share/store.js";
 
 // Serialization key for a single project's metadata + files. All read-modify-write
 // sequences for one project run under this key so concurrent tool calls can't clobber
 // each other's task history / status / file content (lost-update races).
 function projectLockKey(projectRoot: string, projectId: string): string {
   return `project:${path.resolve(projectRoot)}::${projectId}`;
+}
+
+function workspaceRootForProjectRoot(projectRoot: string): string {
+  return path.join(path.dirname(path.resolve(projectRoot)), "workspace");
 }
 
 export type ProjectStatus = "draft" | "private" | "published" | "deleted";
@@ -281,10 +289,13 @@ export interface PublishProjectOptions {
   privateBaseUrl?: string;
 }
 
-export const defaultProjectShareAccess: ProjectShareAccess = "private";
+// New projects are globally reachable when they are published. Users can still
+// explicitly switch a project to private through the share-access controls.
+export const defaultProjectShareAccess: ProjectShareAccess = "anyone_with_link";
+const legacyProjectShareAccess: ProjectShareAccess = "private";
 
 export const maxProjectFileBytes = 1024 * 1024;
-export const maxProjectImageAssetBytes = 10 * 1024 * 1024;
+export const maxProjectImageAssetBytes = 100 * 1024 * 1024;
 export const maxProjectMediaAssetBytes = 100 * 1024 * 1024;
 export const maxProjectPresentationAssetBytes = 25 * 1024 * 1024;
 export const maxProjectArchiveAssetBytes = 50 * 1024 * 1024;
@@ -298,7 +309,7 @@ const filesDirectoryName = "files";
 const workspaceDirectoryName = "workspace";
 const maxTaskHistoryItems = 100;
 const allowedTextExtensions = new Set([".html", ".css", ".js", ".mjs", ".json", ".webmanifest", ".txt", ".md", ".csv", ".svg", ".xml", ".musicxml"]);
-const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".sf3", ".mp4", ".webm", ".mov", ".pptx", ".zip"]);
+const allowedAssetExtensions = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".svg", ".pdf", ".glb", ".gltf", ".hdr", ".exr", ".ktx2", ".mp3", ".wav", ".ogg", ".mid", ".midi", ".sfz", ".sf2", ".sf3", ".mp4", ".webm", ".mov", ".pptx", ".zip"]);
 // SoundFont / SFZ instrument packs are render inputs (a sampled grand piano can be 100MB-1GB+), not
 // web-served deliverables. They are exempt from the publish max-size gate (warned, not blocked).
 const instrumentSourceAssetExtensions = new Set([".sf2", ".sf3", ".sfz"]);
@@ -319,6 +330,7 @@ const projectContentTypes = new Map([
   [".jpeg", "image/jpeg"],
   [".webp", "image/webp"],
   [".gif", "image/gif"],
+  [".avif", "image/avif"],
   [".glb", "model/gltf-binary"],
   [".gltf", "model/gltf+json"],
   [".hdr", "image/vnd.radiance"],
@@ -335,6 +347,7 @@ const projectContentTypes = new Map([
   [".mp4", "video/mp4"],
   [".webm", "video/webm"],
   [".mov", "video/quicktime"],
+  [".pdf", "application/pdf"],
   [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
   [".zip", "application/zip"]
 ]);
@@ -369,7 +382,7 @@ function assertSafeProjectId(projectId: string): void {
 }
 
 function assertSafeProjectPath(relativePath: string, allowedExtensions: Set<string>, label: string): string {
-  if (!relativePath || path.isAbsolute(relativePath)) {
+  if (!relativePath || path.isAbsolute(relativePath) || /^[a-zA-Z]:[\\/]/.test(relativePath) || relativePath.startsWith("\\\\")) {
     throw new Error("Absolute or empty project file paths are not allowed.");
   }
 
@@ -497,7 +510,7 @@ export function validateProjectAssetBytes(relativePath: string, buffer: Buffer, 
   } else if (mediaAssetExtensions.has(extension)) {
     if (buffer.length > maxProjectMediaAssetBytes) throw new Error("Media/model asset exceeds 100 MiB.");
   } else if (buffer.length > maxProjectImageAssetBytes) {
-    throw new Error("Image asset exceeds 10 MiB.");
+    throw new Error("Image/document asset exceeds 100 MiB.");
   }
 
   if (extension === ".png" && !hasBytes(buffer, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) throw new Error("PNG asset has invalid magic bytes.");
@@ -536,7 +549,7 @@ export function validateProjectTextFileContent(relativePath: string, content: st
   }
 }
 
-function maxProjectAssetBytesForExtension(extension: string): number {
+export function maxProjectAssetBytesForExtension(extension: string): number {
   if (extension === ".zip") return maxProjectArchiveAssetBytes;
   if (extension === ".pptx") return maxProjectPresentationAssetBytes;
   if (mediaAssetExtensions.has(extension)) return maxProjectMediaAssetBytes;
@@ -548,7 +561,8 @@ function normalizeProjectMetadata(metadata: ProjectMetadata): ProjectMetadata {
   const taskList = (metadata.taskList ?? []).map((task) => ({ ...task, dependsOn: task.dependsOn ?? [] }));
   return {
     ...metadata,
-    shareAccess: metadata.shareAccess ?? defaultProjectShareAccess,
+    // Keep pre-existing manifests private when they predate the explicit field.
+    shareAccess: metadata.shareAccess ?? legacyProjectShareAccess,
     taskHistory: metadata.taskHistory ?? [],
     taskList
   };
@@ -864,9 +878,17 @@ export async function createProject(
       }
     ]
   };
-  await mkdir(getProjectFilesDirectory(projectRoot, id), { recursive: true });
-  await mkdir(getProjectWorkspaceDirectory(projectRoot, id), { recursive: true });
-  await writeProjectMetadata(projectRoot, metadata);
+  await withStorageQuota({
+    projectRoot,
+    projectDirectory: getProjectDirectory(projectRoot, id),
+    workspaceRoot: workspaceRootForProjectRoot(projectRoot),
+    additionalBytes: 0,
+    policy: getStoragePolicy()
+  }, async () => {
+    await mkdir(getProjectFilesDirectory(projectRoot, id), { recursive: true });
+    await mkdir(getProjectWorkspaceDirectory(projectRoot, id), { recursive: true });
+    await writeProjectMetadata(projectRoot, metadata);
+  });
   return metadata;
 }
 
@@ -1273,31 +1295,42 @@ export async function deleteProjectTask(projectRoot: string, projectId: string, 
 
 export async function writeProjectFile(projectRoot: string, projectId: string, relativePath: string, content: string): Promise<ProjectFileInfo> {
   return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
-  const safeRelativePath = assertSafeProjectFilePath(relativePath);
-  validateProjectTextFileContent(safeRelativePath, content);
+    const safeRelativePath = assertSafeProjectFilePath(relativePath);
+    validateProjectTextFileContent(safeRelativePath, content);
 
-  const metadata = await getProject(projectRoot, projectId);
-  if (metadata.status === "deleted") throw new Error("Cannot write to a deleted project.");
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot write to a deleted project.");
 
-  const absolutePath = resolveProjectStoredPath(projectRoot, projectId, safeRelativePath);
-  await mkdir(path.dirname(absolutePath), { recursive: true });
-  await atomicWrite(absolutePath, content);
+    const absolutePath = resolveProjectStoredPath(projectRoot, projectId, safeRelativePath);
+    const previousStat = await stat(absolutePath).catch(() => undefined);
+    const nextBytes = Buffer.byteLength(content, "utf8");
+    const additionalBytes = Math.max(0, nextBytes - (previousStat?.size ?? 0));
+    return withStorageQuota({
+      projectRoot,
+      projectDirectory: getProjectDirectory(projectRoot, projectId),
+      workspaceRoot: workspaceRootForProjectRoot(projectRoot),
+      additionalBytes,
+      policy: getStoragePolicy()
+    }, async () => {
+      await mkdir(path.dirname(absolutePath), { recursive: true });
+      await atomicWrite(absolutePath, content);
 
-  const fileStat = await stat(absolutePath);
-  const file = {
-    path: safeRelativePath,
-    size: fileStat.size,
-    modifiedAt: fileStat.mtime.toISOString()
-  };
-  const updated = addHistory(metadata, {
-    toolName: "write_project_file",
-    ok: true,
-    summary: `Wrote ${file.path}.`,
-    details: { path: file.path, size: file.size }
-  });
-  await writeProjectMetadata(projectRoot, updated);
+      const fileStat = await stat(absolutePath);
+      const file = {
+        path: safeRelativePath,
+        size: fileStat.size,
+        modifiedAt: fileStat.mtime.toISOString()
+      };
+      const updated = addHistory(metadata, {
+        toolName: "write_project_file",
+        ok: true,
+        summary: `Wrote ${file.path}.`,
+        details: { path: file.path, size: file.size }
+      });
+      await writeProjectMetadata(projectRoot, updated);
 
-  return file;
+      return file;
+    });
   });
 }
 
@@ -1308,81 +1341,431 @@ export async function patchProjectFile(
   operations: Array<{ find: string; replace: string; all?: boolean }>
 ): Promise<ProjectFileInfo> {
   return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
-  const metadata = await getProject(projectRoot, projectId);
-  if (metadata.status === "deleted") throw new Error("Cannot patch a deleted project.");
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot patch a deleted project.");
 
-  const safeRelativePath = assertSafeProjectFilePath(relativePath);
-  const absolutePath = resolveProjectStoredPath(projectRoot, projectId, safeRelativePath);
-  const fileStatBefore = await stat(absolutePath);
-  if (fileStatBefore.size > maxProjectFileBytes) {
-    throw new Error(`Project file is too large to patch. Size=${fileStatBefore.size}, maxBytes=${maxProjectFileBytes}.`);
-  }
+    const safeRelativePath = assertSafeProjectFilePath(relativePath);
+    const absolutePath = resolveProjectStoredPath(projectRoot, projectId, safeRelativePath);
+    const fileStatBefore = await stat(absolutePath);
+    if (fileStatBefore.size > maxProjectFileBytes) {
+      throw new Error(`Project file is too large to patch. Size=${fileStatBefore.size}, maxBytes=${maxProjectFileBytes}.`);
+    }
 
-  let content = await readFile(absolutePath, "utf8");
-  const applied: Array<{ find: string; replace: string; count: number; all: boolean }> = [];
-  for (const operation of operations) {
-    if (!operation.find) throw new Error("Patch find text must not be empty.");
-    const count = operation.all
-      ? content.split(operation.find).length - 1
-      : content.includes(operation.find) ? 1 : 0;
-    if (count === 0) throw new Error(`Patch find text not found in ${safeRelativePath}: ${operation.find.slice(0, 80)}`);
-    content = operation.all
-      ? content.split(operation.find).join(operation.replace)
-      : content.replace(operation.find, operation.replace);
-    applied.push({ find: operation.find, replace: operation.replace, count, all: operation.all === true });
-  }
+    let content = await readFile(absolutePath, "utf8");
+    const applied: Array<{ find: string; replace: string; count: number; all: boolean }> = [];
+    for (const operation of operations) {
+      if (!operation.find) throw new Error("Patch find text must not be empty.");
+      const count = operation.all
+        ? content.split(operation.find).length - 1
+        : content.includes(operation.find) ? 1 : 0;
+      if (count === 0) throw new Error(`Patch find text not found in ${safeRelativePath}: ${operation.find.slice(0, 80)}`);
+      content = operation.all
+        ? content.split(operation.find).join(operation.replace)
+        : content.replace(operation.find, operation.replace);
+      applied.push({ find: operation.find, replace: operation.replace, count, all: operation.all === true });
+    }
 
-  if (Buffer.byteLength(content, "utf8") > maxProjectFileBytes) {
-    throw new Error("Patched project file content exceeds 1 MiB.");
-  }
-  validateProjectTextFileContent(safeRelativePath, content);
+    if (Buffer.byteLength(content, "utf8") > maxProjectFileBytes) {
+      throw new Error("Patched project file content exceeds 1 MiB.");
+    }
+    validateProjectTextFileContent(safeRelativePath, content);
 
-  await atomicWrite(absolutePath, content);
-  const fileStat = await stat(absolutePath);
-  const file = {
-    path: safeRelativePath,
-    size: fileStat.size,
-    modifiedAt: fileStat.mtime.toISOString()
-  };
-  const updated = addHistory(metadata, {
-    toolName: "patch_project_file",
-    ok: true,
-    summary: `Patched ${file.path}.`,
-    details: { path: file.path, operations: applied.map((operation) => ({ count: operation.count, all: operation.all })) }
-  });
-  await writeProjectMetadata(projectRoot, updated);
+    const additionalBytes = Math.max(0, Buffer.byteLength(content, "utf8") - fileStatBefore.size);
+    return withStorageQuota({
+      projectRoot,
+      projectDirectory: getProjectDirectory(projectRoot, projectId),
+      workspaceRoot: workspaceRootForProjectRoot(projectRoot),
+      additionalBytes,
+      policy: getStoragePolicy()
+    }, async () => {
+      await atomicWrite(absolutePath, content);
+      const fileStat = await stat(absolutePath);
+      const file = {
+        path: safeRelativePath,
+        size: fileStat.size,
+        modifiedAt: fileStat.mtime.toISOString()
+      };
+      const updated = addHistory(metadata, {
+        toolName: "patch_project_file",
+        ok: true,
+        summary: `Patched ${file.path}.`,
+        details: { path: file.path, operations: applied.map((operation) => ({ count: operation.count, all: operation.all })) }
+      });
+      await writeProjectMetadata(projectRoot, updated);
 
-  return file;
+      return file;
+    });
   });
 }
 
 export async function writeProjectAsset(projectRoot: string, projectId: string, relativePath: string, content: Buffer, contentType?: string): Promise<ProjectFileInfo> {
   return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
-  const safeRelativePath = assertSafeProjectAssetPath(relativePath);
-  validateProjectAssetBytes(safeRelativePath, content, contentType);
+    const safeRelativePath = assertSafeProjectAssetPath(relativePath);
+    validateProjectAssetBytes(safeRelativePath, content, contentType);
 
-  const metadata = await getProject(projectRoot, projectId);
-  if (metadata.status === "deleted") throw new Error("Cannot write to a deleted project.");
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new Error("Cannot write to a deleted project.");
 
-  const absolutePath = resolveProjectAssetPath(projectRoot, projectId, safeRelativePath);
-  await mkdir(path.dirname(absolutePath), { recursive: true });
-  await atomicWrite(absolutePath, content);
+    const absolutePath = resolveProjectAssetPath(projectRoot, projectId, safeRelativePath);
+    const previousStat = await stat(absolutePath).catch(() => undefined);
+    const additionalBytes = Math.max(0, content.byteLength - (previousStat?.size ?? 0));
+    return withStorageQuota({
+      projectRoot,
+      projectDirectory: getProjectDirectory(projectRoot, projectId),
+      workspaceRoot: workspaceRootForProjectRoot(projectRoot),
+      additionalBytes,
+      policy: getStoragePolicy()
+    }, async () => {
+      await mkdir(path.dirname(absolutePath), { recursive: true });
+      await atomicWrite(absolutePath, content);
 
-  const fileStat = await stat(absolutePath);
-  const file = {
-    path: safeRelativePath,
-    size: fileStat.size,
-    modifiedAt: fileStat.mtime.toISOString()
-  };
-  const updated = addHistory(metadata, {
-    toolName: "write_project_asset",
-    ok: true,
-    summary: `Wrote asset ${file.path}.`,
-    details: { path: file.path, size: file.size, contentType: getProjectFileContentType(file.path) }
+      const fileStat = await stat(absolutePath);
+      const file = {
+        path: safeRelativePath,
+        size: fileStat.size,
+        modifiedAt: fileStat.mtime.toISOString()
+      };
+      const updated = addHistory(metadata, {
+        toolName: "write_project_asset",
+        ok: true,
+        summary: `Wrote asset ${file.path}.`,
+        details: { path: file.path, size: file.size, contentType: getProjectFileContentType(file.path) }
+      });
+      await writeProjectMetadata(projectRoot, updated);
+
+      return file;
+    });
   });
-  await writeProjectMetadata(projectRoot, updated);
+}
 
-  return file;
+export class ProjectAssetStreamError extends Error {
+  readonly code: string;
+  readonly details: Record<string, unknown>;
+
+  constructor(code: string, message: string, details: Record<string, unknown> = {}) {
+    super(message);
+    this.name = "ProjectAssetStreamError";
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export interface ProjectAssetStreamValidationInput {
+  tempPath: string;
+  prefix: Buffer;
+  size: number;
+  sourceSha256: string;
+}
+
+export interface ProjectAssetStreamOptions {
+  expectedBytes?: number;
+  maxBytes: number;
+  overwrite?: boolean;
+  contentType?: string;
+  policy?: ReturnType<typeof getStoragePolicy>;
+  toolName?: string;
+  historyDetails?: Record<string, unknown>;
+  validateTemp?: (input: ProjectAssetStreamValidationInput) => Promise<Record<string, unknown> | undefined> | Record<string, unknown> | undefined;
+}
+
+export interface ProjectAssetStreamResult {
+  file: ProjectFileInfo;
+  sourceSize: number;
+  sourceSha256: string;
+  destinationSha256: string;
+  byteExact: boolean;
+  alreadyPresent: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+type HashedFile = { size: number; sha256: string };
+
+async function hashFile(absolutePath: string): Promise<HashedFile> {
+  const hash = createHash("sha256");
+  let size = 0;
+  for await (const value of createReadStream(absolutePath)) {
+    const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value as Uint8Array);
+    size += chunk.byteLength;
+    hash.update(chunk);
+  }
+  return { size, sha256: hash.digest("hex") };
+}
+
+function isInsidePath(root: string, target: string): boolean {
+  const resolvedRoot = path.resolve(root);
+  const resolvedTarget = path.resolve(target);
+  return resolvedTarget === resolvedRoot || resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`);
+}
+
+async function assertSafeProjectAssetStoragePath(filesRoot: string, targetPath: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
+  const resolvedRoot = path.resolve(filesRoot);
+  const parentPath = path.dirname(targetPath);
+  const rootStat = await lstat(resolvedRoot).catch(() => undefined);
+  if (!rootStat || rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new ProjectAssetStreamError("PATH_OUT_OF_SCOPE", "The project asset root must be a real directory.");
+  }
+
+  const relativeParent = path.relative(resolvedRoot, parentPath);
+  let current = resolvedRoot;
+  for (const segment of relativeParent ? relativeParent.split(path.sep).filter(Boolean) : []) {
+    current = path.join(current, segment);
+    const segmentStat = await lstat(current).catch(() => undefined);
+    if (!segmentStat || segmentStat.isSymbolicLink() || !segmentStat.isDirectory()) {
+      throw new ProjectAssetStreamError("PATH_OUT_OF_SCOPE", "The project asset path crosses a symlink or non-directory component.");
+    }
+  }
+
+  const [realRoot, realParent] = await Promise.all([realpath(resolvedRoot), realpath(parentPath)]);
+  if (!isInsidePath(realRoot, realParent)) {
+    throw new ProjectAssetStreamError("PATH_OUT_OF_SCOPE", "The project asset path resolves outside the selected project.");
+  }
+
+  const targetStat = await lstat(targetPath).catch((error) => {
+    if (error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (targetStat?.isSymbolicLink()) {
+    throw new ProjectAssetStreamError("PATH_OUT_OF_SCOPE", "The project asset destination cannot be a symlink.");
+  }
+  if (targetStat && !targetStat.isFile()) {
+    throw new ProjectAssetStreamError("PATH_OUT_OF_SCOPE", "The project asset destination must be a regular file.");
+  }
+  return targetStat;
+}
+
+async function prepareSafeProjectAssetParent(filesRoot: string, targetPath: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
+  const resolvedRoot = path.resolve(filesRoot);
+  const rootStat = await lstat(resolvedRoot).catch(() => undefined);
+  if (!rootStat || rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new ProjectAssetStreamError("PATH_OUT_OF_SCOPE", "The project asset root must be a real directory.");
+  }
+
+  const relativeParent = path.relative(resolvedRoot, path.dirname(targetPath));
+  let current = resolvedRoot;
+  for (const segment of relativeParent ? relativeParent.split(path.sep).filter(Boolean) : []) {
+    current = path.join(current, segment);
+    let segmentStat = await lstat(current).catch((error) => {
+      if (error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!segmentStat) {
+      await mkdir(current);
+      segmentStat = await lstat(current);
+    }
+    if (segmentStat.isSymbolicLink() || !segmentStat.isDirectory()) {
+      throw new ProjectAssetStreamError("PATH_OUT_OF_SCOPE", "The project asset path crosses a symlink or non-directory component.");
+    }
+  }
+  return assertSafeProjectAssetStoragePath(filesRoot, targetPath);
+}
+
+async function fsyncDirectory(directory: string): Promise<void> {
+  const directoryHandle = await open(directory, "r");
+  try {
+    await directoryHandle.sync();
+  } finally {
+    await directoryHandle.close();
+  }
+}
+
+async function stageProjectAssetStream(
+  source: Readable,
+  tempPath: string,
+  options: ProjectAssetStreamOptions
+): Promise<{ size: number; sourceSha256: string; prefix: Buffer }> {
+  const maxBytes = Math.floor(options.maxBytes);
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new ProjectAssetStreamError("FILE_TOO_LARGE", "The project asset byte limit is invalid.", { maxBytes });
+  }
+  if (options.expectedBytes !== undefined && (!Number.isSafeInteger(options.expectedBytes) || options.expectedBytes < 0)) {
+    throw new ProjectAssetStreamError("FILE_REFERENCE_INVALID", "The connector file size metadata is invalid.");
+  }
+  if (options.expectedBytes !== undefined && options.expectedBytes > maxBytes) {
+    throw new ProjectAssetStreamError("FILE_TOO_LARGE", "The connector file exceeds the project asset byte limit.", {
+      maxBytes,
+      actualBytes: options.expectedBytes
+    });
+  }
+
+  const tempHandle = await open(tempPath, "wx", 0o600);
+  const hash = createHash("sha256");
+  const prefixParts: Buffer[] = [];
+  let prefixBytes = 0;
+  let size = 0;
+  try {
+    for await (const value of source) {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value as Uint8Array);
+      if (chunk.byteLength > maxBytes - size) {
+        throw new ProjectAssetStreamError("FILE_TOO_LARGE", "The connector file exceeds the project asset byte limit.", {
+          maxBytes,
+          actualBytes: size + chunk.byteLength
+        });
+      }
+      await tempHandle.write(chunk);
+      hash.update(chunk);
+      if (prefixBytes < 1024 * 1024) {
+        const take = Math.min(chunk.byteLength, 1024 * 1024 - prefixBytes);
+        prefixParts.push(Buffer.from(chunk.subarray(0, take)));
+        prefixBytes += take;
+      }
+      size += chunk.byteLength;
+    }
+    if (size === 0) throw new ProjectAssetStreamError("UNSUPPORTED_FILE_TYPE", "The connector file is empty.");
+    if (options.expectedBytes !== undefined && size !== options.expectedBytes) {
+      throw new ProjectAssetStreamError("TRANSFER_INTERRUPTED", "The connector file ended before its declared byte length.", {
+        expectedBytes: options.expectedBytes,
+        actualBytes: size
+      });
+    }
+    await tempHandle.sync();
+    const sourceSha256 = hash.digest("hex");
+    return { size, sourceSha256, prefix: Buffer.concat(prefixParts, prefixBytes) };
+  } catch (error) {
+    source.destroy();
+    throw error;
+  } finally {
+    await tempHandle.close().catch(() => undefined);
+  }
+}
+
+export async function writeProjectAssetFromStream(
+  projectRoot: string,
+  projectId: string,
+  relativePath: string,
+  source: Readable,
+  options: ProjectAssetStreamOptions
+): Promise<ProjectAssetStreamResult> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const safeRelativePath = assertSafeProjectAssetPath(relativePath);
+    const metadata = await getProject(projectRoot, projectId);
+    if (metadata.status === "deleted") throw new ProjectAssetStreamError("PROJECT_WRITE_DENIED", "Cannot write to a deleted project.");
+
+    const filesRoot = getProjectFilesDirectory(projectRoot, projectId);
+    const absolutePath = resolveProjectAssetPath(projectRoot, projectId, safeRelativePath);
+    const previousStat = await prepareSafeProjectAssetParent(filesRoot, absolutePath);
+    const previousSize = Number(previousStat?.size ?? 0);
+    const tempPath = path.join(path.dirname(absolutePath), `.tmp-${randomUUID()}`);
+    let renamed = false;
+    let staged: { size: number; sourceSha256: string; prefix: Buffer; metadata?: Record<string, unknown> } | undefined;
+
+    const stage = async (): Promise<void> => {
+      const result = await stageProjectAssetStream(source, tempPath, options);
+      const validationMetadata = options.validateTemp ? await options.validateTemp({
+        tempPath,
+        prefix: result.prefix,
+        size: result.size,
+        sourceSha256: result.sourceSha256
+      }) : undefined;
+      staged = { ...result, metadata: validationMetadata };
+    };
+
+    const commit = async (): Promise<ProjectAssetStreamResult> => {
+      if (!staged) throw new Error("Internal error: asset stream was not staged.");
+      const currentDestination = await assertSafeProjectAssetStoragePath(filesRoot, absolutePath);
+      const overwrite = options.overwrite === true;
+      if (currentDestination && !overwrite) {
+        const existing = await hashFile(absolutePath);
+        if (existing.size === staged.size && existing.sha256 === staged.sourceSha256) {
+          await rm(tempPath, { force: true });
+          const file: ProjectFileInfo = { path: safeRelativePath, size: existing.size, modifiedAt: (await stat(absolutePath)).mtime.toISOString() };
+          const updated = addHistory(metadata, {
+            toolName: options.toolName ?? "write_project_asset_from_stream",
+            ok: true,
+            summary: `Asset ${file.path} was already present with identical bytes.`,
+            details: {
+              ...(options.historyDetails ?? {}),
+              path: file.path,
+              size: file.size,
+              contentType: options.contentType ?? getProjectFileContentType(file.path),
+              sourceSize: staged.size,
+              sourceSha256: staged.sourceSha256,
+              destinationSha256: existing.sha256,
+              byteExact: true,
+              alreadyPresent: true,
+              overwrite: false
+            }
+          });
+          await writeProjectMetadata(projectRoot, updated);
+          return {
+            file,
+            sourceSize: staged.size,
+            sourceSha256: staged.sourceSha256,
+            destinationSha256: existing.sha256,
+            byteExact: true,
+            alreadyPresent: true,
+            metadata: staged.metadata
+          };
+        }
+        throw new ProjectAssetStreamError("ASSET_ALREADY_EXISTS", `Asset ${safeRelativePath} already exists.`, { path: safeRelativePath });
+      }
+
+      await rename(tempPath, absolutePath);
+      renamed = true;
+      await fsyncDirectory(path.dirname(absolutePath));
+      const destination = await hashFile(absolutePath);
+      if (destination.size !== staged.size || destination.sha256 !== staged.sourceSha256) {
+        throw new ProjectAssetStreamError("HASH_MISMATCH", "The destination asset does not match the source bytes.", {
+          sourceSize: staged.size,
+          destinationSize: destination.size,
+          sourceSha256: staged.sourceSha256,
+          destinationSha256: destination.sha256
+        });
+      }
+      const fileStat = await stat(absolutePath);
+      const file: ProjectFileInfo = { path: safeRelativePath, size: fileStat.size, modifiedAt: fileStat.mtime.toISOString() };
+      const updated = addHistory(metadata, {
+        toolName: options.toolName ?? "write_project_asset_from_stream",
+        ok: true,
+        summary: `Promoted asset ${file.path}.`,
+        details: {
+          ...(options.historyDetails ?? {}),
+          path: file.path,
+          size: file.size,
+          contentType: options.contentType ?? getProjectFileContentType(file.path),
+          sourceSize: staged.size,
+          sourceSha256: staged.sourceSha256,
+          destinationSha256: destination.sha256,
+          byteExact: true,
+          alreadyPresent: false,
+          overwrite
+        }
+      });
+      await writeProjectMetadata(projectRoot, updated);
+      return {
+        file,
+        sourceSize: staged.size,
+        sourceSha256: staged.sourceSha256,
+        destinationSha256: destination.sha256,
+        byteExact: destination.size === staged.size && destination.sha256 === staged.sourceSha256,
+        alreadyPresent: false,
+        metadata: staged.metadata
+      };
+    };
+
+    try {
+      const quotaPolicy = options.policy ?? getStoragePolicy();
+      const quotaInput = {
+        projectRoot,
+        projectDirectory: getProjectDirectory(projectRoot, projectId),
+        workspaceRoot: workspaceRootForProjectRoot(projectRoot),
+        policy: quotaPolicy
+      };
+      if (options.expectedBytes !== undefined) {
+        return await withStorageQuota({ ...quotaInput, additionalBytes: options.expectedBytes }, async () => {
+          await stage();
+          return commit();
+        });
+      }
+      await stage();
+      if (!staged) throw new Error("Internal error: asset stream was not staged.");
+      return await withStorageQuota({
+        ...quotaInput,
+        additionalBytes: Math.max(0, staged.size - previousSize),
+        temporaryBytesToExclude: staged.size
+      }, commit);
+    } finally {
+      if (!renamed) await rm(tempPath, { force: true }).catch(() => undefined);
+    }
   });
 }
 
@@ -1740,6 +2123,7 @@ export async function forkProject(
     updatedAt: now,
     createdByClientId: input.createdByClientId,
     status: "draft",
+    shareAccess: defaultProjectShareAccess,
     entryFile: source.entryFile,
     lastValidation: undefined,
     taskHistory: [
@@ -1754,9 +2138,18 @@ export async function forkProject(
     ]
   };
 
-  await mkdir(getProjectDirectory(projectRoot, id), { recursive: true });
-  await cp(getProjectFilesDirectory(projectRoot, sourceProjectId), getProjectFilesDirectory(projectRoot, id), { recursive: true });
-  await writeProjectMetadata(projectRoot, metadata);
+  const sourceBytes = (await measureDirectory(getProjectFilesDirectory(projectRoot, sourceProjectId))).bytes;
+  await withStorageQuota({
+    projectRoot,
+    projectDirectory: getProjectDirectory(projectRoot, id),
+    workspaceRoot: workspaceRootForProjectRoot(projectRoot),
+    additionalBytes: sourceBytes,
+    policy: getStoragePolicy()
+  }, async () => {
+    await mkdir(getProjectDirectory(projectRoot, id), { recursive: true });
+    await cp(getProjectFilesDirectory(projectRoot, sourceProjectId), getProjectFilesDirectory(projectRoot, id), { recursive: true });
+    await writeProjectMetadata(projectRoot, metadata);
+  });
   return metadata;
 }
 
@@ -1936,6 +2329,86 @@ export async function deleteProjectFile(projectRoot: string, projectId: string, 
     });
     await writeProjectMetadata(projectRoot, updated);
   });
+}
+
+export interface ProjectPurgeResult {
+  projectId: string;
+  title: string;
+  projectBytes: number;
+  workspaceBytes: number;
+  artifactBytes: number;
+  shareBytes: number;
+  workspaceRemoved: boolean;
+}
+
+async function workspaceIsBoundToAnotherProject(projectRoot: string, workspacePath: string, projectId: string): Promise<boolean> {
+  let entries: DirectoryEntryLike[];
+  try {
+    entries = await readdir(projectRoot, { withFileTypes: true });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
+  const normalizedWorkspace = path.resolve(workspacePath);
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === projectId) continue;
+    try {
+      const metadata = await readProjectMetadata(projectRoot, entry.name);
+      if (metadata.workspaceBinding?.path && path.resolve(metadata.workspaceBinding.path) === normalizedWorkspace) return true;
+    } catch {
+      // An incomplete project directory must not prevent another project from being purged.
+    }
+  }
+  return false;
+}
+
+export async function purgeProject(
+  projectRoot: string,
+  projectId: string,
+  options: { workspaceRoot?: string; artifactRoot?: string; shareRoot?: string } = {}
+): Promise<ProjectPurgeResult> {
+  return withKeyedLock(projectLockKey(projectRoot, projectId), async () => {
+    const metadata = await getProject(projectRoot, projectId);
+    const workspaceRoot = options.workspaceRoot ?? workspaceRootForProjectRoot(projectRoot);
+    const boundWorkspace = metadata.workspaceBinding?.path;
+    const safeWorkspace = boundWorkspace && path.resolve(boundWorkspace).startsWith(`${path.resolve(workspaceRoot)}${path.sep}`)
+      ? path.resolve(boundWorkspace)
+      : undefined;
+    const sharedWorkspace = safeWorkspace
+      ? await workspaceIsBoundToAnotherProject(projectRoot, safeWorkspace, projectId)
+      : false;
+    const removed = await purgeProjectStorage({
+      projectDirectory: getProjectDirectory(projectRoot, projectId),
+      workspaceRoot,
+      workspacePath: sharedWorkspace ? undefined : safeWorkspace,
+      artifactRoot: options.artifactRoot,
+      shareRoot: options.shareRoot
+    });
+    forgetSharesForProject(projectId);
+    return {
+      projectId,
+      title: metadata.title,
+      ...removed,
+      workspaceRemoved: removed.workspaceRemoved && !sharedWorkspace
+    };
+  });
+}
+
+export async function purgeDeletedProjects(
+  projectRoot: string,
+  options: { retentionDays: number; workspaceRoot?: string; artifactRoot?: string; shareRoot?: string }
+): Promise<ProjectPurgeResult[]> {
+  const cutoff = Date.now() - Math.max(0, options.retentionDays) * 24 * 60 * 60 * 1000;
+  const deleted = (await listProjects(projectRoot, true)).filter((project) => {
+    if (project.status !== "deleted") return false;
+    const updatedAt = Date.parse(project.updatedAt);
+    return Number.isFinite(updatedAt) && updatedAt <= cutoff;
+  });
+  const results: ProjectPurgeResult[] = [];
+  for (const project of deleted) {
+    results.push(await purgeProject(projectRoot, project.id, options));
+  }
+  return results;
 }
 
 export async function deleteProject(projectRoot: string, projectId: string): Promise<ProjectMetadata> {

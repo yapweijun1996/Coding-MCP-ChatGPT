@@ -46,6 +46,11 @@ Before any route is registered, the stores are initialized and awaited
 (`server.ts:30-49`): OAuth state, skill state, tool state, jobs, shares, users. This is
 deliberate — the first request can never race a half-loaded store.
 
+The native `promote_conversation_file_to_project` call carries only the connector file
+reference in this JSON body. Its binary bytes are fetched server-side after tool dispatch,
+so `CONVERSATION_FILE_MAX_BYTES` and `FILE_TRANSFER_TIMEOUT_MS` govern that stream. The
+40 MiB JSON ceiling remains relevant to legacy `write_project_asset` Base64 calls.
+
 ### Step 2 — Route match: `POST /mcp`
 
 The handler lives in `registerMcpRoutes` in `src/http/mcp-routes.ts`, wrapped in
@@ -124,20 +129,24 @@ This is the security-critical step, and it lives in **`mcp-routes.ts`, not in
 Only if the gate passes does the route call `callTool`. `router.ts` trusts that the gate
 already ran; it does **no** access check of its own.
 
-### Step 7 — Dispatch to the tool module (`callTool` → `getToolModule`)
+### Step 7 — Dispatch to the tool module (`callTool` → `loadToolModule`)
 
 `callTool(name, args, ctx)` in `src/mcp/router.ts` does three things and nothing else:
 
 ```ts
-const tool = getToolModule(name);                 // registry lookup
+const tool = await loadToolModule(name);          // load the owning group once
 if (!tool) return errorResult(new Error(...));    // unknown tool → ok:false result
 const parsed = tool.schema ? tool.schema.parse(rawInput ?? {}) : rawInput;  // zod
 return await tool.handler(parsed, ctx);
 ```
 
-`getToolModule` (`src/mcp/registry.ts`) is a `Map` lookup. The map is built once at
-import time from `allToolModules` (`src/mcp/tools/index.js`); a duplicate tool name
-throws at startup so two modules can never claim the same name.
+`toolDefinitions` comes from the generated static manifest, so discovery does not import every
+schema and handler. `loadToolModule` (`src/mcp/registry.ts`) resolves the manifest group through
+one memoized dynamic import; concurrent first calls share the same promise. Common project/file
+groups are warmed at startup, while heavy browser, music, presentation, SVG, 3D, and rebuild
+groups stay cold. Build-time generation rejects duplicate names, and first load verifies the
+runtime definitions/defaults exactly match the manifest before exposing any handler from a group.
+Load or drift failures become normal `ok:false` tool results rather than crashing the MCP process.
 
 ### Step 8 — Input validation (zod)
 

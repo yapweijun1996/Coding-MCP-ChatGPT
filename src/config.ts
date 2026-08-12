@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { OAuthConfig } from "./oauth.js";
+import { resolveStoragePolicy, type StoragePolicy } from "./storage/manager.js";
 
 // Centralized server configuration resolved from environment variables. Pure: no side
 // effects, no I/O, no store initialization — server.ts owns the ordered bootstrap. Route
@@ -32,11 +33,27 @@ export interface ServerConfig {
   adminPasscode: string;
   oauthConfig: OAuthConfig;
   adminDistPath: string;
+  storagePolicy?: StoragePolicy;
+  conversationFileMaxBytes: number;
+  fileTransferTimeoutMs: number;
+  jobQueue: JobQueueConfig;
 }
 
 export interface McpRateLimitConfig {
   windowMs: number;
   maxRequests: number;
+}
+
+export interface JobQueueConfig {
+  pollMs: number;
+  leaseMs: number;
+  heartbeatMs: number;
+  shutdownGraceMs: number;
+  workerConcurrency: number;
+  browserConcurrency: number;
+  buildConcurrency: number;
+  audioConcurrency: number;
+  maxConcurrentPerUser: number;
 }
 
 export interface DevTokenResolution {
@@ -67,6 +84,23 @@ export function resolveDevToken(raw: string | undefined, nodeEnv: string | undef
 function parsePositiveInteger(raw: string | undefined, fallback: number): number {
   const value = Number.parseInt(raw ?? "", 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function parseByteLimit(raw: string | undefined, fallback: number): number {
+  const value = raw?.trim().toLowerCase();
+  if (!value) return fallback;
+  const match = /^(\d+(?:\.\d+)?)\s*(b|k|kb|kib|m|mb|mib|g|gb|gib)?$/.exec(value);
+  if (!match) return fallback;
+  const amount = Number.parseFloat(match[1]!);
+  const multiplier = match[2] === "g" || match[2] === "gb" || match[2] === "gib"
+    ? 1024 ** 3
+    : match[2] === "m" || match[2] === "mb" || match[2] === "mib"
+      ? 1024 ** 2
+      : match[2] === "k" || match[2] === "kb" || match[2] === "kib"
+        ? 1024
+        : 1;
+  const parsed = Math.round(amount * multiplier);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function resolveConfig(): ServerConfig {
@@ -109,7 +143,21 @@ function resolveConfig(): ServerConfig {
       refreshTokenTtlSeconds: Number.parseInt(process.env.OAUTH_REFRESH_TOKEN_TTL_SECONDS ?? "2592000", 10),
       statePath: process.env.OAUTH_STATE_PATH ?? `${workspaceRoot}/.state/oauth-state.json`
     },
-    adminDistPath: process.env.ADMIN_UI_DIST ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../admin-ui/dist")
+    adminDistPath: process.env.ADMIN_UI_DIST ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../admin-ui/dist"),
+    storagePolicy: resolveStoragePolicy(),
+    conversationFileMaxBytes: parseByteLimit(process.env.CONVERSATION_FILE_MAX_BYTES, 100 * 1024 * 1024),
+    fileTransferTimeoutMs: parsePositiveInteger(process.env.FILE_TRANSFER_TIMEOUT_MS, 5 * 60 * 1000),
+    jobQueue: {
+      pollMs: parsePositiveInteger(process.env.JOB_WORKER_POLL_MS, 250),
+      leaseMs: parsePositiveInteger(process.env.JOB_LEASE_MS, 30_000),
+      heartbeatMs: parsePositiveInteger(process.env.JOB_HEARTBEAT_MS, 2_000),
+      shutdownGraceMs: parsePositiveInteger(process.env.JOB_SHUTDOWN_GRACE_MS, 30_000),
+      workerConcurrency: parsePositiveInteger(process.env.JOB_WORKER_CONCURRENCY, 5),
+      browserConcurrency: parsePositiveInteger(process.env.JOB_BROWSER_CONCURRENCY, 2),
+      buildConcurrency: parsePositiveInteger(process.env.JOB_BUILD_CONCURRENCY, 2),
+      audioConcurrency: parsePositiveInteger(process.env.JOB_AUDIO_CONCURRENCY, 1),
+      maxConcurrentPerUser: parsePositiveInteger(process.env.JOB_MAX_CONCURRENT_PER_USER, 2)
+    }
   };
 }
 

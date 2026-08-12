@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer, request } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -164,6 +164,39 @@ test("admin API protects session endpoints and enforces CSRF", async () => {
     assert.equal(payload.total, 1);
     assert.equal(payload.items[0]?.id, project.id);
     assert.equal(payload.items[0]?.status, "private");
+  });
+});
+
+test("admin storage report omits filesystem paths and purge requires explicit confirmation", async () => {
+  await withServer(async (baseUrl) => {
+    const { cookie, csrfToken } = await login(baseUrl);
+    const project = await createProject(process.env.PROJECT_ROOT!, {
+      title: "Storage purge API project",
+      createdByClientId: "test-client"
+    });
+    await writeProjectFile(process.env.PROJECT_ROOT!, project.id, "index.html", "<h1>purge</h1>");
+
+    const storage = await fetch(`${baseUrl}/admin/api/storage`, { headers: { Cookie: cookie } });
+    assert.equal(storage.status, 200);
+    const storageBody = await storage.json() as { storage: { totals: { projectBytes: number }; scopes: unknown[] } };
+    assert.ok(storageBody.storage.totals.projectBytes > 0);
+    assert.ok(storageBody.storage.scopes.length >= 1);
+    assert.equal(JSON.stringify(storageBody).includes(process.env.PROJECT_ROOT!), false);
+
+    const missingConfirmation = await fetch(`${baseUrl}/admin/api/projects/${project.id}/purge`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+      body: JSON.stringify({ confirm: false })
+    });
+    assert.equal(missingConfirmation.status, 400);
+
+    const purge = await fetch(`${baseUrl}/admin/api/projects/${project.id}/purge`, {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+      body: JSON.stringify({ confirm: true })
+    });
+    assert.equal(purge.status, 200);
+    await assert.rejects(stat(path.join(process.env.PROJECT_ROOT!, project.id)), /ENOENT/);
   });
 });
 

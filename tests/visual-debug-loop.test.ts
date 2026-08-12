@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { getToolModule } from "../src/mcp/registry.js";
+import { getToolModule, loadToolModule } from "../src/mcp/registry.js";
 import { createProject, readProjectFile, writeProjectFile } from "../src/projects/store.js";
 import { skillRegistry } from "../src/skills/registry.js";
 import type { ToolContext } from "../src/mcp/types.js";
@@ -21,10 +21,12 @@ function toolContext(root: string): ToolContext {
   };
 }
 
-test("visual debug tools are registered and validate agent-friendly schemas", () => {
-  const visual = getToolModule("analyze_webpage_visual");
-  const threeDVisual = getToolModule("inspect_3d_scene_visuals");
-  const point = getToolModule("inspect_dom_at_point");
+test("visual debug tools are registered and validate agent-friendly schemas", async () => {
+  const [visual, threeDVisual, point] = await Promise.all([
+    loadToolModule("analyze_webpage_visual"),
+    loadToolModule("inspect_3d_scene_visuals"),
+    loadToolModule("inspect_dom_at_point")
+  ]);
   assert.ok(visual, "analyze_webpage_visual registered");
   assert.ok(threeDVisual, "inspect_3d_scene_visuals registered");
   assert.ok(point, "inspect_dom_at_point registered");

@@ -1,5 +1,5 @@
 import { createWriteStream } from "node:fs";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { ZipArchive } from "archiver";
 import {
@@ -173,20 +173,24 @@ async function createZipFromManifest(ctx: ToolContext, projectId: string, manife
   const tmpDir = path.join(ctx.artifactRoot, "export-packages");
   await mkdir(tmpDir, { recursive: true });
   const tmpPath = path.join(tmpDir, `${projectId}-${Date.now()}.zip`);
-  await new Promise<void>((resolve, reject) => {
-    const output = createWriteStream(tmpPath);
-    const archive = new ZipArchive({ zlib: { level: 9 } });
-    output.on("close", () => resolve());
-    archive.on("error", reject);
-    archive.pipe(output);
-    if (manifest.includeProjectFiles) archive.directory(getProjectFilesDirectory(ctx.projectRoot, projectId), "published");
-    if (manifest.includeWorkspaceFiles) archive.glob("**/*", { cwd: getProjectWorkspaceDirectory(ctx.projectRoot, projectId), ignore: ["node_modules/**", "dist/**", ".git/**"] }, { prefix: "workspace" });
-    archive.append(`${JSON.stringify(manifest, null, 2)}\n`, { name: "export-package-manifest.json" });
-    archive.finalize().catch(reject);
-  });
-  const buffer = await readFile(tmpPath);
-  await writeProjectAsset(ctx.projectRoot, projectId, safeExportPath(outputPath), buffer, "application/zip");
-  return buffer;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const output = createWriteStream(tmpPath);
+      const archive = new ZipArchive({ zlib: { level: 9 } });
+      output.on("close", () => resolve());
+      archive.on("error", reject);
+      archive.pipe(output);
+      if (manifest.includeProjectFiles) archive.directory(getProjectFilesDirectory(ctx.projectRoot, projectId), "published");
+      if (manifest.includeWorkspaceFiles) archive.glob("**/*", { cwd: getProjectWorkspaceDirectory(ctx.projectRoot, projectId), ignore: ["node_modules/**", "dist/**", ".git/**"] }, { prefix: "workspace" });
+      archive.append(`${JSON.stringify(manifest, null, 2)}\n`, { name: "export-package-manifest.json" });
+      archive.finalize().catch(reject);
+    });
+    const buffer = await readFile(tmpPath);
+    await writeProjectAsset(ctx.projectRoot, projectId, safeExportPath(outputPath), buffer, "application/zip");
+    return buffer;
+  } finally {
+    await rm(tmpPath, { force: true });
+  }
 }
 
 export const exportPackageTools: ToolModule[] = [

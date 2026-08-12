@@ -1,7 +1,6 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import { z } from "zod";
 import {
   appendProjectTaskHistory,
@@ -9,6 +8,7 @@ import {
   assertSafeProjectFilePath,
   createProject,
   getProject,
+  getProjectDirectory,
   getProjectManifest,
   getProjectStoredFilePath,
   getProjectWorkspaceDirectory,
@@ -22,8 +22,10 @@ import {
 import { buildProjectPublishOptions } from "../../projects/publish-policy.js";
 import type { ToolModule } from "../types.js";
 import { childEnv } from "../child-env.js";
+import { getStoragePolicy, withStorageQuota, type StoragePolicy } from "../../storage/manager.js";
+import { throwIfAborted } from "../../shared/abort.js";
+import { execFileAbortable } from "../../shared/process.js";
 
-const execFileAsync = promisify(execFile);
 const maxLogBytes = 40000;
 const maxWorkspaceTextBytes = 1024 * 1024;
 const defaultNpmTimeoutMs = 300000;
@@ -161,27 +163,43 @@ function baseCss(): string {
   return `body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: ui-sans-serif, system-ui, sans-serif; background: #eef3f1; color: #17231f; }\nmain { width: min(720px, calc(100vw - 32px)); }\nh1 { font-size: 44px; line-height: 1.05; margin: 0 0 14px; }\np { font-size: 18px; color: #52605a; }\n`;
 }
 
-async function writeWorkspaceFile(projectRoot: string, projectId: string, relativePath: string, content: string): Promise<{ path: string; size: number; modifiedAt: string }> {
+async function writeWorkspaceFile(
+  projectRoot: string,
+  projectId: string,
+  relativePath: string,
+  content: string,
+  options: { workspaceRoot?: string; storagePolicy?: StoragePolicy } = {}
+): Promise<{ path: string; size: number; modifiedAt: string }> {
   if (Buffer.byteLength(content, "utf8") > maxWorkspaceTextBytes) throw new Error("App project file content exceeds 1 MiB.");
   const project = await getProject(projectRoot, projectId);
   if (project.status === "deleted") throw new Error("Cannot write to a deleted project.");
   const { safePath, absolutePath } = resolveWorkspaceFile(projectRoot, projectId, relativePath);
-  await mkdir(path.dirname(absolutePath), { recursive: true });
-  await writeFile(absolutePath, content, "utf8");
+  const previousStat = await stat(absolutePath).catch(() => undefined);
+  await withStorageQuota({
+    projectRoot,
+    projectDirectory: getProjectDirectory(projectRoot, projectId),
+    workspaceRoot: options.workspaceRoot,
+    additionalBytes: Math.max(0, Buffer.byteLength(content, "utf8") - (previousStat?.size ?? 0)),
+    policy: options.storagePolicy ?? getStoragePolicy()
+  }, async () => {
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await writeFile(absolutePath, content, "utf8");
+  });
   const fileStat = await stat(absolutePath);
   return { path: safePath, size: fileStat.size, modifiedAt: fileStat.mtime.toISOString() };
 }
 
-async function runNpm(projectRoot: string, projectId: string, args: string[], timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
+async function runNpm(projectRoot: string, projectId: string, args: string[], timeoutMs: number, signal?: AbortSignal): Promise<{ stdout: string; stderr: string }> {
   const cwd = getProjectWorkspaceDirectory(projectRoot, projectId);
-  return execFileAsync(npmExecutable(), args, { cwd, timeout: timeoutMs, maxBuffer: 1024 * 1024, env: childEnv() });
+  return execFileAbortable(npmExecutable(), args, { cwd, timeoutMs, maxBufferBytes: 1024 * 1024, env: childEnv(), signal });
 }
 
-async function listDistFiles(root: string): Promise<string[]> {
+async function listDistFiles(root: string, signal?: AbortSignal): Promise<string[]> {
   const output: string[] = [];
   async function walk(current: string): Promise<void> {
     const entries = await readdir(current, { withFileTypes: true });
     for (const entry of entries) {
+      throwIfAborted(signal);
       if (entry.name.startsWith(".")) continue;
       const absolutePath = path.join(current, entry.name);
       if (entry.isDirectory()) {
@@ -318,7 +336,7 @@ export const appProjectTools: ToolModule[] = [
       });
       const files = [];
       for (const file of templateFiles(parsed.template, parsed.title)) {
-        files.push(await writeWorkspaceFile(ctx.projectRoot, project.id, file.path, file.content));
+        files.push(await writeWorkspaceFile(ctx.projectRoot, project.id, file.path, file.content, { workspaceRoot: ctx.workspaceRoot, storagePolicy: ctx.storagePolicy }));
       }
       await appendProjectTaskHistory(ctx.projectRoot, project.id, {
         toolName: "create_app_project",
@@ -339,7 +357,7 @@ export const appProjectTools: ToolModule[] = [
     schema: workspaceFileInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof workspaceFileInputSchema>;
-      const file = await writeWorkspaceFile(ctx.projectRoot, parsed.projectId, parsed.relativePath, parsed.content);
+      const file = await writeWorkspaceFile(ctx.projectRoot, parsed.projectId, parsed.relativePath, parsed.content, { workspaceRoot: ctx.workspaceRoot, storagePolicy: ctx.storagePolicy });
       await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "write_app_project_file", ok: true, summary: `Wrote app source ${file.path}.`, details: file });
       return { ok: true, summary: `Wrote app source ${file.path}.`, jobId: parsed.projectId, artifacts: [file.path], logs: [JSON.stringify(file, null, 2)], errors: [] };
     }
@@ -371,7 +389,7 @@ export const appProjectTools: ToolModule[] = [
     schema: npmLifecycleInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof npmLifecycleInputSchema>;
-      const { stdout, stderr } = await runNpm(ctx.projectRoot, parsed.projectId, ["install"], parsed.timeoutMs);
+      const { stdout, stderr } = await runNpm(ctx.projectRoot, parsed.projectId, ["install"], parsed.timeoutMs, ctx.abortSignal);
       const logs = [trimOutput(stdout), trimOutput(stderr)].filter(Boolean);
       await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "install_project_dependencies", ok: true, summary: "Installed app project dependencies.", details: { logs } });
       return { ok: true, summary: "Installed app project dependencies.", jobId: parsed.projectId, artifacts: ["workspace/package.json"], logs, errors: [] };
@@ -387,7 +405,7 @@ export const appProjectTools: ToolModule[] = [
     schema: npmLifecycleInputSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof npmLifecycleInputSchema>;
-      const { stdout, stderr } = await runNpm(ctx.projectRoot, parsed.projectId, ["run", "build"], parsed.timeoutMs);
+      const { stdout, stderr } = await runNpm(ctx.projectRoot, parsed.projectId, ["run", "build"], parsed.timeoutMs, ctx.abortSignal);
       const logs = [trimOutput(stdout), trimOutput(stderr)].filter(Boolean);
       await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "run_project_build", ok: true, summary: "Built app project.", details: { logs } });
       return { ok: true, summary: "Built app project.", jobId: parsed.projectId, artifacts: ["workspace/dist"], logs, errors: [] };
@@ -460,13 +478,14 @@ export const appProjectTools: ToolModule[] = [
       if (distRoot !== workspaceRoot && !distRoot.startsWith(`${path.resolve(workspaceRoot)}${path.sep}`)) throw new Error("Resolved outputDir is outside the app workspace.");
       const distStat = await stat(distRoot);
       if (!distStat.isDirectory()) throw new Error(`Build output is not a directory: ${safeOutputDir}`);
-      const files = await listDistFiles(distRoot);
+      const files = await listDistFiles(distRoot, ctx.abortSignal);
       const manifestBeforePublish = await getProjectManifest(ctx.projectRoot, parsed.projectId);
       const previousDistPaths = new Set(lastPublishedDistPaths(manifestBeforePublish));
       const allowedExistingFiles = manifestBeforePublish.files.map((file) => file.path).filter((filePath) => !previousDistPaths.has(filePath));
       await validateDistBeforePublish(distRoot, files, parsed.entryFile, allowedExistingFiles);
       const publishedFiles = [];
       for (const file of files) {
+        throwIfAborted(ctx.abortSignal);
         const extension = path.extname(file).toLowerCase();
         const absolutePath = path.join(distRoot, file);
         if (textDistExtensions.has(extension)) {

@@ -124,6 +124,7 @@ curl -sS http://127.0.0.1:6859/health
 | [docs/music-workflow.md](docs/music-workflow.md) | 音乐子系统开发者深潜（最复杂子系统范例） |
 | [docs/architecture.md](docs/architecture.md) · [docs/mcp.md](docs/mcp.md) | 架构与边界 / MCP 协议约定 |
 | [docs/project-management.md](docs/project-management.md) · [docs/research-workflow.md](docs/research-workflow.md) | Project / Research 工作流 |
+| [docs/storage-governance.md](docs/storage-governance.md) | Project / workspace 配额、监控、保留期与永久清理 |
 | [docs/setup.md](docs/setup.md) · [docs/docker.md](docs/docker.md) · [docs/operations.md](docs/operations.md) · [docs/cloudflare.md](docs/cloudflare.md) | 运行 / 容器 / 运维 / 暴露 |
 | [docs/security-origin-isolation.md](docs/security-origin-isolation.md) · [docs/troubleshooting.md](docs/troubleshooting.md) | 安全 / 故障排查 |
 
@@ -145,8 +146,14 @@ curl -sS http://127.0.0.1:6859/health
 - `WORKSPACE_ROOT`：允许工具操作的工作目录
 - `SHARE_ROOT`：分享 HTML 产物存储目录（默认 `.shares`）
 - `COMMAND_TIMEOUT_MS`：命令执行超时时间（默认 `30000`）
+- `CONVERSATION_FILE_MAX_BYTES`：原生 ChatGPT connector-file 传输上限（默认 `100MiB`）
+- `FILE_TRANSFER_TIMEOUT_MS`：原生 connector-file 下载超时（默认 `300000`）
 - `MCP_RATE_LIMIT_MAX_REQUESTS`：每个 MCP 用户/客户端在一个窗口内允许的请求数（默认 `100`）
 - `MCP_RATE_LIMIT_WINDOW_MS`：MCP 限流窗口毫秒数（默认 `60000`，即每分钟）
+- `JOB_WORKER_CONCURRENCY`：单 worker 同时执行的任务总数（默认 `5`）
+- `JOB_BROWSER_CONCURRENCY` / `JOB_BUILD_CONCURRENCY` / `JOB_AUDIO_CONCURRENCY`：跨 worker 的分类并发上限（默认 `2` / `2` / `1`）
+- `JOB_MAX_CONCURRENT_PER_USER`：跨 worker 的单用户并发上限（默认 `2`）
+- `JOB_LEASE_MS` / `JOB_HEARTBEAT_MS`：持久任务租约与心跳间隔（默认 `30000` / `2000`，心跳必须短于租约）
 
 注意：  
 1. ChatGPT 连接器通常仅提供 `No Auth`/`OAuth`，为避免明文 token 风险，建议走 OAuth 为主。  
@@ -163,6 +170,7 @@ curl -sS http://127.0.0.1:6859/health
 - `curl -sS https://gmb01.xyz/.well-known/oauth-protected-resource/mcp`
 - `curl -sS https://gmb01.xyz/.well-known/oauth-authorization-server`
 - `curl -i -X POST https://gmb01.xyz/mcp -H 'content-type: application/json' -H 'authorization: Bearer <MCP_DEV_TOKEN>' -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'`
+- `MCP_BENCHMARK_TOKEN=<短期 token> MCP_BENCHMARK_ENQUEUE=1 npm run benchmark:performance`（建议仅在测试环境运行；会创建快速失败的基准 job）
 
 ### 预期验收
 
@@ -322,10 +330,34 @@ curl -sS -X POST http://127.0.0.1:6859/mcp \
 
 ChatGPT can now create persistent static coding projects through MCP tools. Projects are stored under `.projects/{projectId}/files/`, can be published to `https://gmb01.xyz/share/{projectId}/index.html`, viewed in Admin, and downloaded as ZIP files.
 
+### ChatGPT File → Project Asset
+
+`promote_conversation_file_to_project` 是 ChatGPT 对话文件到 Project asset 的原生桥接工具。它通过 ChatGPT Apps SDK 的 `_meta["openai/fileParams"]` 顶层文件参数接收 `{ download_url, file_id, mime_type, file_name }` 文件引用；该契约要求 `download_url`/`file_id`，而 `mime_type`/`file_name` 可选，详见 [OpenAI Apps SDK 文件输入参考](https://developers.openai.com/plugins/reference#define-file-inputs)。Code-MCP 服务器在服务端通过受控 HTTPS 下载流传输，不读取 ChatGPT 的 `/mnt/data` 路径，也不要求模型把二进制读入上下文、转 Base64 或重新压缩。
+
+```text
+用户上传 / image_gen 生成
+        ↓ connector file reference
+promote_conversation_file_to_project
+        ↓ stream + SHA-256 + atomic rename
+.projects/{projectId}/files/assets/hero.png
+```
+
+默认行为是无损传输：不 resize、crop、recompress、PNG/JPEG → WebP、去 alpha 或改变色彩配置。返回值会包含 `size`、图片 `width`/`height`/`format`、`sourceSha256`、`destinationSha256`、`byteExact`、`qualityPreserved` 和 `transformed:false`。优化必须另行调用明确的 `optimize_project_assets` 工作流；SVG 仍遵守现有安全策略，危险 SVG 会拒绝而不会静默清洗。
+
+文件来源的路由规则：
+
+- ChatGPT attachment / image_gen / conversation file reference：使用 `promote_conversation_file_to_project`。
+- 已存在于 Code-MCP server filesystem：使用 `import_project_asset_from_local_file`。
+- 可安全访问的 HTTPS URL：使用 `import_project_asset_from_url`。
+- `write_project_asset` 的 Base64 参数仅保留兼容用途。
+
+`CONVERSATION_FILE_MAX_BYTES`（默认 `100MiB`）限制原生传输；普通图片/文档资产上限为 `100MiB`，PPTX 为 `25MiB`、ZIP 为 `50MiB`，并且仍受 project/user/global storage quota 约束。原生文件引用很小，不受旧的 `express.json` `40mb` Base64 JSON 通道限制；旧 Base64 调用仍受该请求体上限影响。传输工具只接受 connector 提供的 HTTPS 引用，不接受 `file:///...`、`/mnt/data/...`、任意本地路径或模型自造 URL。
+
 Key tools:
 
 - `create_project`
 - `write_project_file`
+- `promote_conversation_file_to_project`
 - `read_project_file`
 - `list_projects`
 - `get_project`
@@ -362,7 +394,9 @@ Research projects are backed by normal Project storage under `.projects/{project
 
 ## Tool registry architecture
 
-MCP tools are registered through `src/mcp/registry.ts`. Each tool module owns its definition, validation schema, handler, and `enabledByDefault` flag. `src/mcp/tools.ts` remains as a compatibility re-export during the transition.
+MCP tools are registered through `src/mcp/registry.ts`. Each tool module owns its definition, validation schema, handler, and `enabledByDefault` flag. Build/typecheck validates the generated `src/mcp/tool-manifest.generated.ts`, which lets `tools/list` expose all definitions without importing all 618 handlers. Common project/file groups are warmed; browser, music, presentation, SVG, 3D, and web-rebuild handlers load on first execution. `src/mcp/tools.ts` remains as a compatibility re-export during the transition.
+
+After changing a tool contract or group, run `npm run generate:tool-manifest`. To measure cold-start and first-load cost after `npm run build:server`, run `npm run benchmark:registry`.
 
 See `docs/mcp-tools.md` for the current tool groups and default access rules.
 

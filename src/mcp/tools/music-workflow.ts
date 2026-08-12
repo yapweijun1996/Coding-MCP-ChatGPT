@@ -7,8 +7,10 @@ import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { z } from "zod";
 import { getProjectFilesDirectory, getProjectStoredFilePath, maxProjectMediaAssetBytes, publishProject, readProjectFile, writeProjectAsset, writeProjectFile } from "../../projects/store.js";
 import { buildProjectPublishOptions } from "../../projects/publish-policy.js";
+import { throwIfAborted } from "../../shared/abort.js";
 import type { ToolContext, ToolModule } from "../types.js";
 import {
+  actionableSilenceGaps,
   assertPcmWav,
   audioStats,
   buildHandwrittenMusicXml,
@@ -39,6 +41,8 @@ const musicStyleAliasMap: Record<string, z.infer<typeof musicStyleSchema>> = {
   relaxing: "chill_lounge",
   chill: "chill_lounge",
   cinematic: "cinematic_background",
+  cinematic_soft: "cinematic_background",
+  soft_cinematic: "cinematic_background",
   film: "cinematic_background",
   orchestral: "orchestral_sketch",
   jazzy: "cafe_jazz",
@@ -50,24 +54,170 @@ const musicStyleAliasMap: Record<string, z.infer<typeof musicStyleSchema>> = {
   corporate: "corporate_intro",
   game: "game_bgm"
 };
+function normalizedMusicAliasKey(value: string) {
+  return value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
 function normalizeMusicStyleAlias(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
   if ((musicStyleSchema.options as readonly string[]).includes(trimmed)) return trimmed;
-  const key = trimmed.toLowerCase();
+  const key = normalizedMusicAliasKey(trimmed);
   if (musicStyleAliasMap[key]) return musicStyleAliasMap[key];
   for (const [alias, canonical] of Object.entries(musicStyleAliasMap)) {
-    if (key.includes(alias)) return canonical;
+    if (key.includes(normalizedMusicAliasKey(alias))) return canonical;
   }
   return value;
 }
 const musicStyleInputSchema = z.preprocess(normalizeMusicStyleAlias, musicStyleSchema);
 const instrumentSchema = z.enum(["piano", "electric_piano", "upright_bass", "acoustic_bass", "violin", "cello", "drums", "brushes", "guitar", "strings", "pads", "synth", "sax_like_lead"]);
+const canonicalInstrumentPolicySchema = z.object({
+  mode: z.enum(["solo", "ensemble"]),
+  allowedInstruments: z.array(instrumentSchema).min(1).max(16),
+  prohibitedInstruments: z.array(instrumentSchema).max(16).optional().default([])
+});
+
+function normalizeInstrumentPolicyAlias(value: unknown): unknown {
+  if (typeof value === "string" && normalizedMusicAliasKey(value) === "solo_piano") {
+    return { mode: "solo", allowedInstruments: ["piano"], prohibitedInstruments: [] };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const policy = { ...(value as Record<string, unknown>) };
+  if (policy.allowedInstruments === undefined && Array.isArray(policy.allowed)) {
+    policy.allowedInstruments = policy.allowed;
+  }
+  delete policy.allowed;
+  return policy;
+}
+
+const instrumentPolicySchema = z.preprocess(normalizeInstrumentPolicyAlias, canonicalInstrumentPolicySchema);
+const instrumentPolicyJsonSchema = {
+  anyOf: [
+    { type: "string", description: "Human-friendly alias; currently solo piano is normalized to a strict solo-piano policy." },
+    {
+      type: "object",
+      properties: {
+        mode: { type: "string", enum: ["solo", "ensemble"] },
+        allowed: { type: "array", items: { type: "string", enum: instrumentSchema.options } },
+        allowedInstruments: { type: "array", items: { type: "string", enum: instrumentSchema.options } },
+        prohibitedInstruments: { type: "array", items: { type: "string", enum: instrumentSchema.options } }
+      },
+      required: ["mode"],
+      additionalProperties: false
+    }
+  ]
+} as const;
 const complexitySchema = z.enum(["simple", "medium", "rich"]);
 const sectionSchema = z.object({ name: z.string().min(1).max(40), bars: z.number().int().min(1).max(64), intensity: z.number().min(0).max(1).optional().default(0.5) });
 const noteSchema = z.object({ track: z.string().min(1).max(80), midi: z.number().int().min(0).max(127), startBeat: z.number().min(0), durationBeats: z.number().min(0.05).max(64), velocity: z.number().int().min(1).max(127) });
 
 type CanonicalInstrument = z.infer<typeof instrumentSchema>;
+type MusicInstrumentPolicy = z.infer<typeof instrumentPolicySchema>;
+
+type MusicInputNormalization = { input: unknown; warnings: string[] };
+
+const musicExportAliasMap: Record<string, string> = {
+  audio: "single_track_wav",
+  wav: "single_track_wav",
+  mp3: "single_track_mp3",
+  ogg: "single_track_ogg",
+  score: "chord_chart",
+  manifest: "project_manifest",
+  license: "license_manifest",
+  playlist: "playlist_metadata",
+  demo: "demo_page",
+  website: "demo_page",
+  website_demo: "demo_page"
+};
+
+function addNormalizationWarning(warnings: string[], field: string, original: unknown, canonical: unknown) {
+  if (JSON.stringify(original) === JSON.stringify(canonical)) return;
+  warnings.push(`Normalized ${field} from ${JSON.stringify(original)} to canonical ${JSON.stringify(canonical)}.`);
+}
+
+/** Normalize common human music terms while returning a strict canonical object plus disclosures. */
+export function normalizeMusicWorkflowInput(value: unknown): MusicInputNormalization {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { input: value, warnings: [] };
+  const input = { ...(value as Record<string, unknown>) };
+  const warnings = Array.isArray(input.normalizationWarnings)
+    ? input.normalizationWarnings.filter((item): item is string => typeof item === "string")
+    : [];
+
+  const normalizeStringField = (field: string, normalizer: (raw: string) => string) => {
+    const raw = input[field];
+    if (typeof raw !== "string") return;
+    const canonical = normalizer(raw);
+    input[field] = canonical;
+    addNormalizationWarning(warnings, field, raw, canonical);
+  };
+
+  normalizeStringField("style", (raw) => String(normalizeMusicStyleAlias(raw)));
+  normalizeStringField("styleFamily", (raw) => {
+    const key = normalizedMusicAliasKey(raw);
+    if (["cinematic", "cinematic_soft", "soft_cinematic"].includes(key)) return "soft_cinematic";
+    return key;
+  });
+  normalizeStringField("styleProfile", (raw) => {
+    const key = normalizedMusicAliasKey(raw);
+    return ["cinematic", "soft_cinematic", "cinematic_soft"].includes(key) ? "cinematic_soft" : key;
+  });
+  normalizeStringField("renderPreset", (raw) => {
+    const key = normalizedMusicAliasKey(raw);
+    return ["cinematic", "soft_cinematic", "cinematic_soft"].includes(key) ? "cinematic_soft" : key;
+  });
+  normalizeStringField("arrangementStyle", (raw) => normalizedMusicAliasKey(raw) === "cinematic" ? "cinematic_arc" : normalizedMusicAliasKey(raw));
+
+  if (Array.isArray(input.styles)) {
+    const original = input.styles;
+    const canonical = original.map((style) => typeof style === "string" ? normalizeMusicStyleAlias(style) : style);
+    input.styles = canonical;
+    addNormalizationWarning(warnings, "styles", original, canonical);
+  }
+
+  if (Array.isArray(input.tracks) && input.tracks.some((track) => typeof track === "string" && normalizedMusicAliasKey(track) === "solo_piano")) {
+    const original = input.tracks;
+    input.tracks = original.map((track) => typeof track === "string" && normalizedMusicAliasKey(track) === "solo_piano" ? "piano" : track);
+    if (input.instrumentPolicy === undefined) input.instrumentPolicy = "solo piano";
+    addNormalizationWarning(warnings, "tracks", original, input.tracks);
+  }
+
+  if (input.instrumentPolicy !== undefined) {
+    const original = input.instrumentPolicy;
+    const canonical = normalizeInstrumentPolicyAlias(original);
+    input.instrumentPolicy = canonical;
+    addNormalizationWarning(warnings, "instrumentPolicy", original, canonical);
+    if (typeof original === "string" && normalizedMusicAliasKey(original) === "solo_piano" && input.tracks === undefined) {
+      input.tracks = ["piano"];
+      warnings.push("Normalized implicit tracks to canonical [\"piano\"] for the solo-piano policy.");
+    }
+  }
+
+  if (Array.isArray(input.exports)) {
+    const original = input.exports;
+    const canonical = Array.from(new Set(original.map((item) => {
+      if (typeof item !== "string") return item;
+      const key = normalizedMusicAliasKey(item);
+      return musicExportAliasMap[key] ?? key;
+    })));
+    input.exports = canonical;
+    addNormalizationWarning(warnings, "exports", original, canonical);
+  }
+
+  if (Array.isArray(input.outputFormats)) {
+    const original = input.outputFormats;
+    const canonical = Array.from(new Set(original.map((item) => typeof item === "string" && normalizedMusicAliasKey(item) === "audio" ? "wav" : item)));
+    input.outputFormats = canonical;
+    addNormalizationWarning(warnings, "outputFormats", original, canonical);
+  }
+
+  input.normalizationWarnings = Array.from(new Set(warnings));
+  return { input, warnings: input.normalizationWarnings as string[] };
+}
+
+function normalizeMusicWorkflowSchemaInput(value: unknown) {
+  return normalizeMusicWorkflowInput(value).input;
+}
+
+const normalizationWarningsSchema = z.array(z.string().min(1).max(500)).max(40).optional().default([]);
 
 // Single source of truth for instrument identity. GM programs are 1-indexed (General MIDI
 // spec numbering); the MIDI Program Change byte is `gmProgram - 1`. `channel` is the default
@@ -167,6 +317,62 @@ const validateMusicEnsembleInputSchema = z.object({
   barBeats: z.number().int().min(1).max(16).optional().default(4)
 });
 
+const validateMusicConstraintsInputSchema = z.preprocess(normalizeMusicWorkflowSchemaInput, z.object({
+  projectId: z.string().min(8).max(80),
+  compositionManifestPath: z.string().min(1).max(240),
+  instrumentPolicy: instrumentPolicySchema.optional(),
+  targetDurationSec: z.number().min(1).max(86400).optional(),
+  durationToleranceSec: z.number().min(0).max(3600).optional().default(15),
+  requiredSections: z.array(z.string().min(1).max(80)).max(64).optional().default([]),
+  channelMap: z.record(z.number().int().min(0).max(15)).optional().default({}),
+  outputReportPath: z.string().min(1).max(240).optional().default("music/constraint-validation-report.json"),
+  normalizationWarnings: normalizationWarningsSchema
+}));
+
+const musicDevelopmentThresholdsSchema = z.object({
+  motifNoteCount: z.number().int().min(4).max(32).optional().default(12),
+  minSourceThemeMatches: z.number().int().min(1).max(100).optional().default(2),
+  minMelodyIdentityScore: z.number().min(0).max(1).optional().default(0.6),
+  minDevelopmentScore: z.number().min(0).max(1).optional().default(0.55),
+  maxRepeatedSectionSimilarity: z.number().min(0).max(1).optional().default(0.92),
+  maxExactRepeatRatio: z.number().min(0).max(1).optional().default(0.35)
+});
+
+function normalizeMusicDevelopmentInput(value: unknown): unknown {
+  const normalized = normalizeMusicWorkflowSchemaInput(value);
+  if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) return normalized;
+  const input = { ...(normalized as Record<string, unknown>) };
+  input.sourceCompositionManifestPath ??= input.sourceManifestPath;
+  input.compositionManifestPath ??= input.developedManifestPath;
+  const rawThresholds = input.thresholds && typeof input.thresholds === "object" && !Array.isArray(input.thresholds)
+    ? input.thresholds as Record<string, unknown>
+    : {};
+  input.thresholds = {
+    ...rawThresholds,
+    motifNoteCount: rawThresholds.motifNoteCount ?? input.motifNoteCount,
+    minSourceThemeMatches: rawThresholds.minSourceThemeMatches ?? input.minSourceThemeMatches,
+    minMelodyIdentityScore: rawThresholds.minMelodyIdentityScore ?? input.minThemeSimilarity,
+    minDevelopmentScore: rawThresholds.minDevelopmentScore ?? input.minVariationScore,
+    maxRepeatedSectionSimilarity: rawThresholds.maxRepeatedSectionSimilarity ?? input.maxRepeatedWindowSimilarity,
+    maxExactRepeatRatio: rawThresholds.maxExactRepeatRatio ?? input.maxExactRepeatRatio
+  };
+  return input;
+}
+
+const validateMusicDevelopmentInputSchema = z.preprocess(normalizeMusicDevelopmentInput, z.object({
+  projectId: z.string().min(8).max(80),
+  sourceCompositionManifestPath: z.string().min(1).max(240),
+  compositionManifestPath: z.string().min(1).max(240),
+  preserveMelodicIdentity: z.boolean().optional().default(true),
+  variationLevel: z.enum(["low", "medium", "high"]).optional().default("high"),
+  targetDurationSec: z.number().min(1).max(86400).optional(),
+  durationToleranceSec: z.number().min(0).max(3600).optional().default(15),
+  requiredSections: z.array(z.string().min(1).max(80)).max(64).optional().default([]),
+  thresholds: musicDevelopmentThresholdsSchema.optional().default({}),
+  outputReportPath: z.string().min(1).max(240).optional().default("music/development-validation-report.json"),
+  normalizationWarnings: normalizationWarningsSchema
+}));
+
 const composeMusicInputSchema = z.object({
   projectId: z.string().min(8).max(80),
   title: z.string().min(1).max(160).optional().default("Generated Music Cue"),
@@ -214,7 +420,7 @@ const editMidiInputSchema = z.object({
   outputMidiPath: z.string().min(1).max(240).optional().default("music/edited-composition.mid")
 });
 
-const renderMidiToAudioInputSchema = z.object({
+const renderMidiToAudioInputSchema = z.preprocess(normalizeMusicWorkflowSchemaInput, z.object({
   projectId: z.string().min(8).max(80),
   compositionManifestPath: z.string().min(1).max(240).optional(),
   midiPath: z.string().min(1).max(240).optional(),
@@ -231,10 +437,11 @@ const renderMidiToAudioInputSchema = z.object({
   // issue_0143: the built-in procedural/WebAudio-style synth must never be silently delivered as
   // music. This tool refuses by default; set true only to generate an explicitly throwaway,
   // non-deliverable preview.
-  acknowledgePreviewOnly: z.boolean().optional().default(false)
+  acknowledgePreviewOnly: z.boolean().optional().default(false),
+  normalizationWarnings: normalizationWarningsSchema
 }).refine((value) => Boolean(value.compositionManifestPath || value.midiPath), {
   message: "compositionManifestPath or midiPath is required."
-});
+}));
 
 const renderMidiWithSoundfontInputSchema = z.object({
   projectId: z.string().min(8).max(80),
@@ -244,6 +451,8 @@ const renderMidiWithSoundfontInputSchema = z.object({
   soundfontPath: z.string().min(1).max(240).optional(),
   channelMap: z.record(z.number().int().min(0).max(15)).optional().default({}),
   programMap: z.record(z.number().int().min(1).max(128)).optional().default({}),
+  instrumentPolicy: instrumentPolicySchema.optional(),
+  renderTimeoutMs: z.number().int().min(1000).max(12 * 60 * 60 * 1000).optional(),
   stems: z.boolean().optional().default(false),
   // Opt-in loudness normalization (ffmpeg loudnorm). FluidSynth's default gain renders quiet; enable
   // for review-ready levels without using the full render_production_music mastering chain.
@@ -323,6 +532,8 @@ const renderProductionMusicInputSchema = z.object({
   }).optional().default({}),
   channelMap: z.record(z.number().int().min(0).max(15)).optional().default({}),
   programMap: z.record(z.number().int().min(1).max(128)).optional().default({}),
+  instrumentPolicy: instrumentPolicySchema.optional(),
+  renderTimeoutMs: z.number().int().min(1000).max(12 * 60 * 60 * 1000).optional(),
   sampleRate: z.number().int().min(8000).max(96000).optional().default(44100),
   targetRms: z.number().min(0.02).max(0.5).optional().default(0.16),
   truePeakCeiling: z.number().min(0.5).max(0.99).optional().default(0.89),
@@ -541,19 +752,22 @@ const publishMusicAuditionDemoInputSchema = z.object({
   message: "variationsManifestPath or versions is required."
 });
 
-const extendMusicArrangementInputSchema = z.object({
+const extendMusicArrangementInputSchema = z.preprocess(normalizeMusicWorkflowSchemaInput, z.object({
   projectId: z.string().min(8).max(80),
   compositionManifestPath: z.string().min(1).max(240),
   targetDurationSeconds: z.number().int().min(120).max(900).optional().default(300),
   arrangementStyle: z.enum(["background_friendly", "concert_style", "cinematic_arc", "loopable_longform"]).optional().default("background_friendly"),
+  variationLevel: z.enum(["low", "medium", "high"]).optional().default("high"),
+  instrumentPolicy: instrumentPolicySchema.optional(),
   renderAudio: z.boolean().optional().default(false),
   acknowledgePreviewOnly: z.boolean().optional().default(false),
   outputManifestPath: z.string().min(1).max(240).optional().default("music/long-arrangement-manifest.json"),
   outputMidiPath: z.string().min(1).max(240).optional().default("music/long-arrangement.mid"),
-  outputAudioPath: z.string().min(1).max(240).optional().default("music/long-arrangement-preview.wav")
-});
+  outputAudioPath: z.string().min(1).max(240).optional().default("music/long-arrangement-preview.wav"),
+  normalizationWarnings: normalizationWarningsSchema
+}));
 
-const extendOriginalMusicArrangementInputSchema = z.object({
+const extendOriginalMusicArrangementInputSchema = z.preprocess(normalizeMusicWorkflowSchemaInput, z.object({
   projectId: z.string().min(8).max(80),
   sourceManifestPath: z.string().min(1).max(240),
   targetDurationSec: z.number().int().min(300).max(900).optional().default(360),
@@ -562,12 +776,14 @@ const extendOriginalMusicArrangementInputSchema = z.object({
   variationLevel: z.enum(["low", "medium", "high"]).optional().default("medium"),
   sections: z.array(z.string().min(1).max(40)).min(4).max(16).optional().default(["intro", "A", "A_variation", "B", "bridge", "light_solo", "breakdown", "reprise", "outro"]),
   originalityPolicy: z.enum(["do_not_imitate_specific_songs_or_artists"]).optional().default("do_not_imitate_specific_songs_or_artists"),
+  instrumentPolicy: instrumentPolicySchema.optional(),
   renderAudio: z.boolean().optional().default(false),
   acknowledgePreviewOnly: z.boolean().optional().default(false),
   outputManifestPath: z.string().min(1).max(240).optional().default("music/original-long-arrangement-manifest.json"),
   outputMidiPath: z.string().min(1).max(240).optional().default("music/original-long-arrangement.mid"),
-  outputAudioPath: z.string().min(1).max(240).optional().default("music/original-long-arrangement-preview.wav")
-});
+  outputAudioPath: z.string().min(1).max(240).optional().default("music/original-long-arrangement-preview.wav"),
+  normalizationWarnings: normalizationWarningsSchema
+}));
 
 const assembleMusicSessionInputSchema = z.object({
   projectId: z.string().min(8).max(80),
@@ -594,7 +810,7 @@ const normalizeMusicLoudnessInputSchema = z.object({
   outputReportPath: z.string().min(1).max(240).optional().default("music/loudness-report.json")
 });
 
-const createProductionMusicRenderPlanInputSchema = z.object({
+const createProductionMusicRenderPlanInputSchema = z.preprocess(normalizeMusicWorkflowSchemaInput, z.object({
   projectId: z.string().min(8).max(80),
   compositionManifestPath: z.string().min(1).max(240).optional(),
   styleProfile: z.enum(["jazz_lounge", "cafe_piano_trio", "bossa_lounge", "lofi_lounge", "cinematic_soft"]).optional().default("jazz_lounge"),
@@ -603,8 +819,9 @@ const createProductionMusicRenderPlanInputSchema = z.object({
   licensePolicy: z.enum(["mit_apache_preferred", "commercial_safe_only", "generated_only_until_pack_verified"]).optional().default("mit_apache_preferred"),
   targetLufs: z.number().min(-24).max(-9).optional().default(-16),
   truePeakDb: z.number().min(-6).max(-0.1).optional().default(-1),
-  outputPath: z.string().min(1).max(240).optional().default("music/production-render-plan.json")
-});
+  outputPath: z.string().min(1).max(240).optional().default("music/production-render-plan.json"),
+  normalizationWarnings: normalizationWarningsSchema
+}));
 
 const applyMusicMixMasterChainInputSchema = z.object({
   projectId: z.string().min(8).max(80),
@@ -627,7 +844,7 @@ const reviewMusicProductionExportInputSchema = z.object({
   outputPath: z.string().min(1).max(240).optional().default("music/production-export-review.json")
 });
 
-const exportMusicProjectInputSchema = z.object({
+const exportMusicProjectInputSchema = z.preprocess(normalizeMusicWorkflowSchemaInput, z.object({
   projectId: z.string().min(8).max(80),
   projectManifestPath: z.string().min(1).max(240).optional(),
   packageName: z.string().min(1).max(160).optional(),
@@ -652,8 +869,9 @@ const exportMusicProjectInputSchema = z.object({
   outputManifestPath: z.string().min(1).max(240).optional().default("music/production-export-manifest.json"),
   outputReadmePath: z.string().min(1).max(240).optional().default("music/export-package/README.md"),
   outputPackageReportPath: z.string().min(1).max(240).optional().default("music/export-package/package-report.json"),
-  outputPlaylistPath: z.string().min(1).max(240).optional().default("music/export-package/playlist.json")
-});
+  outputPlaylistPath: z.string().min(1).max(240).optional().default("music/export-package/playlist.json"),
+  normalizationWarnings: normalizationWarningsSchema
+}));
 
 const musicFeedbackItemSchema = z.union([
   z.string().min(1).max(1000),
@@ -688,7 +906,7 @@ const midiOperationSchema = z.object({
   value: z.union([z.string(), z.number(), z.boolean()]).optional(),
   notes: z.array(noteSchema.omit({ track: true })).max(500).optional()
 });
-const composeEditMidiInputSchema = z.object({
+const composeEditMidiInputSchema = z.preprocess(normalizeMusicWorkflowSchemaInput, z.object({
   projectId: z.string().min(8).max(80),
   existingManifestPath: z.string().min(1).max(240).optional(),
   style: musicStyleInputSchema.optional().default("cafe_jazz"),
@@ -717,9 +935,11 @@ const composeEditMidiInputSchema = z.object({
     requireStartWithinBars: z.number().min(0).max(64).optional(),
     barBeats: z.number().int().min(1).max(16).optional().default(4)
   }).optional(),
+  instrumentPolicy: instrumentPolicySchema.optional(),
   outputManifestPath: z.string().min(1).max(240).optional().default("music/compose-edit-midi-manifest.json"),
-  outputMidiPath: z.string().min(1).max(240).optional().default("music/compose-edit-midi.mid")
-});
+  outputMidiPath: z.string().min(1).max(240).optional().default("music/compose-edit-midi.mid"),
+  normalizationWarnings: normalizationWarningsSchema
+}));
 
 type Composition = {
   title: string;
@@ -734,6 +954,16 @@ type Composition = {
   chordProgression: string[];
   tracks: Record<string, Array<z.infer<typeof noteSchema>>>;
   license: { output: string; dependencies: string[] };
+  instrumentPolicy?: MusicInstrumentPolicy;
+  sourceComposition?: {
+    manifest: string;
+    sourceType: "user_melody" | "generated_composition" | "imported_score";
+  };
+  development?: {
+    preserveMelodicIdentity: boolean;
+    variationLevel: "low" | "medium" | "high";
+  };
+  normalizationWarnings?: string[];
   compositionPlan?: {
     form: Array<{ name: string; bars: number; role: string; targetIntensity: number }>;
     motifs: Array<{ id: string; contour: string; rhythm: string; development: string[] }>;
@@ -1695,6 +1925,477 @@ async function readComposition(ctx: ToolContext, projectId: string, manifestPath
   return JSON.parse(await readProjectFile(ctx.projectRoot, projectId, manifestPath, 2 * 1024 * 1024)) as Composition;
 }
 
+type MusicConstraintOptions = {
+  instrumentPolicy?: MusicInstrumentPolicy;
+  targetDurationSec?: number;
+  durationToleranceSec?: number;
+  requiredSections?: string[];
+  channelMap?: Record<string, number>;
+};
+
+export type MusicConstraintReport = {
+  ok: boolean;
+  policy?: MusicInstrumentPolicy;
+  duration: { actualSeconds: number; targetSeconds?: number; toleranceSeconds?: number; ok: boolean };
+  observed: {
+    instruments: string[];
+    tracks: Array<{ track: string; instrument?: CanonicalInstrument; noteCount: number; channel?: number }>;
+    channels: number[];
+    percussionChannelPresent: boolean;
+    unknownInstrumentNames: string[];
+    emptyTracks: string[];
+    noteCount: number;
+  };
+  requiredSections: { requested: string[]; missing: string[] };
+  failures: string[];
+  warnings: string[];
+};
+
+/**
+ * Evaluate declared music constraints against the composition that will actually be encoded.
+ * MIDI channels are zero-indexed internally, so channel 9 below is General MIDI channel 10.
+ */
+export function evaluateMusicConstraints(composition: Composition, options: MusicConstraintOptions = {}): MusicConstraintReport {
+  const policy = options.instrumentPolicy ?? composition.instrumentPolicy;
+  const failures: string[] = [];
+  const warnings: string[] = [];
+  const channelMap = options.channelMap ?? {};
+  const tracks = Object.entries(composition.tracks ?? {}).map(([track, rawNotes]) => {
+    const notes = Array.isArray(rawNotes) ? rawNotes : [];
+    const instrument = canonicalInstrumentFromTrackKey(track);
+    const channel = instrument === undefined
+      ? undefined
+      : channelMap[track] ?? channelMap[instrument] ?? instrumentCatalog[instrument].channel;
+    return { track, instrument, noteCount: notes.length, channel };
+  });
+  const declaredInstrumentNames = Array.isArray(composition.instruments) ? composition.instruments : [];
+  const declaredInstruments = declaredInstrumentNames.map((name) => ({ name, instrument: canonicalInstrumentFromName(name) }));
+  const unknownInstrumentNames = Array.from(new Set([
+    ...tracks.filter((track) => !track.instrument).map((track) => track.track),
+    ...declaredInstruments.filter((entry) => !entry.instrument).map((entry) => entry.name)
+  ]));
+  const observedInstruments = Array.from(new Set([
+    ...tracks.flatMap((track) => track.instrument ? [track.instrument] : []),
+    ...declaredInstruments.flatMap((entry) => entry.instrument ? [entry.instrument] : [])
+  ]));
+  const emptyTracks = tracks.filter((track) => track.noteCount === 0).map((track) => track.track);
+  const noteCount = tracks.reduce((sum, track) => sum + track.noteCount, 0);
+  const channels = Array.from(new Set(tracks.flatMap((track) => track.channel === undefined ? [] : [track.channel]))).sort((a, b) => a - b);
+  const targetDurationSec = options.targetDurationSec;
+  const durationToleranceSec = options.durationToleranceSec ?? 15;
+  const durationOk = targetDurationSec === undefined || Math.abs(composition.durationSeconds - targetDurationSec) <= durationToleranceSec;
+  const requiredSections = options.requiredSections ?? [];
+  const sectionNames = new Set((composition.sections ?? []).map((section) => section.name.toLowerCase()));
+  const missingSections = requiredSections.filter((section) => !sectionNames.has(section.toLowerCase()));
+
+  if (!Number.isFinite(composition.durationSeconds) || composition.durationSeconds <= 0) failures.push("Composition durationSeconds must be a positive finite number.");
+  if (!noteCount) failures.push("Composition contains no notes.");
+  if (!durationOk && targetDurationSec !== undefined) {
+    failures.push(`Duration ${composition.durationSeconds}s is outside target ${targetDurationSec}s ±${durationToleranceSec}s.`);
+  }
+  if (missingSections.length) failures.push(`Missing required section(s): ${missingSections.join(", ")}.`);
+
+  if (policy) {
+    const allowed = new Set<CanonicalInstrument>(policy.allowedInstruments);
+    const prohibited = new Set<CanonicalInstrument>(policy.prohibitedInstruments);
+    if (policy.mode === "solo" && allowed.size !== 1) failures.push("Solo instrument policy must declare exactly one allowed instrument.");
+    for (const instrument of observedInstruments) {
+      if (!allowed.has(instrument)) failures.push(`Instrument ${instrument} is not allowed by the declared instrument policy.`);
+      if (prohibited.has(instrument)) failures.push(`Instrument ${instrument} is explicitly prohibited by the declared instrument policy.`);
+    }
+    if (unknownInstrumentNames.length) failures.push(`Unknown instrument/track identity cannot pass a hard policy: ${unknownInstrumentNames.join(", ")}.`);
+    if (emptyTracks.length) failures.push(`Empty or hidden track(s) are not allowed under a hard instrument policy: ${emptyTracks.join(", ")}.`);
+    if (policy.mode === "solo" && observedInstruments.length !== 1) {
+      failures.push(`Solo policy requires exactly one observed instrument; found ${observedInstruments.length}: ${observedInstruments.join(", ") || "none"}.`);
+    }
+    if (policy.mode === "solo" && channels.length > 1) failures.push(`Solo policy requires one MIDI channel; found channels ${channels.map((channel) => channel + 1).join(", ")}.`);
+    if (channels.includes(9)) failures.push("General MIDI channel 10 (zero-based channel 9) is prohibited by this instrument policy.");
+  } else if (unknownInstrumentNames.length) {
+    warnings.push(`Unrecognized instrument/track names: ${unknownInstrumentNames.join(", ")}. Declare an instrumentPolicy to fail closed.`);
+  }
+
+  return {
+    ok: failures.length === 0,
+    policy,
+    duration: { actualSeconds: composition.durationSeconds, targetSeconds: targetDurationSec, toleranceSeconds: targetDurationSec === undefined ? undefined : durationToleranceSec, ok: durationOk },
+    observed: {
+      instruments: observedInstruments,
+      tracks,
+      channels,
+      percussionChannelPresent: channels.includes(9),
+      unknownInstrumentNames,
+      emptyTracks,
+      noteCount
+    },
+    requiredSections: { requested: requiredSections, missing: missingSections },
+    failures: Array.from(new Set(failures)),
+    warnings
+  };
+}
+
+type MusicNote = Composition["tracks"][string][number];
+
+type MusicDevelopmentOptions = {
+  sourceCompositionManifestPath?: string;
+  preserveMelodicIdentity?: boolean;
+  variationLevel?: "low" | "medium" | "high";
+  targetDurationSec?: number;
+  durationToleranceSec?: number;
+  requiredSections?: string[];
+  thresholds?: z.infer<typeof musicDevelopmentThresholdsSchema>;
+};
+
+export type MusicDevelopmentReport = {
+  ok: boolean;
+  lineage: {
+    expectedSourceManifestPath?: string;
+    recordedSourceManifestPath?: string;
+    sourceType?: string;
+    recorded: boolean;
+    preserveMelodicIdentity: boolean;
+    variationLevel: string;
+  };
+  duration: { actualSeconds: number; targetSeconds?: number; toleranceSeconds?: number; ok: boolean };
+  melodyIdentity: {
+    score: number;
+    requiredScore: number;
+    sourceTrack?: string;
+    developedTrack?: string;
+    motifNoteCount: number;
+    themeMatches: number;
+    requiredThemeMatches: number;
+    bestMatchStartBeats: number[];
+  };
+  development: {
+    score: number;
+    requiredScore: number;
+    sourceWindowSeconds: number;
+    analyzedWindowCount: number;
+    sectionCoverage: number;
+    variationSignals: {
+      register: number;
+      rhythm: number;
+      dynamics: number;
+      density: number;
+      harmony: number;
+      phrasing: number;
+    };
+    transformationEvidence: string[];
+  };
+  repetition: {
+    repeatedSectionSimilarity: number;
+    maximumAllowedSimilarity: number;
+    exactRepeatRatio: number;
+    maximumExactRepeatRatio: number;
+    dominantExactWindowCount: number;
+    mechanicalLoopDetected: boolean;
+  };
+  sections: {
+    requested: string[];
+    missing: string[];
+    profiles: Array<{ name: string; noteCount: number; meanPitch?: number; meanVelocity?: number; meanDurationBeats?: number }>;
+  };
+  failures: string[];
+  warnings: string[];
+};
+
+function musicClamp01(value: number): number {
+  return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
+}
+
+function musicRound(value: number, digits = 3): number {
+  return Number(value.toFixed(digits));
+}
+
+function musicMean(values: number[]): number {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function musicRangeScore(values: number[], usefulRange: number): number {
+  if (values.length < 2) return 0;
+  return musicClamp01((Math.max(...values) - Math.min(...values)) / usefulRange);
+}
+
+function sortedMusicNotes(notes: MusicNote[]): MusicNote[] {
+  return [...notes].sort((left, right) => left.startBeat - right.startBeat || left.midi - right.midi);
+}
+
+function primaryMelodyTrack(composition: Composition, preferredInstrument?: CanonicalInstrument): { track: string; notes: MusicNote[] } | undefined {
+  const candidates = Object.entries(composition.tracks ?? {})
+    .map(([track, notes]) => ({ track, notes: sortedMusicNotes(Array.isArray(notes) ? notes : []), instrument: canonicalInstrumentFromTrackKey(track) }))
+    .filter((entry) => entry.notes.length > 0);
+  candidates.sort((left, right) => {
+    const leftPreference = left.instrument === preferredInstrument ? 3 : left.instrument === "piano" || left.instrument === "electric_piano" ? 2 : 0;
+    const rightPreference = right.instrument === preferredInstrument ? 3 : right.instrument === "piano" || right.instrument === "electric_piano" ? 2 : 0;
+    if (leftPreference !== rightPreference) return rightPreference - leftPreference;
+    const leftPitch = musicMean(left.notes.map((note) => note.midi));
+    const rightPitch = musicMean(right.notes.map((note) => note.midi));
+    return right.notes.length - left.notes.length || rightPitch - leftPitch;
+  });
+  return candidates[0] ? { track: candidates[0].track, notes: candidates[0].notes } : undefined;
+}
+
+function normalizedMusicGaps(notes: MusicNote[]): number[] {
+  const gaps = notes.slice(1).map((note, index) => Math.max(0.01, note.startBeat - notes[index].startBeat));
+  const meanGap = Math.max(0.01, musicMean(gaps));
+  return gaps.map((gap) => gap / meanGap);
+}
+
+function normalizedMusicDurations(notes: MusicNote[]): number[] {
+  const meanDuration = Math.max(0.01, musicMean(notes.map((note) => note.durationBeats)));
+  return notes.map((note) => note.durationBeats / meanDuration);
+}
+
+function melodyWindowSimilarity(source: MusicNote[], candidate: MusicNote[]): number {
+  const length = Math.min(source.length, candidate.length);
+  if (length < 4) return 0;
+  const sourceSlice = source.slice(0, length);
+  const candidateSlice = candidate.slice(0, length);
+  const pitchScores = sourceSlice.slice(1).map((note, index) => {
+    const sourceInterval = note.midi - sourceSlice[index].midi;
+    const candidateInterval = candidateSlice[index + 1].midi - candidateSlice[index].midi;
+    return musicClamp01(1 - Math.abs(sourceInterval - candidateInterval) / 6);
+  });
+  const sourceGaps = normalizedMusicGaps(sourceSlice);
+  const candidateGaps = normalizedMusicGaps(candidateSlice);
+  const rhythmScores = sourceGaps.map((gap, index) => musicClamp01(1 - Math.abs(gap - candidateGaps[index]) / 1.5));
+  const sourceDurations = normalizedMusicDurations(sourceSlice);
+  const candidateDurations = normalizedMusicDurations(candidateSlice);
+  const durationScores = sourceDurations.map((duration, index) => musicClamp01(1 - Math.abs(duration - candidateDurations[index]) / 1.5));
+  return musicRound(musicMean(pitchScores) * 0.7 + musicMean(rhythmScores) * 0.2 + musicMean(durationScores) * 0.1);
+}
+
+type DevelopmentWindow = {
+  index: number;
+  startBeat: number;
+  notes: MusicNote[];
+  meanPitch: number;
+  pitchRange: number;
+  meanVelocity: number;
+  meanDuration: number;
+  density: number;
+  phraseGap: number;
+  rhythmKey: string;
+  harmonyKey: string;
+  exactKey: string;
+};
+
+function buildDevelopmentWindows(notes: MusicNote[], sourceWindowBeats: number, totalBeats: number): DevelopmentWindow[] {
+  const count = Math.max(1, Math.ceil(totalBeats / sourceWindowBeats));
+  const windows: DevelopmentWindow[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const startBeat = index * sourceWindowBeats;
+    const endBeat = Math.min(totalBeats, startBeat + sourceWindowBeats);
+    const local = sortedMusicNotes(notes.filter((note) => note.startBeat >= startBeat && note.startBeat < endBeat));
+    const localStarts = local.map((note) => note.startBeat - startBeat);
+    const gaps = localStarts.slice(1).map((beat, noteIndex) => beat - localStarts[noteIndex]);
+    const pitches = local.map((note) => note.midi);
+    const rhythmKey = local.map((note) => `${Math.round((note.startBeat - startBeat) * 4) / 4}:${Math.round(note.durationBeats * 4) / 4}`).join("|");
+    const harmonyKey = [...new Set(pitches.map((pitch) => pitch % 12))].sort((left, right) => left - right).join(",");
+    const exactKey = local.map((note) => `${note.midi}:${Math.round((note.startBeat - startBeat) * 8) / 8}:${Math.round(note.durationBeats * 8) / 8}:${Math.round(note.velocity / 4)}`).join("|");
+    windows.push({
+      index,
+      startBeat,
+      notes: local,
+      meanPitch: musicMean(pitches),
+      pitchRange: pitches.length ? Math.max(...pitches) - Math.min(...pitches) : 0,
+      meanVelocity: musicMean(local.map((note) => note.velocity)),
+      meanDuration: musicMean(local.map((note) => note.durationBeats)),
+      density: local.length / Math.max(1, endBeat - startBeat),
+      phraseGap: musicMean(gaps),
+      rhythmKey,
+      harmonyKey,
+      exactKey
+    });
+  }
+  return windows;
+}
+
+function developmentWindowSimilarity(left: DevelopmentWindow, right: DevelopmentWindow): number {
+  if (!left.notes.length && !right.notes.length) return 1;
+  if (!left.notes.length || !right.notes.length) return 0;
+  const length = Math.min(32, left.notes.length, right.notes.length);
+  const pitch = musicMean(Array.from({ length }, (_, index) => musicClamp01(1 - Math.abs(left.notes[index].midi - right.notes[index].midi) / 12)));
+  const leftStarts = left.notes.slice(0, length).map((note) => note.startBeat - left.startBeat);
+  const rightStarts = right.notes.slice(0, length).map((note) => note.startBeat - right.startBeat);
+  const onset = musicMean(leftStarts.map((beat, index) => musicClamp01(1 - Math.abs(beat - rightStarts[index]) / 2)));
+  const duration = musicMean(Array.from({ length }, (_, index) => musicClamp01(1 - Math.abs(left.notes[index].durationBeats - right.notes[index].durationBeats) / 2)));
+  const count = musicClamp01(1 - Math.abs(left.notes.length - right.notes.length) / Math.max(left.notes.length, right.notes.length));
+  const dynamics = musicClamp01(1 - Math.abs(left.meanVelocity - right.meanVelocity) / 32);
+  return musicRound(pitch * 0.35 + onset * 0.25 + duration * 0.15 + count * 0.15 + dynamics * 0.1);
+}
+
+function sectionProfiles(composition: Composition, notes: MusicNote[]) {
+  const sections = composition.sections ?? [];
+  const totalBars = Math.max(1, sections.reduce((sum, section) => sum + section.bars, 0));
+  const totalBeats = Math.max(1, composition.durationSeconds / 60 * composition.tempo);
+  let consumedBars = 0;
+  return sections.map((section) => {
+    const startBeat = consumedBars / totalBars * totalBeats;
+    consumedBars += section.bars;
+    const endBeat = consumedBars / totalBars * totalBeats;
+    const selected = notes.filter((note) => note.startBeat >= startBeat && note.startBeat < endBeat);
+    return {
+      name: section.name,
+      noteCount: selected.length,
+      meanPitch: selected.length ? musicRound(musicMean(selected.map((note) => note.midi)), 2) : undefined,
+      meanVelocity: selected.length ? musicRound(musicMean(selected.map((note) => note.velocity)), 2) : undefined,
+      meanDurationBeats: selected.length ? musicRound(musicMean(selected.map((note) => note.durationBeats)), 3) : undefined
+    };
+  });
+}
+
+/** Deterministic, explainable long-form QA. It detects exact cloning without claiming perceptual/ML analysis. */
+export function evaluateMusicDevelopment(source: Composition, developed: Composition, options: MusicDevelopmentOptions = {}): MusicDevelopmentReport {
+  const thresholds = musicDevelopmentThresholdsSchema.parse(options.thresholds ?? {});
+  const failures: string[] = [];
+  const warnings: string[] = [];
+  const sourceMelody = primaryMelodyTrack(source);
+  const sourceInstrument = sourceMelody ? canonicalInstrumentFromTrackKey(sourceMelody.track) : undefined;
+  const developedMelody = primaryMelodyTrack(developed, sourceInstrument);
+  const motifLength = Math.min(thresholds.motifNoteCount, sourceMelody?.notes.length ?? 0);
+  const motif = sourceMelody?.notes.slice(0, motifLength) ?? [];
+  const matches = developedMelody && motifLength >= 4
+    ? developedMelody.notes.slice(0, Math.max(0, developedMelody.notes.length - motifLength + 1)).map((_, index) => ({
+        index,
+        score: melodyWindowSimilarity(motif, developedMelody.notes.slice(index, index + motifLength))
+      })).filter((match) => match.score >= thresholds.minMelodyIdentityScore)
+    : [];
+  matches.sort((left, right) => right.score - left.score || left.index - right.index);
+  const bestMatches: typeof matches = [];
+  const minimumMatchDistance = Math.max(2, Math.floor(motifLength / 2));
+  for (const match of matches) {
+    if (bestMatches.every((selected) => Math.abs(selected.index - match.index) >= minimumMatchDistance)) bestMatches.push(match);
+  }
+  const melodyIdentityScore = bestMatches.length ? musicRound(musicMean(bestMatches.slice(0, 3).map((match) => match.score))) : 0;
+
+  const sourceWindowBeats = Math.max(1, source.durationSeconds / 60 * Math.max(1, source.tempo));
+  const developedTotalBeats = Math.max(1, developed.durationSeconds / 60 * Math.max(1, developed.tempo));
+  const windows = developedMelody ? buildDevelopmentWindows(developedMelody.notes, sourceWindowBeats, developedTotalBeats) : [];
+  const populatedWindows = windows.filter((window) => window.notes.length > 0);
+  const sampledWindows = populatedWindows.length <= 64
+    ? populatedWindows
+    : Array.from({ length: 64 }, (_, index) => populatedWindows[Math.floor(index * (populatedWindows.length - 1) / 63)]);
+  const pairSimilarities: number[] = [];
+  for (let left = 0; left < sampledWindows.length; left += 1) {
+    for (let right = left + 1; right < sampledWindows.length; right += 1) {
+      pairSimilarities.push(developmentWindowSimilarity(sampledWindows[left], sampledWindows[right]));
+    }
+  }
+  const repeatedSectionSimilarity = pairSimilarities.length ? musicRound(musicMean(pairSimilarities)) : 1;
+  const exactCounts = new Map<string, number>();
+  for (const window of populatedWindows) exactCounts.set(window.exactKey, (exactCounts.get(window.exactKey) ?? 0) + 1);
+  const dominantExactWindowCount = Math.max(0, ...exactCounts.values());
+  const exactRepeatRatio = populatedWindows.length ? musicRound(dominantExactWindowCount / populatedWindows.length) : 1;
+
+  const uniqueDenominator = Math.max(1, Math.min(6, populatedWindows.length));
+  const register = musicRangeScore(populatedWindows.map((window) => window.meanPitch), 12);
+  const rhythm = musicClamp01(new Set(populatedWindows.map((window) => window.rhythmKey)).size / uniqueDenominator);
+  const dynamics = musicRangeScore(populatedWindows.map((window) => window.meanVelocity), 24);
+  const density = musicRangeScore(populatedWindows.map((window) => window.density), Math.max(0.01, musicMean(populatedWindows.map((window) => window.density)) * 0.5));
+  const harmony = musicClamp01(new Set(populatedWindows.map((window) => window.harmonyKey)).size / uniqueDenominator);
+  const phrasing = musicClamp01((musicRangeScore(populatedWindows.map((window) => window.meanDuration), Math.max(0.25, musicMean(populatedWindows.map((window) => window.meanDuration)) * 0.5))
+    + musicRangeScore(populatedWindows.map((window) => window.phraseGap), Math.max(0.5, musicMean(populatedWindows.map((window) => window.phraseGap)) * 0.5))) / 2);
+  const profiles = sectionProfiles(developed, developedMelody?.notes ?? []);
+  const sectionCoverage = profiles.length ? profiles.filter((profile) => profile.noteCount > 0).length / profiles.length : 0;
+  const variationSignals = { register, rhythm, dynamics, density, harmony, phrasing };
+  const developmentScore = musicRound(
+    register * 0.18 + rhythm * 0.17 + dynamics * 0.12 + density * 0.16 + harmony * 0.15 + phrasing * 0.12 + sectionCoverage * 0.1
+  );
+  const transformationEvidence = [
+    ...(register >= 0.2 ? ["register changes across source-length windows"] : []),
+    ...(rhythm >= 0.34 ? ["rhythmic patterns vary across windows"] : []),
+    ...(dynamics >= 0.2 ? ["dynamic contour changes across windows"] : []),
+    ...(density >= 0.2 ? ["texture density changes across windows"] : []),
+    ...(harmony >= 0.34 ? ["pitch-class content changes across windows"] : []),
+    ...(phrasing >= 0.2 ? ["duration and phrase spacing change across windows"] : []),
+    ...(sectionCoverage >= 0.8 ? ["thematic material covers the declared form"] : [])
+  ];
+
+  const expectedSourceManifestPath = options.sourceCompositionManifestPath;
+  const developedRecord = developed as Composition & { sourceManifestPath?: string };
+  const recordedSourceManifestPath = developed.sourceComposition?.manifest ?? developedRecord.sourceManifestPath;
+  const lineageRecorded = Boolean(recordedSourceManifestPath && (!expectedSourceManifestPath || recordedSourceManifestPath === expectedSourceManifestPath));
+  const preserveMelodicIdentity = options.preserveMelodicIdentity ?? developed.development?.preserveMelodicIdentity ?? true;
+  const variationLevel = options.variationLevel ?? developed.development?.variationLevel ?? "unknown";
+  const targetDurationSec = options.targetDurationSec;
+  const toleranceSeconds = options.durationToleranceSec ?? 15;
+  const durationOk = targetDurationSec === undefined || Math.abs(developed.durationSeconds - targetDurationSec) <= toleranceSeconds;
+  const requestedSections = options.requiredSections ?? [];
+  const sectionNames = new Set((developed.sections ?? []).map((section) => section.name.toLowerCase()));
+  const missingSections = requestedSections.filter((section) => !sectionNames.has(section.toLowerCase()));
+  const mechanicalLoopDetected = exactRepeatRatio > thresholds.maxExactRepeatRatio
+    || (repeatedSectionSimilarity > thresholds.maxRepeatedSectionSimilarity && developmentScore < thresholds.minDevelopmentScore);
+
+  if (!sourceMelody || motifLength < 4) failures.push("Source composition needs at least four notes in a usable melody track.");
+  if (!developedMelody) failures.push("Developed composition has no usable melody track.");
+  if (!lineageRecorded) failures.push("Developed composition does not record matching source-melody lineage.");
+  if (!durationOk && targetDurationSec !== undefined) failures.push(`Duration ${developed.durationSeconds}s is outside target ${targetDurationSec}s ±${toleranceSeconds}s.`);
+  if (missingSections.length) failures.push(`Missing required development section(s): ${missingSections.join(", ")}.`);
+  if (preserveMelodicIdentity && melodyIdentityScore < thresholds.minMelodyIdentityScore) {
+    failures.push(`Melody identity score ${melodyIdentityScore} is below required ${thresholds.minMelodyIdentityScore}.`);
+  }
+  if (preserveMelodicIdentity && bestMatches.length < thresholds.minSourceThemeMatches) {
+    failures.push(`Source theme appears ${bestMatches.length} time(s); at least ${thresholds.minSourceThemeMatches} structurally separated statement(s) are required.`);
+  }
+  if (developmentScore < thresholds.minDevelopmentScore) failures.push(`Development score ${developmentScore} is below required ${thresholds.minDevelopmentScore}.`);
+  if (repeatedSectionSimilarity > thresholds.maxRepeatedSectionSimilarity) failures.push(`Repeated-section similarity ${repeatedSectionSimilarity} exceeds maximum ${thresholds.maxRepeatedSectionSimilarity}.`);
+  if (exactRepeatRatio > thresholds.maxExactRepeatRatio) failures.push(`Exact source-window repeat ratio ${exactRepeatRatio} exceeds maximum ${thresholds.maxExactRepeatRatio}.`);
+  if (transformationEvidence.length < 3) failures.push("Fewer than three independent musical-development signals were detected.");
+  if (!mechanicalLoopDetected && exactRepeatRatio > thresholds.maxExactRepeatRatio * 0.8) warnings.push("Exact repetition is close to the configured maximum; review the reprise and loop transitions.");
+
+  return {
+    ok: failures.length === 0,
+    lineage: {
+      expectedSourceManifestPath,
+      recordedSourceManifestPath,
+      sourceType: developed.sourceComposition?.sourceType,
+      recorded: lineageRecorded,
+      preserveMelodicIdentity,
+      variationLevel
+    },
+    duration: { actualSeconds: developed.durationSeconds, targetSeconds: targetDurationSec, toleranceSeconds: targetDurationSec === undefined ? undefined : toleranceSeconds, ok: durationOk },
+    melodyIdentity: {
+      score: melodyIdentityScore,
+      requiredScore: thresholds.minMelodyIdentityScore,
+      sourceTrack: sourceMelody?.track,
+      developedTrack: developedMelody?.track,
+      motifNoteCount: motifLength,
+      themeMatches: bestMatches.length,
+      requiredThemeMatches: thresholds.minSourceThemeMatches,
+      bestMatchStartBeats: bestMatches.slice(0, 12).map((match) => developedMelody?.notes[match.index]?.startBeat ?? 0)
+    },
+    development: {
+      score: developmentScore,
+      requiredScore: thresholds.minDevelopmentScore,
+      sourceWindowSeconds: source.durationSeconds,
+      analyzedWindowCount: populatedWindows.length,
+      sectionCoverage: musicRound(sectionCoverage),
+      variationSignals: Object.fromEntries(Object.entries(variationSignals).map(([key, value]) => [key, musicRound(value)])) as MusicDevelopmentReport["development"]["variationSignals"],
+      transformationEvidence
+    },
+    repetition: {
+      repeatedSectionSimilarity,
+      maximumAllowedSimilarity: thresholds.maxRepeatedSectionSimilarity,
+      exactRepeatRatio,
+      maximumExactRepeatRatio: thresholds.maxExactRepeatRatio,
+      dominantExactWindowCount,
+      mechanicalLoopDetected
+    },
+    sections: { requested: requestedSections, missing: missingSections, profiles },
+    failures: Array.from(new Set(failures)),
+    warnings
+  };
+}
+
+function musicRenderTimeoutMs(composition: Composition | undefined, requestedTimeoutMs: number | undefined, commandTimeoutMs: number): number {
+  if (requestedTimeoutMs !== undefined) return requestedTimeoutMs;
+  // Sampled-instrument rendering and two-pass normalization can take several multiples of the
+  // source duration. Keep the ordinary command timeout as the floor and cap runaway jobs at 12h.
+  const durationSeconds = Math.max(60, composition?.durationSeconds ?? 60);
+  return Math.min(12 * 60 * 60 * 1000, Math.max(commandTimeoutMs, Math.ceil(durationSeconds * 3_000)));
+}
+
 type EnsembleTrackStat = {
   instrument: string;
   matchedTracks: string[];
@@ -2021,6 +2722,10 @@ function qualityForComposition(composition: Composition, options: { audio?: Buff
   if (noteDensityPerMinute > 900) addFinding(findings, "medium", "background_suitability", "Note density is high for long background listening.", "Lower drum subdivisions, simplify comping, or thin the melody.");
   if (composition.durationSeconds < 10 && options.useCase.includes("background")) addFinding(findings, "low", "duration", "Preview is very short for judging background comfort.", "Render at least 30-60 seconds before final QA.");
   const technicalReport = wavAnalysis(options.audio);
+  const silenceGaps = actionableSilenceGaps(technicalReport.silenceGaps, {
+    declaredDurationSeconds: composition.durationSeconds,
+    loopable: options.checkLoop && composition.loopable
+  });
   if (options.audio && !technicalReport.readable) addFinding(findings, "medium", "file_format", "Audio file is not a readable PCM WAV for detailed analysis.", "Render a WAV preview before QA or run an external analyzer for compressed files.");
   if (options.audio && technicalReport.readable && technicalReport.rms < 0.001) addFinding(findings, "high", "silence", "Audio render is effectively silent.", "Re-render with audible instruments and verify stem routing.");
   if (technicalReport.silenceRatio > 0.85) addFinding(findings, "high", "silence", "Audio is mostly silence.", "Check MIDI timing, renderer output, and missing instrument mappings.");
@@ -2028,7 +2733,7 @@ function qualityForComposition(composition: Composition, options: { audio?: Buff
   if (technicalReport.peak > 0.98) addFinding(findings, "high", "clipping", "Audio peak is near 0 dBFS and may clip.", "Lower master gain or normalize to a safer true peak ceiling.");
   if (technicalReport.rms > 0.35) addFinding(findings, "medium", "loudness", "Audio is loud for background music.", "Normalize loudness lower and reduce dense transient layers.");
   if (technicalReport.dynamicRange > 28) addFinding(findings, "medium", "dynamic_range", "Dynamic range is wide for steady background playback.", "Use gentle compression or rebalance quiet/loud sections.");
-  if (technicalReport.silenceGaps.length) addFinding(findings, "medium", "silence", "Detected long silence gaps.", "Fill gaps with room tone, pads, or adjust arrangement section lengths.");
+  if (silenceGaps.length) addFinding(findings, "medium", "silence", "Detected long silence gaps.", "Fill gaps with room tone, pads, or adjust arrangement section lengths.");
   if (technicalReport.harshHighFrequencyProxy > 0.08) addFinding(findings, "medium", "harshness", "High-frequency change proxy suggests possible harshness.", "Reduce high-end, soften piano/drum velocities, or apply a gentle low-pass.");
   // Audible noise floor: noise-to-signal ratio > 15% (or > 10% for solo_piano) means the quiet
   // passages carry persistent hiss (typical with Salamander/SoundFont renders after aggressive
@@ -3677,8 +4382,8 @@ export function fluidSynthArgs(soundfontPath: string, midiPath: string, outputPa
   return ["-ni", "-F", outputPath, "-r", String(sampleRate), soundfontPath, midiPath];
 }
 
-async function fluidSynthRender(soundfontPath: string, midiPath: string, outputPath: string, sampleRate: number, timeout: number) {
-  await execFileAsync("fluidsynth", fluidSynthArgs(soundfontPath, midiPath, outputPath, sampleRate), { timeout, maxBuffer: 1024 * 1024 });
+async function fluidSynthRender(soundfontPath: string, midiPath: string, outputPath: string, sampleRate: number, timeout: number, signal?: AbortSignal) {
+  await execFileAsync("fluidsynth", fluidSynthArgs(soundfontPath, midiPath, outputPath, sampleRate), { timeout, maxBuffer: 1024 * 1024, signal });
   const output = await readFile(outputPath);
   assertPcmWav(output, "FluidSynth output");
   return output;
@@ -3692,15 +4397,16 @@ async function fluidSynthRender(soundfontPath: string, midiPath: string, outputP
 // safe for piano and any non-bass instrument).
 // lowpass=f=17000: cuts SoundFont hiss and aliasing above 17 kHz which becomes audible after
 // loudnorm gain-up on sparse solo piano; 17 kHz is above musical content for most instruments.
-async function normalizeWavWithFfmpeg(inputWavPath: string, outputWavPath: string, sampleRate: number, timeout: number) {
+async function normalizeWavWithFfmpeg(inputWavPath: string, outputWavPath: string, sampleRate: number, timeout: number, signal?: AbortSignal) {
   // Pass 1: measure. loudnorm prints a JSON block to stderr at loglevel=info.
   const measureFilter = "highpass=f=80,lowpass=f=17000,loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json";
   let measured: { input_i: string; input_tp: string; input_lra: string; input_thresh: string; target_offset: string } | undefined;
   try {
-    const result = await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "info", "-i", inputWavPath, "-af", measureFilter, "-f", "null", "-"], { timeout, maxBuffer: 256 * 1024 });
+    const result = await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "info", "-i", inputWavPath, "-af", measureFilter, "-f", "null", "-"], { timeout, maxBuffer: 256 * 1024, signal });
     const match = (result as unknown as { stderr: string }).stderr?.match(/\{[^{}]*"input_i"[^{}]*\}/s);
     if (match) measured = JSON.parse(match[0]);
   } catch (err: unknown) {
+    throwIfAborted(signal);
     const match = (err as { stderr?: string }).stderr?.match(/\{[^{}]*"input_i"[^{}]*\}/s);
     if (match) measured = JSON.parse(match[0]);
   }
@@ -3708,13 +4414,13 @@ async function normalizeWavWithFfmpeg(inputWavPath: string, outputWavPath: strin
   const applyFilter = measured
     ? `highpass=f=80,lowpass=f=17000,loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=${measured.input_i}:measured_TP=${measured.input_tp}:measured_LRA=${measured.input_lra}:measured_thresh=${measured.input_thresh}:offset=${measured.target_offset}:linear=true`
     : "highpass=f=80,lowpass=f=17000,loudnorm=I=-16:TP=-1.5:LRA=11";
-  await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", inputWavPath, "-af", applyFilter, "-ar", String(sampleRate), outputWavPath], { timeout, maxBuffer: 1024 * 1024 });
+  await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", inputWavPath, "-af", applyFilter, "-ar", String(sampleRate), outputWavPath], { timeout, maxBuffer: 1024 * 1024, signal });
   const output = await readFile(outputWavPath);
   assertPcmWav(output, "Normalized output");
   return output;
 }
 
-async function sfizzRender(sfzPath: string, midiPath: string, outputPath: string, sampleRate: number, timeout: number) {
+async function sfizzRender(sfzPath: string, midiPath: string, outputPath: string, sampleRate: number, timeout: number, signal?: AbortSignal) {
   const attempts = [
     ["--sfz", sfzPath, "--midi", midiPath, "--wav", outputPath, "--sample-rate", String(sampleRate)],
     ["-s", sfzPath, "-m", midiPath, "-o", outputPath, "-r", String(sampleRate)],
@@ -3723,24 +4429,25 @@ async function sfizzRender(sfzPath: string, midiPath: string, outputPath: string
   const errors: string[] = [];
   for (const args of attempts) {
     try {
-      await execFileAsync("sfizz_render", args, { timeout, maxBuffer: 1024 * 1024 });
+      await execFileAsync("sfizz_render", args, { timeout, maxBuffer: 1024 * 1024, signal });
       const output = await readFile(outputPath);
       assertPcmWav(output, "SFZ renderer output");
       return output;
     } catch (error) {
+      throwIfAborted(signal);
       errors.push(error instanceof Error ? error.message : String(error));
     }
   }
   throw new Error(`sfizz_render failed with supported argument forms: ${errors.join(" | ")}`);
 }
 
-async function productionInstrumentRender(renderer: string, instrumentPath: string, midiPath: string, outputPath: string, sampleRate: number, timeout: number) {
-  if (renderer === "sfizz") return sfizzRender(instrumentPath, midiPath, outputPath, sampleRate, timeout);
-  return fluidSynthRender(instrumentPath, midiPath, outputPath, sampleRate, timeout);
+async function productionInstrumentRender(renderer: string, instrumentPath: string, midiPath: string, outputPath: string, sampleRate: number, timeout: number, signal?: AbortSignal) {
+  if (renderer === "sfizz") return sfizzRender(instrumentPath, midiPath, outputPath, sampleRate, timeout, signal);
+  return fluidSynthRender(instrumentPath, midiPath, outputPath, sampleRate, timeout, signal);
 }
 
-async function encodeMp3WithFfmpeg(inputWavPath: string, outputMp3Path: string, timeout: number) {
-  await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", inputWavPath, "-codec:a", "libmp3lame", "-b:a", "192k", outputMp3Path], { timeout, maxBuffer: 1024 * 1024 });
+async function encodeMp3WithFfmpeg(inputWavPath: string, outputMp3Path: string, timeout: number, signal?: AbortSignal) {
+  await execFileAsync("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-i", inputWavPath, "-codec:a", "libmp3lame", "-b:a", "192k", outputMp3Path], { timeout, maxBuffer: 1024 * 1024, signal });
   return readFile(outputMp3Path);
 }
 
@@ -4450,21 +5157,60 @@ async function writeCompositionBundle(ctx: ToolContext, projectId: string, compo
   return { manifestPath, midiPath, audioPath: renderAudio ? audioPath : undefined, artifacts };
 }
 
-function extendComposition(composition: Composition, targetDurationSeconds: number, style: string) {
+function extendComposition(
+  composition: Composition,
+  targetDurationSeconds: number,
+  style: string,
+  variationLevel: "low" | "medium" | "high" = "high"
+) {
   const extended = JSON.parse(JSON.stringify(composition)) as Composition;
   const sourceDuration = Math.max(1, composition.durationSeconds);
   const repeats = Math.ceil(targetDurationSeconds / sourceDuration);
+  const sourceBeats = sourceDuration / 60 * composition.tempo;
+  const targetBeats = targetDurationSeconds / 60 * composition.tempo;
   const tracks: Composition["tracks"] = {};
   for (const [track, notes] of Object.entries(composition.tracks)) {
     tracks[track] = [];
+    const canonicalTrack = canonicalInstrumentFromTrackKey(track);
+    const transformCount = variationLevel === "low" ? 3 : variationLevel === "medium" ? 4 : 6;
+    const anchorPitch = notes[0]?.midi ?? 60;
     for (let repeat = 0; repeat < repeats; repeat += 1) {
-      const offsetBeats = repeat * sourceDuration / 60 * composition.tempo;
-      for (const note of notes) {
+      const offsetBeats = repeat * sourceBeats;
+      const transform = repeat % transformCount;
+      for (const [noteIndex, note] of notes.entries()) {
+        if (variationLevel === "high" && transform === 3 && notes.length >= 8 && noteIndex % 4 === 3) continue;
+        let localStartBeat = note.startBeat;
+        let durationBeats = note.durationBeats;
+        let midi = note.midi;
+        let velocity = note.velocity;
+        if (transform === 1) {
+          midi += canonicalTrack === "piano" || canonicalTrack === "electric_piano" ? 12 : 0;
+          velocity += 7;
+        } else if (transform === 2) {
+          localStartBeat += noteIndex % 3 === 1 ? 0.24 : noteIndex % 3 === 2 ? -0.12 : 0;
+          durationBeats *= noteIndex % 2 === 0 ? 1.3 : 0.72;
+          velocity += noteIndex % 2 === 0 ? -8 : 5;
+        } else if (transform === 3) {
+          durationBeats *= 0.72;
+          velocity -= 10;
+        } else if (transform === 4) {
+          midi = anchorPitch - (note.midi - anchorPitch) + (noteIndex % 5 === 0 ? 2 : 0);
+          localStartBeat += noteIndex % 4 === 0 ? 0.18 : 0;
+          velocity += (noteIndex % 5) - 2;
+        } else if (transform === 5) {
+          midi -= canonicalTrack === "piano" || canonicalTrack === "electric_piano" ? 12 : 0;
+          localStartBeat += (noteIndex % 4) * 0.08;
+          durationBeats *= noteIndex % 3 === 0 ? 1.45 : 0.82;
+          velocity += Math.round(Math.sin(noteIndex / Math.max(1, notes.length - 1) * Math.PI) * 14) - 5;
+        }
+        const startBeat = Math.max(offsetBeats, localStartBeat + offsetBeats);
+        if (startBeat >= targetBeats) continue;
         tracks[track].push({
           ...note,
-          startBeat: Number((note.startBeat + offsetBeats).toFixed(3)),
-          velocity: Math.max(1, Math.min(127, note.velocity + ((repeat % 4) - 1) * 3)),
-          midi: track === "piano" && repeat % 3 === 2 ? Math.min(127, note.midi + 12) : note.midi
+          startBeat: Number(startBeat.toFixed(3)),
+          durationBeats: Number(Math.max(0.05, Math.min(durationBeats, targetBeats - startBeat)).toFixed(3)),
+          velocity: Math.max(1, Math.min(127, velocity)),
+          midi: Math.max(0, Math.min(127, midi))
         });
       }
     }
@@ -4486,7 +5232,7 @@ function extendComposition(composition: Composition, targetDurationSeconds: numb
 }
 
 function extendOriginalArrangement(composition: Composition, input: z.infer<typeof extendOriginalMusicArrangementInputSchema>) {
-  const extended = extendComposition(composition, input.targetDurationSec, "background_friendly");
+  const extended = extendComposition(composition, input.targetDurationSec, "background_friendly", input.variationLevel);
   extended.title = `${composition.title} (${input.styleFamily.replaceAll("_", " ")} long-form original)`;
   extended.loopable = false;
   const totalBeats = input.targetDurationSec / 60 * extended.tempo;
@@ -4887,7 +5633,7 @@ async function handleAssembleMusicSession(input: unknown, ctx: ToolContext) {
 
 export const musicWorkflowTools: ToolModule[] = [
   {
-    definition: { name: "compose_edit_midi", description: "Create or edit a structured multi-track MIDI composition with sections, chord chart, arrangement map, editable operations, background constraints, and a real MIDI asset.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, existingManifestPath: { type: "string" }, style: { type: "string", description: "cafe_jazz | lo_fi | bossa_nova | smooth_piano | acoustic_pop | cinematic_background | corporate_intro | game_bgm | orchestral_sketch | ambient | chill_lounge. Common natural-language aliases (e.g. \"Yiruma\", \"emotional piano\", \"lofi\") are auto-normalized to the closest of these; anything else must match one of these values exactly." }, mood: { type: "string" }, tempoBpm: { type: "number" }, key: { type: "string" }, durationSec: { type: "number" }, tracks: { type: "array", items: { type: "string" } }, sections: { type: "array", items: { type: "string" } }, constraints: { type: "object" }, operations: { type: "array", items: { type: "object" } }, ensembleRequirement: { type: "object", properties: { requiredInstruments: { type: "array", items: { type: "string" } }, soloInstruments: { type: "array", items: { type: "string" } }, maxSingleInstrumentSeconds: { type: "number" }, requireStartWithinBars: { type: "number" }, barBeats: { type: "number" } } }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "compose_edit_midi", description: "Create or edit a structured multi-track MIDI composition with sections, chord chart, arrangement map, editable operations, hard instrument policy, background constraints, and a real MIDI asset.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, existingManifestPath: { type: "string" }, style: { type: "string", description: "cafe_jazz | lo_fi | bossa_nova | smooth_piano | acoustic_pop | cinematic_background | corporate_intro | game_bgm | orchestral_sketch | ambient | chill_lounge. Common natural-language aliases (e.g. \"Yiruma\", \"emotional piano\", \"lofi\") are auto-normalized to the closest of these; anything else must match one of these values exactly." }, mood: { type: "string" }, tempoBpm: { type: "number" }, key: { type: "string" }, durationSec: { type: "number" }, tracks: { type: "array", items: { type: "string" } }, sections: { type: "array", items: { type: "string" } }, constraints: { type: "object" }, operations: { type: "array", items: { type: "object" } }, ensembleRequirement: { type: "object", properties: { requiredInstruments: { type: "array", items: { type: "string" } }, soloInstruments: { type: "array", items: { type: "string" } }, maxSingleInstrumentSeconds: { type: "number" }, requireStartWithinBars: { type: "number" }, barBeats: { type: "number" } } }, instrumentPolicy: instrumentPolicyJsonSchema, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: composeEditMidiInputSchema,
     handler: async (input, ctx) => {
@@ -4896,6 +5642,22 @@ export const musicWorkflowTools: ToolModule[] = [
         ? Object.assign(buildMidiComposition(parsed), await readComposition(ctx, parsed.projectId, parsed.existingManifestPath))
         : buildMidiComposition(parsed);
       const composition = applyComposeEditOperations(base, parsed.operations);
+      composition.normalizationWarnings = parsed.normalizationWarnings;
+      if (parsed.instrumentPolicy) composition.instrumentPolicy = parsed.instrumentPolicy;
+      const constraintReport = parsed.instrumentPolicy
+        ? evaluateMusicConstraints(composition, { instrumentPolicy: parsed.instrumentPolicy })
+        : undefined;
+      if (constraintReport && !constraintReport.ok) {
+        return {
+          ok: false,
+          summary: `Hard music constraints rejected the composition: ${constraintReport.failures[0]}`,
+          jobId: parsed.projectId,
+          artifacts: [],
+          structuredContent: { constraintReport, normalizationWarnings: parsed.normalizationWarnings, outputWritten: false },
+          logs: [JSON.stringify(constraintReport, null, 2)],
+          errors: constraintReport.failures
+        };
+      }
       // Fail-closed ensemble gate: when the caller declares which instruments must play together,
       // validate the actual notes BEFORE reporting success. This catches "requested cello track has
       // noteCount=0" and sequential/fake-duet output instead of publishing a misleading ok:true.
@@ -4918,8 +5680,8 @@ export const musicWorkflowTools: ToolModule[] = [
           : `Ensemble requirement not met: ${ensembleReport!.failures.length} blocking issue(s). MIDI written for inspection but not safe to publish.`,
         jobId: parsed.projectId,
         artifacts: [manifestFile.path, midiFile.path],
-        structuredContent: { midiPath: midiFile.path, manifestPath: manifestFile.path, trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart, warnings: composition.warnings, editableOperations: composition.editableOperations, ensembleReport, ensembleQa },
-        logs: [JSON.stringify({ trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart, ensembleReport, ensembleQa }, null, 2)],
+        structuredContent: { midiPath: midiFile.path, manifestPath: manifestFile.path, trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart, warnings: composition.warnings, editableOperations: composition.editableOperations, ensembleReport, ensembleQa, constraintReport, normalizationWarnings: parsed.normalizationWarnings },
+        logs: [JSON.stringify({ trackList: composition.trackList, sectionMap: composition.sectionMap, chordChart: composition.chordChart, ensembleReport, ensembleQa, normalizationWarnings: parsed.normalizationWarnings }, null, 2)],
         errors: ensembleOk ? [] : ensembleReport!.failures
       };
     }
@@ -5005,12 +5767,25 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "extend_music_arrangement", description: "Extend a short sketch into a 5-10 minute long-form arrangement with intro, A/B, bridge, solo texture, reprise, outro, MIDI, and optional WAV preview.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, targetDurationSeconds: { type: "number" }, arrangementStyle: { type: "string", enum: ["background_friendly", "concert_style", "cinematic_arc", "loopable_longform"] }, renderAudio: { type: "boolean" }, acknowledgePreviewOnly: { type: "boolean" }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" }, outputAudioPath: { type: "string" } }, required: ["projectId", "compositionManifestPath"], additionalProperties: false } },
+    definition: { name: "extend_music_arrangement", description: "Extend a short sketch into a 5-10 minute long-form arrangement with lineage, deterministic musical development, hard instrument policy, intro, A/B, bridge, reprise, outro, MIDI, and optional WAV preview.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, targetDurationSeconds: { type: "number" }, arrangementStyle: { type: "string", enum: ["background_friendly", "concert_style", "cinematic_arc", "loopable_longform"] }, variationLevel: { type: "string", enum: ["low", "medium", "high"] }, instrumentPolicy: instrumentPolicyJsonSchema, renderAudio: { type: "boolean" }, acknowledgePreviewOnly: { type: "boolean" }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" }, outputAudioPath: { type: "string" } }, required: ["projectId", "compositionManifestPath"], additionalProperties: false } },
     enabledByDefault: true,
     schema: extendMusicArrangementInputSchema,
     handler: async (input, ctx) => {
       const parsed = extendMusicArrangementInputSchema.parse(input);
-      const extended = extendComposition(await readComposition(ctx, parsed.projectId, parsed.compositionManifestPath), parsed.targetDurationSeconds, parsed.arrangementStyle);
+      const source = await readComposition(ctx, parsed.projectId, parsed.compositionManifestPath);
+      const extended = extendComposition(source, parsed.targetDurationSeconds, parsed.arrangementStyle, parsed.variationLevel);
+      extended.normalizationWarnings = parsed.normalizationWarnings;
+      extended.instrumentPolicy = parsed.instrumentPolicy ?? source.instrumentPolicy;
+      extended.sourceComposition = { manifest: parsed.compositionManifestPath, sourceType: "user_melody" };
+      extended.development = { preserveMelodicIdentity: true, variationLevel: parsed.variationLevel };
+      const constraintReport = evaluateMusicConstraints(extended, {
+        instrumentPolicy: extended.instrumentPolicy,
+        targetDurationSec: parsed.targetDurationSeconds,
+        durationToleranceSec: 1
+      });
+      if (!constraintReport.ok) {
+        return { ok: false, summary: `Extended arrangement rejected by hard music constraints: ${constraintReport.failures[0]}`, jobId: parsed.projectId, artifacts: [], structuredContent: { constraintReport, outputWritten: false }, logs: [JSON.stringify(constraintReport, null, 2)], errors: constraintReport.failures };
+      }
       const artifacts = [
         (await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(extended, null, 2)}\n`)).path,
         (await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(extended), "audio/midi")).path
@@ -5022,18 +5797,30 @@ export const musicWorkflowTools: ToolModule[] = [
         ? "Procedural preview audio was not written (fail-closed). Render with render_production_music / render_midi_with_soundfont using a registered SoundFont, or pass acknowledgePreviewOnly=true for a throwaway scratch preview."
         : undefined;
       if (emitPreview) artifacts.push((await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputAudioPath, wavBuffer(extended, 12000), "audio/wav")).path);
-      return { ok: true, summary: `Extended arrangement to ${Math.round(extended.durationSeconds / 60)} minute(s).`, jobId: parsed.projectId, artifacts, structuredContent: { ...extended, manifestPath: parsed.outputManifestPath, midiPath: parsed.outputMidiPath, audioPath: emitPreview ? parsed.outputAudioPath : undefined, ...(previewWarning ? { previewWarning } : {}) }, logs: [JSON.stringify({ sections: extended.sections, durationSeconds: extended.durationSeconds }, null, 2)], errors: [] };
+      return { ok: true, summary: `Extended arrangement to ${Math.round(extended.durationSeconds / 60)} minute(s).`, jobId: parsed.projectId, artifacts, structuredContent: { ...extended, manifestPath: parsed.outputManifestPath, midiPath: parsed.outputMidiPath, audioPath: emitPreview ? parsed.outputAudioPath : undefined, constraintReport, normalizationWarnings: parsed.normalizationWarnings, ...(previewWarning ? { previewWarning } : {}) }, logs: [JSON.stringify({ sections: extended.sections, durationSeconds: extended.durationSeconds, constraintReport, normalizationWarnings: parsed.normalizationWarnings }, null, 2)], errors: [] };
     }
   },
   {
-    definition: { name: "extend_original_music_arrangement", description: "Extend a selected original short sketch into a 5-10 minute background-friendly arrangement with section map, development report, originality notes, warnings, MIDI, and optional audio preview.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, sourceManifestPath: { type: "string" }, targetDurationSec: { type: "number" }, styleFamily: { type: "string" }, backgroundUse: { type: "string" }, variationLevel: { type: "string" }, sections: { type: "array", items: { type: "string" } }, originalityPolicy: { type: "string" }, renderAudio: { type: "boolean" }, acknowledgePreviewOnly: { type: "boolean" }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" }, outputAudioPath: { type: "string" } }, required: ["projectId", "sourceManifestPath"], additionalProperties: false } },
+    definition: { name: "extend_original_music_arrangement", description: "Extend a selected original short sketch into a 5-10 minute background-friendly arrangement with source lineage, hard instrument policy, section map, development report, MIDI, and optional audio preview.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, sourceManifestPath: { type: "string" }, targetDurationSec: { type: "number" }, styleFamily: { type: "string" }, backgroundUse: { type: "string" }, variationLevel: { type: "string" }, sections: { type: "array", items: { type: "string" } }, originalityPolicy: { type: "string" }, instrumentPolicy: instrumentPolicyJsonSchema, renderAudio: { type: "boolean" }, acknowledgePreviewOnly: { type: "boolean" }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" }, outputAudioPath: { type: "string" } }, required: ["projectId", "sourceManifestPath"], additionalProperties: false } },
     enabledByDefault: true,
     schema: extendOriginalMusicArrangementInputSchema,
     handler: async (input, ctx) => {
       const parsed = extendOriginalMusicArrangementInputSchema.parse(input);
       const source = await readComposition(ctx, parsed.projectId, parsed.sourceManifestPath);
       const arranged = extendOriginalArrangement(source, parsed);
-      const manifest = { ...arranged.extended, sourceManifestPath: parsed.sourceManifestPath, sectionMap: arranged.sectionMap, developmentReport: arranged.developmentReport, originalityNotes: arranged.originalityNotes, warnings: arranged.warnings, renderReady: arranged.renderReady };
+      arranged.extended.instrumentPolicy = parsed.instrumentPolicy ?? source.instrumentPolicy;
+      arranged.extended.sourceComposition = { manifest: parsed.sourceManifestPath, sourceType: "user_melody" };
+      arranged.extended.development = { preserveMelodicIdentity: true, variationLevel: parsed.variationLevel };
+      const constraintReport = evaluateMusicConstraints(arranged.extended, {
+        instrumentPolicy: arranged.extended.instrumentPolicy,
+        targetDurationSec: parsed.targetDurationSec,
+        durationToleranceSec: 1,
+        requiredSections: parsed.sections
+      });
+      if (!constraintReport.ok) {
+        return { ok: false, summary: `Original arrangement rejected by hard music constraints: ${constraintReport.failures[0]}`, jobId: parsed.projectId, artifacts: [], structuredContent: { constraintReport, outputWritten: false }, logs: [JSON.stringify(constraintReport, null, 2)], errors: constraintReport.failures };
+      }
+      const manifest = { ...arranged.extended, sourceManifestPath: parsed.sourceManifestPath, sectionMap: arranged.sectionMap, developmentReport: arranged.developmentReport, originalityNotes: arranged.originalityNotes, warnings: arranged.warnings, normalizationWarnings: parsed.normalizationWarnings, renderReady: arranged.renderReady };
       const artifacts = [
         (await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(manifest, null, 2)}\n`)).path,
         (await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputMidiPath, midiBuffer(arranged.extended), "audio/midi")).path
@@ -5049,8 +5836,8 @@ export const musicWorkflowTools: ToolModule[] = [
         summary: `Extended original arrangement to ${Math.round(parsed.targetDurationSec / 60)} minute(s) with ${arranged.warnings.length} warning(s).`,
         jobId: parsed.projectId,
         artifacts,
-        structuredContent: { extendedMidiPath: parsed.outputMidiPath, arrangementManifestPath: parsed.outputManifestPath, audioPath: emitPreview ? parsed.outputAudioPath : undefined, sectionMap: arranged.sectionMap, developmentReport: arranged.developmentReport, originalityNotes: arranged.originalityNotes, warnings: arranged.warnings, renderReady: arranged.renderReady, ...(previewWarning ? { previewWarning } : {}) },
-        logs: [JSON.stringify({ sectionMap: arranged.sectionMap, developmentReport: arranged.developmentReport, warnings: arranged.warnings }, null, 2)],
+        structuredContent: { extendedMidiPath: parsed.outputMidiPath, arrangementManifestPath: parsed.outputManifestPath, audioPath: emitPreview ? parsed.outputAudioPath : undefined, sectionMap: arranged.sectionMap, developmentReport: arranged.developmentReport, originalityNotes: arranged.originalityNotes, warnings: arranged.warnings, renderReady: arranged.renderReady, constraintReport, normalizationWarnings: parsed.normalizationWarnings, ...(previewWarning ? { previewWarning } : {}) },
+        logs: [JSON.stringify({ sectionMap: arranged.sectionMap, developmentReport: arranged.developmentReport, warnings: arranged.warnings, normalizationWarnings: parsed.normalizationWarnings }, null, 2)],
         errors: arranged.warnings
       };
     }
@@ -5088,7 +5875,7 @@ export const musicWorkflowTools: ToolModule[] = [
     handler: async (input, ctx) => {
       const parsed = createProductionMusicRenderPlanInputSchema.parse(input);
       const composition = parsed.compositionManifestPath ? await readComposition(ctx, parsed.projectId, parsed.compositionManifestPath) : undefined;
-      const plan = createProductionRenderPlan(parsed, composition);
+      const plan = { ...createProductionRenderPlan(parsed, composition), normalizationWarnings: parsed.normalizationWarnings };
       const file = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputPath, `${JSON.stringify(plan, null, 2)}\n`);
       return { ok: true, summary: `Created production music render plan for ${plan.styleProfile}.`, jobId: parsed.projectId, artifacts: [file.path], structuredContent: { ...plan, productionPlanPath: file.path }, logs: [JSON.stringify(plan, null, 2)], errors: [] };
     }
@@ -5196,6 +5983,7 @@ export const musicWorkflowTools: ToolModule[] = [
         unsupportedFormats,
         licenseWarnings,
         productionGateWarnings,
+        normalizationWarnings: parsed.normalizationWarnings,
         renderReportPaths: parsed.renderReportPaths,
         resolvedRenderReports: productionGate.resolvedReports,
         qualityReportPaths: parsed.qualityReportPaths,
@@ -5229,7 +6017,7 @@ export const musicWorkflowTools: ToolModule[] = [
       ];
       const publishPolicy = parsed.publish && blockingErrors.length === 0 ? buildProjectPublishOptions(ctx) : undefined;
       const published = publishPolicy ? await publishProject(ctx.projectRoot, parsed.projectId, publishPolicy.publicBaseUrl, parsed.outputHtmlPath, publishPolicy.options) : undefined;
-      const manifest = { projectId: parsed.projectId, packageName, projectManifestPath: parsed.projectManifestPath, demoManifestPath: parsed.demoManifestPath, sessionManifestPath: parsed.sessionManifestPath, trackManifestPaths: parsed.trackManifestPaths, selectedVersionIds: parsed.selectedVersionIds, requestedExports: parsed.exports, demoUrl: demo?.publishedUrl, exportPagePath: htmlFile.path, publishedUrl: published?.publishedUrl, readmePath: readmeFile.path, packageReportPath: packageReportFile.path, playlistPath: playlistFile.path, exportedFiles: fileInspection.exportedFiles, missingFiles: fileInspection.missingFiles, brokenAudioReferences: fileInspection.brokenAudioReferences, largeFiles: fileInspection.largeFiles, unsupportedFormats, licenseWarnings, productionGateWarnings, renderReportPaths: parsed.renderReportPaths, resolvedRenderReports: productionGate.resolvedReports, qualityReportPaths: parsed.qualityReportPaths, resolvedQualityReports: qualityGate.resolvedReports, naming, tracks, sessionSummary: session ? { targetDurationMinutes: session.targetDurationMinutes, slots: Array.isArray(session.schedule) ? session.schedule.length : 0 } : undefined, license: licenseManifest ?? { output: "generated_original", dependencies: ["Built-in safe synth unless external assets are added later."] }, packageNotes: ["ZIP/MP3/OGG export requires a verified archive/encoder step.", "ZIP bundle creation can be completed with export package archive tools after this music package manifest passes checks.", "MP3/OGG exports require verified encoded files; this tool reports missing encoded formats instead of fabricating them.", "Production export requires production_candidate render evidence from render_midi_with_soundfont."] };
+      const manifest = { projectId: parsed.projectId, packageName, projectManifestPath: parsed.projectManifestPath, demoManifestPath: parsed.demoManifestPath, sessionManifestPath: parsed.sessionManifestPath, trackManifestPaths: parsed.trackManifestPaths, selectedVersionIds: parsed.selectedVersionIds, requestedExports: parsed.exports, normalizationWarnings: parsed.normalizationWarnings, demoUrl: demo?.publishedUrl, exportPagePath: htmlFile.path, publishedUrl: published?.publishedUrl, readmePath: readmeFile.path, packageReportPath: packageReportFile.path, playlistPath: playlistFile.path, exportedFiles: fileInspection.exportedFiles, missingFiles: fileInspection.missingFiles, brokenAudioReferences: fileInspection.brokenAudioReferences, largeFiles: fileInspection.largeFiles, unsupportedFormats, licenseWarnings, productionGateWarnings, renderReportPaths: parsed.renderReportPaths, resolvedRenderReports: productionGate.resolvedReports, qualityReportPaths: parsed.qualityReportPaths, resolvedQualityReports: qualityGate.resolvedReports, naming, tracks, sessionSummary: session ? { targetDurationMinutes: session.targetDurationMinutes, slots: Array.isArray(session.schedule) ? session.schedule.length : 0 } : undefined, license: licenseManifest ?? { output: "generated_original", dependencies: ["Built-in safe synth unless external assets are added later."] }, packageNotes: ["ZIP/MP3/OGG export requires a verified archive/encoder step.", "ZIP bundle creation can be completed with export package archive tools after this music package manifest passes checks.", "MP3/OGG exports require verified encoded files; this tool reports missing encoded formats instead of fabricating them.", "Production export requires production_candidate render evidence from render_midi_with_soundfont."] };
       const manifestFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputManifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
       return { ok: blockingErrors.length === 0, summary: `Exported music package with ${fileInspection.exportedFiles.length} file(s), ${fileInspection.missingFiles.length} missing file(s), ${licenseWarnings.length} license warning(s), and ${unsupportedFormats.length} unsupported format warning(s).`, jobId: parsed.projectId, previewUrl: published?.publishedUrl, shareUrl: published?.publishedUrl, artifacts: [htmlFile.path, manifestFile.path, readmeFile.path, playlistFile.path, packageReportFile.path], structuredContent: manifest, logs: [JSON.stringify(manifest, null, 2)], errors: blockingErrors };
     }
@@ -5312,6 +6100,115 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
+    definition: {
+      name: "validate_music_constraints",
+      description: "Fail-closed validation for solo/ensemble instrument policy, prohibited instruments, MIDI channel 10 percussion, duration tolerance, required sections, empty tracks, and unknown hidden tracks. Run before MIDI encoding or audio rendering.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          compositionManifestPath: { type: "string" },
+          instrumentPolicy: instrumentPolicyJsonSchema,
+          targetDurationSec: { type: "number" },
+          durationToleranceSec: { type: "number" },
+          requiredSections: { type: "array", items: { type: "string" } },
+          channelMap: { type: "object", additionalProperties: { type: "number" } },
+          outputReportPath: { type: "string" }
+        },
+        required: ["projectId", "compositionManifestPath"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: validateMusicConstraintsInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = validateMusicConstraintsInputSchema.parse(input);
+      const composition = await readComposition(ctx, parsed.projectId, parsed.compositionManifestPath);
+      const report = { ...evaluateMusicConstraints(composition, parsed), normalizationWarnings: parsed.normalizationWarnings };
+      const reportFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputReportPath, `${JSON.stringify(report, null, 2)}\n`);
+      return {
+        ok: report.ok,
+        summary: report.ok
+          ? `Music constraints passed for ${report.observed.noteCount} note(s) on ${report.observed.channels.length} MIDI channel(s).`
+          : `Music constraint validation failed: ${report.failures.length} blocking issue(s).`,
+        jobId: parsed.projectId,
+        artifacts: [reportFile.path],
+        structuredContent: { ...report, reportPath: reportFile.path },
+        logs: [JSON.stringify(report, null, 2)],
+        errors: report.failures
+      };
+    }
+  },
+  {
+    definition: {
+      name: "validate_music_development",
+      description: "Fail-closed, deterministic long-form composition QA. Verifies source-melody lineage and transposition-tolerant motif identity, then detects exact source-window cloning and requires independent register, rhythm, dynamics, density, harmony, phrasing, and section-coverage development signals before rendering.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          sourceCompositionManifestPath: { type: "string" },
+          compositionManifestPath: { type: "string" },
+          preserveMelodicIdentity: { type: "boolean" },
+          variationLevel: { type: "string", enum: ["low", "medium", "high"] },
+          targetDurationSec: { type: "number" },
+          durationToleranceSec: { type: "number" },
+          requiredSections: { type: "array", items: { type: "string" } },
+          thresholds: {
+            type: "object",
+            properties: {
+              motifNoteCount: { type: "number" },
+              minSourceThemeMatches: { type: "number" },
+              minMelodyIdentityScore: { type: "number" },
+              minDevelopmentScore: { type: "number" },
+              maxRepeatedSectionSimilarity: { type: "number" },
+              maxExactRepeatRatio: { type: "number" }
+            },
+            additionalProperties: false
+          },
+          outputReportPath: { type: "string" }
+        },
+        required: ["projectId", "sourceCompositionManifestPath", "compositionManifestPath"],
+        additionalProperties: false
+      }
+    },
+    enabledByDefault: true,
+    schema: validateMusicDevelopmentInputSchema,
+    handler: async (input, ctx) => {
+      const parsed = validateMusicDevelopmentInputSchema.parse(input);
+      const [source, developed] = await Promise.all([
+        readComposition(ctx, parsed.projectId, parsed.sourceCompositionManifestPath),
+        readComposition(ctx, parsed.projectId, parsed.compositionManifestPath)
+      ]);
+      const report = {
+        ...evaluateMusicDevelopment(source, developed, {
+          sourceCompositionManifestPath: parsed.sourceCompositionManifestPath,
+          preserveMelodicIdentity: parsed.preserveMelodicIdentity,
+          variationLevel: parsed.variationLevel,
+          targetDurationSec: parsed.targetDurationSec,
+          durationToleranceSec: parsed.durationToleranceSec,
+          requiredSections: parsed.requiredSections,
+          thresholds: parsed.thresholds
+        }),
+        sourceCompositionManifestPath: parsed.sourceCompositionManifestPath,
+        compositionManifestPath: parsed.compositionManifestPath,
+        normalizationWarnings: parsed.normalizationWarnings
+      };
+      const reportFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputReportPath, `${JSON.stringify(report, null, 2)}\n`);
+      return {
+        ok: report.ok,
+        summary: report.ok
+          ? `Music development passed with identity ${report.melodyIdentity.score}, development ${report.development.score}, and exact-repeat ratio ${report.repetition.exactRepeatRatio}.`
+          : `Music development validation failed: ${report.failures.length} blocking issue(s).`,
+        jobId: parsed.projectId,
+        artifacts: [reportFile.path],
+        structuredContent: { ...report, reportPath: reportFile.path },
+        logs: [JSON.stringify(report, null, 2)],
+        errors: report.failures
+      };
+    }
+  },
+  {
     definition: { name: "edit_midi", description: "Edit a generated composition/MIDI manifest with transpose, quantize, swing, humanize, and velocity shaping, then write an updated MIDI.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, quantizeBeats: { type: "number" }, transposeSemitones: { type: "number" }, humanizeMs: { type: "number" }, velocityScale: { type: "number" }, swing: { type: "number" }, duplicateSections: { type: "array", items: { type: "string" } }, outputManifestPath: { type: "string" }, outputMidiPath: { type: "string" } }, required: ["projectId", "compositionManifestPath"], additionalProperties: false } },
     enabledByDefault: true,
     schema: editMidiInputSchema,
@@ -5344,13 +6241,34 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "render_production_music", description: "Run the free production music pipeline: render MIDI stems offline with ready license-cleared role-matched SoundFont/SFZ packs, mix stems, apply a basic master chain, encode preview.mp3 with FFmpeg, write LICENSES.md, and publish a truthful player/download page.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, instrumentPackMap: { type: "object" }, channelMap: { type: "object" }, sampleRate: { type: "number" }, targetRms: { type: "number" }, truePeakCeiling: { type: "number" }, outputProductionWavPath: { type: "string" }, outputPreviewMp3Path: { type: "string" }, outputRawRenderPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputMidiStemDirectory: { type: "string" }, outputLicensesPath: { type: "string" }, outputReportPath: { type: "string" }, outputHtmlPath: { type: "string" }, publish: { type: "boolean" } }, required: ["projectId", "compositionManifestPath"], additionalProperties: false } },
+    definition: { name: "render_production_music", description: "Run the production music pipeline with pre-render hard instrument validation and a duration-scaled render timeout: render MIDI stems with ready license-cleared SoundFont/SFZ packs, mix/master, encode MP3, write licenses, and optionally publish.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, instrumentPackMap: { type: "object" }, channelMap: { type: "object" }, instrumentPolicy: instrumentPolicyJsonSchema, renderTimeoutMs: { type: "number" }, sampleRate: { type: "number" }, targetRms: { type: "number" }, truePeakCeiling: { type: "number" }, outputProductionWavPath: { type: "string" }, outputPreviewMp3Path: { type: "string" }, outputRawRenderPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputMidiStemDirectory: { type: "string" }, outputLicensesPath: { type: "string" }, outputReportPath: { type: "string" }, outputHtmlPath: { type: "string" }, publish: { type: "boolean" } }, required: ["projectId", "compositionManifestPath"], additionalProperties: false } },
     enabledByDefault: true,
     schema: renderProductionMusicInputSchema,
 	    handler: async (input, ctx) => {
 	      const parsed = renderProductionMusicInputSchema.parse(input);
-	      const environment = await inspectMusicRenderEnvironment(ctx, { projectId: parsed.projectId, includeLocalMusicPacks: true, projectSearchDirectories: ["soundfonts", "instruments", "music"] });
 	      const composition = await readComposition(ctx, parsed.projectId, parsed.compositionManifestPath);
+	      const activeInstrumentPolicy = parsed.instrumentPolicy ?? composition.instrumentPolicy;
+	      const constraintReport = activeInstrumentPolicy
+	        ? evaluateMusicConstraints(composition, { instrumentPolicy: activeInstrumentPolicy, channelMap: parsed.channelMap })
+	        : undefined;
+	      if (constraintReport && !constraintReport.ok) {
+	        const report = { qualityTier: "preview_only", productionReady: false, blockingReasons: constraintReport.failures, constraintReport, renderStarted: false };
+	        const reportFile = await writeProjectFile(ctx.projectRoot, parsed.projectId, parsed.outputReportPath, `${JSON.stringify(report, null, 2)}\n`);
+	        return { ok: false, summary: `Production music render rejected by hard constraints: ${constraintReport.failures[0]}`, jobId: parsed.projectId, artifacts: [reportFile.path], structuredContent: { ...report, reportPath: reportFile.path }, logs: [JSON.stringify(report, null, 2)], errors: constraintReport.failures };
+	      }
+	      const effectiveRenderTimeoutMs = musicRenderTimeoutMs(composition, parsed.renderTimeoutMs, ctx.commandTimeoutMs);
+	      // Production pack eligibility is enforced immediately below by
+	      // resolveProductionPackMap(), which reads the registered pack registry and fails closed
+	      // for missing, unsafe, or role-incompatible packs. Re-running broad discovery here used
+	      // to read every project SoundFont fully into memory just to hash it again. A single 1.2 GB
+	      // sampled piano could therefore delay a background render for minutes or restart a
+	      // memory-constrained service even when that pack was not selected. Keep the environment
+	      // preflight focused on renderer/encoder binaries; the authoritative registry gate remains
+	      // unchanged.
+	      const environment = await inspectMusicRenderEnvironment(ctx, {
+	        includeLocalMusicPacks: false,
+	        projectSearchDirectories: []
+	      });
 	      const packResolution = await resolveProductionPackMap(ctx, parsed, composition);
 	      const resolvedPacks = Object.values(packResolution.packsByRole);
 	      const blockers = [
@@ -5404,7 +6322,7 @@ export const musicWorkflowTools: ToolModule[] = [
 	          const stemMidiTempPath = path.join(tempDir, `${group.id}.mid`);
 	          const stemWavTempPath = path.join(tempDir, `${group.id}.wav`);
 	          await writeFile(stemMidiTempPath, stemMidiBuffer);
-	          const stemWav = await productionInstrumentRender(resolved.renderer, resolved.absolutePath, stemMidiTempPath, stemWavTempPath, parsed.sampleRate, ctx.commandTimeoutMs);
+          const stemWav = await productionInstrumentRender(resolved.renderer, resolved.absolutePath, stemMidiTempPath, stemWavTempPath, parsed.sampleRate, effectiveRenderTimeoutMs, ctx.abortSignal);
 	          const stemProjectPath = `${parsed.outputStemDirectory}/${group.id}.wav`;
 	          const stemProjectFile = await writeProjectAudioAssetWithinMediaLimit(ctx, parsed.projectId, stemProjectPath, stemWav, "audio/wav", `rendered ${group.label} WAV stem`);
 	          if (stemProjectFile.filePath) stemPaths[group.id] = stemProjectFile.filePath;
@@ -5445,7 +6363,7 @@ export const musicWorkflowTools: ToolModule[] = [
         let loudnessFinalizedWithFfmpeg = false;
         if (environment.tools.ffmpeg?.ok) {
           try {
-            productionBuffer = await normalizeWavWithFfmpeg(masteredTempPath, productionTempPath, parsed.sampleRate, ctx.commandTimeoutMs);
+            productionBuffer = await normalizeWavWithFfmpeg(masteredTempPath, productionTempPath, parsed.sampleRate, effectiveRenderTimeoutMs, ctx.abortSignal);
             loudnessFinalizedWithFfmpeg = true;
           } catch {
             productionBuffer = mastered.output;
@@ -5453,7 +6371,7 @@ export const musicWorkflowTools: ToolModule[] = [
         }
         if (!loudnessFinalizedWithFfmpeg) await writeFile(productionTempPath, productionBuffer);
         const mp3TempPath = path.join(tempDir, "preview.mp3");
-	        const mp3 = await encodeMp3WithFfmpeg(productionTempPath, mp3TempPath, ctx.commandTimeoutMs);
+        const mp3 = await encodeMp3WithFfmpeg(productionTempPath, mp3TempPath, effectiveRenderTimeoutMs, ctx.abortSignal);
 	        const mp3File = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputPreviewMp3Path, mp3, "audio/mpeg");
         const productionFile = await writeProjectAudioAssetWithinMediaLimit(ctx, parsed.projectId, parsed.outputProductionWavPath, productionBuffer, "audio/wav", "final offline-rendered WAV master");
         if (productionFile.skipped) skippedLargeAudioAssets.push({ ...productionFile.skipped, replacementPath: mp3File.path });
@@ -5493,6 +6411,8 @@ export const musicWorkflowTools: ToolModule[] = [
 	          ensembleQa: buildEnsembleQa(composition, composition.instruments),
 	          roleMap: Object.fromEntries(packResolution.instrumentCoverage.map((entry) => [entry.track, entry.requiredRole])),
 	          channelMap: parsed.channelMap,
+	          constraintReport,
+	          renderTimeoutMs: effectiveRenderTimeoutMs,
 	          mixMasterChain: ["gain_staging", "eq_cleanup", "light_compression", "room_reverb", "master_limiter", "loudness_normalize"],
 	          loudnessFinalizedWithFfmpeg,
 	          masteringReport: { ...mastered.report, qualityTier: "production_candidate", productionReady: true, blockingReasons: [], sourceRenderPath: rawFile.filePath },
@@ -5616,7 +6536,7 @@ export const musicWorkflowTools: ToolModule[] = [
     }
   },
   {
-    definition: { name: "render_midi_with_soundfont", description: "Render a MIDI/composition manifest through a registered ready .sf2/.sf3 SoundFont or .sfz instrument pack, producing production_candidate WAV, optional stems, and a renderer/license report. .sf2/.sf3 uses FluidSynth; .sfz uses sfizz_render when installed.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, stems: { type: "boolean" }, normalize: { type: "boolean" }, expressiveStrings: { type: "boolean", description: "Auto-author CC11 bow swells + CC1 vibrato into monophonic cello/violin/strings lines (compositionManifestPath path only). Default true." }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" }, renderProfile: { type: "string", enum: ["clean_dry", "normalized"], description: "clean_dry: SoundFont render only, no noise bed/ambience, normalize=false. normalized: clean_dry + two-pass ffmpeg loudnorm to -16 LUFS. Omit to use the normalize field." } }, required: ["projectId"], additionalProperties: false } },
+    definition: { name: "render_midi_with_soundfont", description: "Render a MIDI/composition manifest through a registered ready SoundFont/SFZ pack with pre-render hard instrument validation and a duration-scaled timeout, producing production_candidate WAV, optional stems, and a renderer/license report.", inputSchema: { type: "object", properties: { projectId: { type: "string" }, compositionManifestPath: { type: "string" }, midiPath: { type: "string" }, soundfontPackId: { type: "string" }, soundfontPath: { type: "string" }, channelMap: { type: "object" }, instrumentPolicy: instrumentPolicyJsonSchema, renderTimeoutMs: { type: "number" }, stems: { type: "boolean" }, normalize: { type: "boolean" }, expressiveStrings: { type: "boolean", description: "Auto-author CC11 bow swells + CC1 vibrato into monophonic cello/violin/strings lines (compositionManifestPath path only). Default true." }, sampleRate: { type: "number" }, outputAudioPath: { type: "string" }, outputStemDirectory: { type: "string" }, outputReportPath: { type: "string" }, renderProfile: { type: "string", enum: ["clean_dry", "normalized"], description: "clean_dry: SoundFont render only, no noise bed/ambience, normalize=false. normalized: clean_dry + two-pass ffmpeg loudnorm to -16 LUFS. Omit to use the normalize field." } }, required: ["projectId"], additionalProperties: false } },
     enabledByDefault: true,
     schema: renderMidiWithSoundfontInputSchema,
     handler: async (input, ctx) => {
@@ -5632,16 +6552,28 @@ export const musicWorkflowTools: ToolModule[] = [
       if (!parsed.compositionManifestPath && parsed.stems) {
         return writeSoundfontRenderFailure(ctx, parsed, ["stems require compositionManifestPath so the renderer can isolate tracks; midiPath-only rendering cannot safely produce stems."], { stemPaths: {}, stemCount: 0 });
       }
+	    if (!parsed.compositionManifestPath && parsed.instrumentPolicy) {
+	      return writeSoundfontRenderFailure(ctx, parsed, ["instrumentPolicy requires compositionManifestPath; an external MIDI file cannot be proven free of hidden instruments or channel 10 percussion without a trusted composition manifest."], { constraintValidationApplied: false, renderStarted: false });
+	    }
+
+	    let composition: Composition | undefined;
+	    if (parsed.compositionManifestPath) composition = await readComposition(ctx, parsed.projectId, parsed.compositionManifestPath);
+	    const activeInstrumentPolicy = parsed.instrumentPolicy ?? composition?.instrumentPolicy;
+	    const constraintReport = composition && activeInstrumentPolicy
+	      ? evaluateMusicConstraints(composition, { instrumentPolicy: activeInstrumentPolicy, channelMap: parsed.channelMap })
+	      : undefined;
+	    if (constraintReport && !constraintReport.ok) {
+	      return writeSoundfontRenderFailure(ctx, parsed, constraintReport.failures, { constraintReport, renderStarted: false });
+	    }
+	    const effectiveRenderTimeoutMs = musicRenderTimeoutMs(composition, parsed.renderTimeoutMs, ctx.commandTimeoutMs);
 
 	      const soundfont = await resolveProductionSoundfont(ctx, parsed);
 	      if (!soundfont.ok) {
 	        return writeSoundfontRenderFailure(ctx, parsed, soundfont.blockers.map((reason) => `${reason} Output is preview_only until a ready commercial-safe SoundFont/SFZ pack is registered.`), { requestedSoundfontPackId: parsed.soundfontPackId, requestedSoundfontPath: parsed.soundfontPath, requestedPackAvailability: soundfont.requestedPackAvailability });
 	      }
-	      let composition: Composition | undefined;
 	      let instrumentCoverage: ReturnType<typeof instrumentCoverageForSinglePack> = [];
 	      if (parsed.compositionManifestPath) {
-	        composition = await readComposition(ctx, parsed.projectId, parsed.compositionManifestPath);
-	        instrumentCoverage = instrumentCoverageForSinglePack(composition, soundfont.pack);
+	        instrumentCoverage = instrumentCoverageForSinglePack(composition!, soundfont.pack);
 	        const coverageBlockers = instrumentCoverage.filter((entry) => !entry.covered).map((entry) => entry.reason);
 	        if (coverageBlockers.length) {
 	          return writeSoundfontRenderFailure(ctx, parsed, coverageBlockers, {
@@ -5703,9 +6635,9 @@ export const musicWorkflowTools: ToolModule[] = [
             ? false
             : parsed.normalize && ffmpegCapability.ok;
         const fullMixTemp = path.join(tempDir, "full.wav");
-        const rawFullMix = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, midiAbsolutePath, fullMixTemp, parsed.sampleRate, ctx.commandTimeoutMs);
+        const rawFullMix = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, midiAbsolutePath, fullMixTemp, parsed.sampleRate, effectiveRenderTimeoutMs, ctx.abortSignal);
         const fullMix = normalizeActive
-          ? await normalizeWavWithFfmpeg(fullMixTemp, path.join(tempDir, "full.norm.wav"), parsed.sampleRate, ctx.commandTimeoutMs)
+          ? await normalizeWavWithFfmpeg(fullMixTemp, path.join(tempDir, "full.norm.wav"), parsed.sampleRate, effectiveRenderTimeoutMs, ctx.abortSignal)
           : rawFullMix;
         const fullMixFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, parsed.outputAudioPath, fullMix, "audio/wav");
         const stemPaths: Record<string, string> = {};
@@ -5715,7 +6647,7 @@ export const musicWorkflowTools: ToolModule[] = [
             const stemMidiPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.mid`);
             const stemWavPath = path.join(tempDir, `${slugifyMusicExportPart(track)}.wav`);
             await writeFile(stemMidiPath, midiBuffer(compositionWithSingleTrack(composition!, track), { channelMap: parsed.channelMap, programMap: parsed.programMap, expressiveStrings: parsed.expressiveStrings }));
-            const rawStemWav = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, stemMidiPath, stemWavPath, parsed.sampleRate, ctx.commandTimeoutMs);
+            const rawStemWav = await productionInstrumentRender(soundfont.renderer, soundfont.absolutePath, stemMidiPath, stemWavPath, parsed.sampleRate, effectiveRenderTimeoutMs, ctx.abortSignal);
             // Validate the RAW stem (pre-normalize) using peak, not RMS: loudnorm would amplify
             // a near-silent stem's noise floor to pass an RMS guard, and soft-velocity piano
             // left-hand parts can produce legitimate RMS below 0.0005 while still having a clearly
@@ -5724,7 +6656,7 @@ export const musicWorkflowTools: ToolModule[] = [
             const stemStats = audioStats(rawStemWav);
             stemValidations[track] = { rms: stemStats.rms, peak: stemStats.peak, ok: stemStats.peak >= 0.001 };
             const stemWav = normalizeActive
-              ? await normalizeWavWithFfmpeg(stemWavPath, path.join(tempDir, `${slugifyMusicExportPart(track)}.norm.wav`), parsed.sampleRate, ctx.commandTimeoutMs)
+              ? await normalizeWavWithFfmpeg(stemWavPath, path.join(tempDir, `${slugifyMusicExportPart(track)}.norm.wav`), parsed.sampleRate, effectiveRenderTimeoutMs, ctx.abortSignal)
               : rawStemWav;
             const stemFile = await writeProjectAsset(ctx.projectRoot, parsed.projectId, `${parsed.outputStemDirectory}/${slugifyMusicExportPart(track)}.wav`, stemWav, "audio/wav");
             stemPaths[track] = stemFile.path;
@@ -5792,6 +6724,8 @@ export const musicWorkflowTools: ToolModule[] = [
 	          instrumentCoverage,
 	          ensembleQa: composition ? buildEnsembleQa(composition, composition.instruments) : undefined,
 	          channelMap: parsed.channelMap,
+          constraintReport,
+          renderTimeoutMs: effectiveRenderTimeoutMs,
           channelMapApplied: hasChannelMap,
           renderReport: {
             durationSeconds: composition?.durationSeconds,
@@ -5842,6 +6776,7 @@ export const musicWorkflowTools: ToolModule[] = [
             renderer: "built_in_procedural_synth",
             qualityTier: "preview_only",
             productionReady: false,
+            normalizationWarnings: parsed.normalizationWarnings,
             blockingReasons: ["Built-in procedural synth output is not a deliverable. There is no real audio source registered for this render."],
             recommendedNextTools: ["install_free_soundfont_pack", "render_production_music", "render_midi_with_soundfont"],
             howToFix: "Run install_free_soundfont_pack (auto-registers a GeneralUser GS general_midi pack), then render with render_production_music or render_midi_with_soundfont using that pack id. To generate an explicitly throwaway, non-deliverable scratch preview instead, re-call this tool with acknowledgePreviewOnly=true."
@@ -5914,6 +6849,7 @@ export const musicWorkflowTools: ToolModule[] = [
         qualityTier: "preview_only",
         productionReady: false,
         blockingReasons: ["Built-in procedural synth output is preview_only. Use render_midi_with_soundfont with a ready commercial-safe .sf2/.sf3 pack for production_candidate output."],
+        normalizationWarnings: parsed.normalizationWarnings,
         renderReport,
         licenseManifest,
         warnings

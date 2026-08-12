@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { getProjectTask, readProjectFile, writeProjectFile } from "../../projects/store.js";
-import { getJob } from "../../jobs/store.js";
+import { getJobForOwnerFresh } from "../../jobs/store.js";
 import type { ToolContext, ToolModule } from "../types.js";
 
 const notificationStorePath = "notifications/project-notifications.json";
@@ -162,8 +162,8 @@ async function validateReferences(ctx: ToolContext, projectId: string, taskId?: 
   // Scope to the caller's own jobs: a non-owner gets the same "not found" as a missing id, so
   // notification references cannot probe another tenant's job-id space.
   if (jobId) {
-    const job = getJob(jobId);
-    if (!job || job.ownerUserId !== ctx.userId) throw new Error(`No background job found for ${jobId}.`);
+    const job = await getJobForOwnerFresh(jobId, ctx.userId);
+    if (!job) throw new Error(`No background job found for ${jobId}.`);
   }
 }
 

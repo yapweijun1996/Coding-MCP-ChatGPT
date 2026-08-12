@@ -1,11 +1,14 @@
 # MCP Tools Architecture
 
-The MCP server uses a single source of truth registry for tool metadata, handlers, and default access.
+Each tool module remains the source of truth for its definition, schema, handler, and default access. A generated static manifest serves discovery metadata without importing every implementation at process startup.
 
 ## Core files
 
 - `src/mcp/types.ts`: shared tool types.
-- `src/mcp/registry.ts`: exports `toolRegistry`, `toolDefinitions`, and lookup helpers.
+- `src/mcp/tool-manifest.generated.ts`: generated discovery definitions for all tools; never edit this file by hand.
+- `src/mcp/tools/index.ts`: dynamic group import map and the intentionally small hot group set.
+- `src/mcp/lazy-registry.ts`: concurrent-safe group loading, manifest drift validation, and failure fallback.
+- `src/mcp/registry.ts`: exports static discovery definitions plus synchronous proxy and asynchronous real-module lookups.
 - `src/mcp/router.ts`: validates inputs and dispatches `tools/call` to handlers.
 - `src/mcp/result.ts`: shared result helpers.
 - `src/skills/registry.ts`: local built-in agent skill packs and their exposed tool names.
@@ -16,6 +19,7 @@ The MCP server uses a single source of truth registry for tool metadata, handler
 - `src/mcp/tools/preview.ts`: `ping`, `create_preview`.
 - `src/mcp/tools/skills.ts`: `list_agent_skills`, `get_agent_skill`.
 - `src/mcp/tools/project.ts`: persistent Project CRUD, manifest, validation, and publish tools.
+- `src/mcp/tools/conversation-file.ts`: native ChatGPT connector-file promotion into project asset storage with streaming, MIME/magic validation, hashing, quota checks, and atomic writes.
 - `src/mcp/tools/code-intelligence.ts`: repo summaries, test failure digests, changed file context, and advisory refactor hints.
 - `src/mcp/tools/research.ts`: research source, evidence, notes, report, and publish workflow tools.
 - `src/mcp/tools/share.ts`: legacy standalone HTML share tool, disabled by default.
@@ -39,6 +43,7 @@ Enabled by default:
 
 - Connectivity, preview, and skill protocol lookup: `ping`, `create_preview`, `list_agent_skills`, `get_agent_skill`.
 - Project delivery: `deliver_static_project`, `create_project`, `list_projects`, `get_project`, `get_project_manifest`, `get_project_activity`, `write_project_file`, `read_project_file`, `delete_project_file`, `validate_project`, `publish_project`, `publish_and_report`.
+- Native ChatGPT file transfer: `promote_conversation_file_to_project`.
 - App project delivery: `create_app_project`, `write_app_project_file`, `read_app_project_file`, `install_project_dependencies`, `run_project_build`, `publish_project_dist`, `get_app_project_report`.
 - Research delivery: `create_research_project`, `add_research_source`, `list_research_sources`, `add_research_note`, `record_research_evidence`, `get_research_manifest`, `write_research_report`, `publish_research_report`.
 - Code intelligence: `refactor_hints` for advisory oversized-file and mixed-responsibility refactor signals.
@@ -76,6 +81,15 @@ npm run check:mcp
 
 The check builds `dist/`, verifies registry uniqueness, confirms critical tools exist, confirms high-risk tools are disabled by default, and ensures default-enabled command tools have matching package scripts.
 It also validates Skill ids, confirms all Skill tool references exist, confirms the `high-risk` Skill is disabled by default, and confirms the `core` Skill exposes the Skill protocol lookup tools.
+It additionally verifies that common groups are warmed while browser, music, presentation, SVG, 3D, and web-rebuild groups remain unloaded during discovery. `npm run typecheck` runs `check:tool-manifest`, so a stale generated manifest fails before compilation.
+
+When a tool definition, default state, or group membership changes, regenerate the manifest explicitly with:
+
+```bash
+npm run generate:tool-manifest
+```
+
+Protocol dispatch uses `await loadToolModule(name)` so zod schemas and handlers are imported on first call. Internal code that only needs names, descriptions, or JSON Schemas should use `toolDefinitions` or `getToolModule`; code that needs the real zod schema must use `loadToolModule`.
 
 ## Compatibility note
 
@@ -92,6 +106,12 @@ ChatGPT and other coding agents should use the persistent Project workflow for d
 `deliver_static_project` is the preferred delivery tool because it writes all files, validates local references, temporarily publishes, runs browser validation through Playwright, blocks on serious runtime/layout failures, and returns a structured report with the shareable `publishedUrl`.
 
 Projects are private by default. Agent-facing delivery tools explicitly publish final handoff links with `shareAccess: "anyone_with_link"` by default so users and sandboxed preview sessions can load HTML plus referenced assets such as images, audio, and video. Use `shareAccess: "private"` only for internal previews that should require the owner/admin session cookie.
+
+### Native conversation-file routing
+
+When a file is present in the ChatGPT conversation or was produced by `image_gen`, call `promote_conversation_file_to_project` with the connector-provided `file` reference and a project-relative `relativePath`. The tool advertises `_meta["openai/fileParams"]` for the top-level `file` field, so ChatGPT can pass a file reference instead of embedding bytes in JSON. Do not manually read the attachment into the model, Base64-encode it, or invoke a local-file import against `/mnt/data`.
+
+The promotion path is transfer-only and lossless: source stream → SHA-256 hash transform → same-directory temporary file → `fsync` → atomic rename → destination hash verification. It returns dimensions and format for raster images and records a `project_asset_promoted`-equivalent project history event through `promote_conversation_file_to_project`. Use `optimize_project_assets` separately when a transformed production asset is actually desired.
 
 ### Project workflow recipes
 

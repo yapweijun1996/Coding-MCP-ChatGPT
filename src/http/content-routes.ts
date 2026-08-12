@@ -2,7 +2,7 @@ import type express from "express";
 import { readArtifact } from "../artifacts/store.js";
 import { renderPublicSharePage, type PublicShareLocale } from "../admin.js";
 import type { ServerConfig } from "../config.js";
-import { getJob } from "../jobs/store.js";
+import { getJobFresh } from "../jobs/store.js";
 import { renderPreviewPage } from "../preview.js";
 import {
   getProject,
@@ -208,8 +208,8 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
     }
   }));
 
-  app.get("/outcome/:jobId", (req, res) => {
-    const job = getJob(req.params.jobId);
+  app.get("/outcome/:jobId", asyncRoute(async (req, res) => {
+    const job = await getJobFresh(req.params.jobId);
     if (!job) {
       res.status(404).send("Outcome not found.");
       return;
@@ -222,7 +222,7 @@ export function registerContentRoutes(app: express.Express, config: ServerConfig
     res.setHeader("X-Robots-Tag", "noindex, nofollow");
     res.setHeader("Cache-Control", "private, no-store");
     res.type("html").send(renderPreviewPage(job));
-  });
+  }));
 
   app.get("/@:username", asyncRoute(async (req, res) => {
     if (redirectAppHostToContent(req, res)) return;

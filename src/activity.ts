@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { runtimeTelemetrySnapshot } from "./telemetry/runtime.js";
 import { recordTelemetry } from "./telemetry/store.js";
 
 export interface ActivityEvent {
@@ -25,10 +26,28 @@ export interface RecordActivityInput {
   clientType?: string;
   protocolVersion?: string;
   durationMs?: number;
+  queueWaitMs?: number;
+  executionMs?: number;
+  queueDepth?: number;
+  eventLoopDelayMs?: number;
+  rssBytes?: number;
+  toolListCount?: number;
+  toolListBytes?: number;
   errorCode?: string | number;
   errorMessage?: string;
+  failureCategory?: "input_validation" | "environment" | "execution" | "timeout" | "cancelled";
   inputBytes?: number;
   args?: unknown;
+}
+
+function inferFailureCategory(event: RecordActivityInput): RecordActivityInput["failureCategory"] {
+  if (event.ok) return undefined;
+  const text = `${event.summary} ${event.errorMessage ?? ""}`.toLowerCase();
+  if (/\bcancel(?:led|ed)?\b/.test(text)) return "cancelled";
+  if (/\btimeout\b|timed out|\b524\b/.test(text)) return "timeout";
+  if (/invalid arguments|requires .*?(?:number|string|array)|invalid enum|must be|missing .*?(?:field|parameter)|zod/.test(text)) return "input_validation";
+  if (/enoent|not installed|executable doesn't exist|not on .*path|could not be created|webgl|missing script/.test(text)) return "environment";
+  return "execution";
 }
 
 const MAX_EVENTS = 500;
@@ -53,7 +72,13 @@ export function recordActivity(event: RecordActivityInput): void {
     events.splice(0, events.length - MAX_EVENTS);
   }
   // Durable tier: full event, fire-and-forget (no-op until telemetry is initialized).
-  recordTelemetry({ id, time, ...event });
+  recordTelemetry({
+    id,
+    time,
+    ...runtimeTelemetrySnapshot(),
+    ...event,
+    failureCategory: event.failureCategory ?? inferFailureCategory(event)
+  });
 }
 
 export function listActivity(limit = 80): ActivityEvent[] {

@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getToolModule } from "../src/mcp/registry.js";
+import { loadToolModule } from "../src/mcp/registry.js";
 
-test("inspect_webpage_multibrowser is registered with safe defaults", () => {
-  const tool = getToolModule("inspect_webpage_multibrowser");
+test("inspect_webpage_multibrowser is registered with safe defaults", async () => {
+  const tool = await loadToolModule("inspect_webpage_multibrowser");
   assert.ok(tool, "inspect_webpage_multibrowser registered");
   const parsed = tool!.schema!.parse({ url: "https://93.184.216.34/" }) as {
     browsers: string[];

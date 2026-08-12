@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { getToolModule } from "../src/mcp/registry.js";
+import { musicRenderProgress } from "../src/mcp/tools/async-jobs.js";
 import { saveJob, getJob, type JobRecord } from "../src/jobs/store.js";
 import { createProject, upsertProjectTask } from "../src/projects/store.js";
 import { skillRegistry } from "../src/skills/registry.js";
@@ -48,20 +49,58 @@ test("run_tool_async rejects an ineligible tool name at the schema", () => {
   assert.equal(ineligible.success, false);
   const eligible = tool!.schema!.safeParse({ name: "run_project_build", arguments: {} });
   assert.equal(eligible.success, true);
+  for (const name of ["render_midi_with_soundfont", "render_production_music", "create_music_production"]) {
+    const musicRender = tool!.schema!.safeParse({ name, arguments: {} });
+    assert.equal(musicRender.success, true, `${name} is eligible for async execution`);
+  }
 });
 
-test("run_tool_async returns a running job immediately (non-blocking)", async () => {
+test("async music rendering exposes queued progress and workload metadata", async () => {
+  const tool = getToolModule("run_tool_async");
+  assert.ok(tool);
+  const result = await tool!.handler({
+    name: "render_midi_with_soundfont",
+    arguments: { projectId: "project_fixture", targetDurationSeconds: 300 }
+  }, toolContext());
+  assert.equal(result.ok, true);
+  const structured = result.structuredContent as {
+    status: string;
+    progressPercent: number;
+    stage: string;
+    estimatedWorkload: { kind: string; complexity: string; targetDurationSeconds: number };
+  };
+  assert.equal(structured.status, "created");
+  assert.equal(structured.progressPercent, 0);
+  assert.equal(structured.stage, "queued");
+  assert.deepEqual(structured.estimatedWorkload, {
+    kind: "music_render",
+    complexity: "standard",
+    targetDurationSeconds: 300
+  });
+});
+
+test("music render progress maps every coarse lifecycle stage", () => {
+  assert.deepEqual(musicRenderProgress("queued"), { progressPercent: 0, stage: "queued" });
+  assert.deepEqual(musicRenderProgress("running"), { progressPercent: 10, stage: "running" });
+  assert.deepEqual(musicRenderProgress("completed", 70), { progressPercent: 100, stage: "completed" });
+  for (const stage of ["error", "timeout", "cancelled"] as const) {
+    assert.deepEqual(musicRenderProgress(stage, 40), { progressPercent: 40, stage });
+  }
+});
+
+test("run_tool_async returns a queued job immediately (non-blocking)", async () => {
   const tool = getToolModule("run_tool_async");
   assert.ok(tool);
   const result = await tool!.handler({ name: "run_project_build", arguments: {} }, toolContext());
   assert.equal(result.ok, true);
   assert.ok(result.jobId, "a jobId is returned synchronously");
   const structured = result.structuredContent as { status: string; statusUrl: string };
-  assert.equal(structured.status, "running");
+  assert.equal(structured.status, "created");
   assert.match(structured.statusUrl, /\/outcome\/job_/);
   // The job exists in the store right away, before the background work finishes.
   const job = getJob(result.jobId!);
   assert.ok(job, "job persisted to the store");
+  assert.ok(["created", "running"].includes(job!.status), "local fallback may claim the job immediately; durable workers leave it queued until claimed");
   assert.equal(job!.title, "run_project_build");
   assert.equal(job!.sourceToolName, "run_project_build");
 });
@@ -117,6 +156,58 @@ test("background job queue tools list, cancel, retry, and recover partial result
   const retryJob = getJob(retried.jobId!);
   assert.equal(retryJob?.parentJobId, "job_queue_error");
   assert.equal(retryJob?.attempt, 2);
+});
+
+test("music render status/list include progress fields and cancellation requests underlying abort", async () => {
+  const musicJobId = `job_music_progress_${Date.now()}`;
+  saveJob({
+    ...job(musicJobId, "running"),
+    title: "render_production_music",
+    sourceToolName: "render_production_music",
+    progressPercent: 10,
+    stage: "running",
+    estimatedWorkload: { kind: "music_render", complexity: "standard", targetDurationSeconds: 300 }
+  });
+
+  const status = getToolModule("get_job_status")!;
+  const list = getToolModule("list_background_jobs")!;
+  const cancel = getToolModule("cancel_background_job")!;
+
+  const statusResult = await status.handler({ jobId: musicJobId }, toolContext());
+  const statusJob = (statusResult.structuredContent as { job: JobRecord }).job;
+  assert.equal(statusJob.progressPercent, 10);
+  assert.equal(statusJob.stage, "running");
+  assert.equal(statusJob.estimatedWorkload?.targetDurationSeconds, 300);
+
+  const listResult = await list.handler({ sourceToolName: "render_production_music", limit: 20 }, toolContext());
+  const listedJob = (listResult.structuredContent as { jobs: JobRecord[] }).jobs.find((item) => item.id === musicJobId);
+  assert.equal(listedJob?.progressPercent, 10);
+  assert.equal(listedJob?.stage, "running");
+  assert.equal(listedJob?.estimatedWorkload?.kind, "music_render");
+
+  const cancelResult = await cancel.handler({ jobId: musicJobId, reason: "user requested cancellation" }, toolContext());
+  assert.equal(cancelResult.ok, true);
+  assert.match(cancelResult.summary, /abort supported underlying work/);
+  assert.equal(getJob(musicJobId)?.status, "cancelled");
+  assert.equal(getJob(musicJobId)?.stage, "cancelled");
+  assert.equal(getJob(musicJobId)?.progressPercent, 10);
+});
+
+test("failed async music render preserves coarse progress and reaches the error stage", async () => {
+  const tool = getToolModule("run_tool_async")!;
+  const result = await tool.handler({ name: "render_production_music", arguments: {} }, toolContext());
+  assert.ok(result.jobId);
+
+  let renderedJob = getJob(result.jobId!);
+  for (let attempt = 0; attempt < 50 && renderedJob && !["success", "error", "cancelled", "timeout"].includes(renderedJob.status); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    renderedJob = getJob(result.jobId!);
+  }
+
+  assert.equal(renderedJob?.status, "error");
+  assert.equal(renderedJob?.stage, "error");
+  assert.equal(renderedJob?.progressPercent, 10);
+  assert.equal(renderedJob?.estimatedWorkload?.kind, "music_render");
 });
 
 function tenantContext(userId: string): ToolContext {

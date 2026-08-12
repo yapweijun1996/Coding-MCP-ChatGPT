@@ -51,8 +51,17 @@ export WORKSPACE_ROOT=/Users/yapweijun/Documents/GitHub/Coding-MCP-ChatGPT
 export SHARE_ROOT=/Users/yapweijun/Documents/GitHub/Coding-MCP-ChatGPT/.shares
 export TOOL_STATE_PATH=/Users/yapweijun/Documents/GitHub/Coding-MCP-ChatGPT/.state/tool-state.json
 export COMMAND_TIMEOUT_MS=30000
+export CONVERSATION_FILE_MAX_BYTES=100MiB
+export FILE_TRANSFER_TIMEOUT_MS=300000
 export MCP_RATE_LIMIT_MAX_REQUESTS=100
 export MCP_RATE_LIMIT_WINDOW_MS=60000
+export JOB_WORKER_CONCURRENCY=5
+export JOB_BROWSER_CONCURRENCY=2
+export JOB_BUILD_CONCURRENCY=2
+export JOB_AUDIO_CONCURRENCY=1
+export JOB_MAX_CONCURRENT_PER_USER=2
+export JOB_LEASE_MS=30000
+export JOB_HEARTBEAT_MS=2000
 ```
 
 > 建议使用 `http.env` 或你的密钥管理系统，不要把敏感值写进 git。

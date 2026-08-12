@@ -1,21 +1,47 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { ToolContext, ToolModule, ToolResult } from "../types.js";
-import { cancelJob, getJob, listJobsForOwner, saveJob, updateJob, type JobRecord } from "../../jobs/store.js";
+import {
+  cancelJobForOwnerFresh,
+  flushJobPersistence,
+  getJob,
+  getJobForOwnerFresh,
+  listJobsForOwnerFresh,
+  saveJob,
+  updateJob,
+  type JobEstimatedWorkload,
+  type JobExecutionClass,
+  type JobRecord
+} from "../../jobs/store.js";
+import { isJobDatabaseEnabled } from "../../jobs/database.js";
 import { createProject, getProjectActivity, getProjectTaskGraph, listProjects, upsertProjectTask, type ProjectTaskGraphNode } from "../../projects/store.js";
 
 // Tools that can blow past a proxy's request timeout (Cloudflare cuts proxied HTTP requests
 // at ~100s -> 524). Only these may be run via run_tool_async. Fast tools have no reason to go
 // async and should not, so the surface stays small and predictable.
-const asyncEligibleTools = [
+export const asyncEligibleTools = [
   "run_project_build",
   "run_project_npm_command",
   "record_project_workspace_video",
   "capture_webpage",
   "publish_project_workspace",
-  "inspect_project_workspace"
+  "inspect_project_workspace",
+  "screenshot_project",
+  "deliver_static_project",
+  "publish_project_dist",
+  "analyze_webpage_visual",
+  "render_midi_with_soundfont",
+  "render_production_music",
+  "create_music_production"
 ] as const;
 const asyncEligibleSet = new Set<string>(asyncEligibleTools);
+const asyncMusicRenderTools = new Set<string>(["render_midi_with_soundfont", "render_production_music", "create_music_production"]);
+const activeByClass = new Map<"browser" | "build" | "audio", number>();
+const activeByUser = new Map<string, number>();
+const activeJobControllers = new Map<string, AbortController>();
+const pendingJobs: Array<{ jobId: string; name: string; args: Record<string, unknown>; ctx: ToolContext; timeoutMs?: number }> = [];
+const concurrencyByClass = { browser: 2, build: 2, audio: 1 } as const;
+const maxConcurrentJobsPerUser = 2;
 
 const runToolAsyncSchema = z.object({
   name: z.enum(asyncEligibleTools),
@@ -58,13 +84,85 @@ function terminal(status: JobRecord["status"]): boolean {
   return status === "success" || status === "error" || status === "cancelled" || status === "timeout";
 }
 
-// A job is visible only to the tenant that created it. ctx.userId is the OAuth-bound tenant;
-// it is undefined only for the shared legacy/dev-token domain (which also shares the global
-// roots), so an exact `===` match is the correct boundary — two real tenants can never both
-// be undefined. Returns the resolved job when the caller owns it, otherwise undefined.
-function authorizeJob(jobId: string, ctx: ToolContext): JobRecord | undefined {
-  const job = getJob(jobId);
-  return job && job.ownerUserId === ctx.userId ? job : undefined;
+function isMusicRenderJob(name: string): boolean {
+  return asyncMusicRenderTools.has(name);
+}
+
+export function isAsyncEligibleTool(name: string): name is (typeof asyncEligibleTools)[number] {
+  return asyncEligibleSet.has(name);
+}
+
+export function executionClass(name: string): JobExecutionClass {
+  if (isMusicRenderJob(name)) return "audio";
+  if (["record_project_workspace_video", "capture_webpage", "inspect_project_workspace", "screenshot_project", "analyze_webpage_visual", "deliver_static_project"].includes(name)) return "browser";
+  return "build";
+}
+
+function canStart(entry: (typeof pendingJobs)[number]): boolean {
+  const kind = executionClass(entry.name);
+  const userKey = entry.ctx.userId ?? "legacy";
+  return (activeByClass.get(kind) ?? 0) < concurrencyByClass[kind]
+    && (activeByUser.get(userKey) ?? 0) < maxConcurrentJobsPerUser;
+}
+
+function drainPendingJobs(): void {
+  for (let index = 0; index < pendingJobs.length;) {
+    const entry = pendingJobs[index]!;
+    if (!canStart(entry)) {
+      index += 1;
+      continue;
+    }
+    pendingJobs.splice(index, 1);
+    const kind = executionClass(entry.name);
+    const userKey = entry.ctx.userId ?? "legacy";
+    activeByClass.set(kind, (activeByClass.get(kind) ?? 0) + 1);
+    activeByUser.set(userKey, (activeByUser.get(userKey) ?? 0) + 1);
+    void runQueuedJob(entry.jobId, entry.name, entry.args, entry.ctx, entry.timeoutMs).finally(() => {
+      activeByClass.set(kind, Math.max(0, (activeByClass.get(kind) ?? 1) - 1));
+      activeByUser.set(userKey, Math.max(0, (activeByUser.get(userKey) ?? 1) - 1));
+      drainPendingJobs();
+    });
+  }
+}
+
+function finitePositiveNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function estimateMusicRenderWorkload(args: Record<string, unknown>): JobEstimatedWorkload {
+  const targetDurationSeconds = finitePositiveNumber(args.targetDurationSeconds)
+    ?? finitePositiveNumber(args.targetDurationSec)
+    ?? finitePositiveNumber(args.durationSeconds);
+  const complexity = targetDurationSeconds === undefined
+    ? "unknown"
+    : targetDurationSeconds >= 10 * 60
+      ? "long"
+      : targetDurationSeconds >= 2 * 60
+        ? "standard"
+        : "short";
+  return {
+    kind: "music_render",
+    complexity,
+    ...(targetDurationSeconds === undefined ? {} : { targetDurationSeconds })
+  };
+}
+
+type MusicRenderStage = "queued" | "running" | "completed" | "error" | "timeout" | "cancelled";
+
+export function musicRenderProgress(stage: MusicRenderStage, currentProgress = 0): Pick<JobRecord, "progressPercent" | "stage"> {
+  if (stage === "queued") return { progressPercent: 0, stage };
+  if (stage === "running") return { progressPercent: Math.max(currentProgress, 10), stage };
+  if (stage === "completed") return { progressPercent: 100, stage };
+  return { progressPercent: currentProgress, stage };
+}
+
+function musicProgressForJob(jobId: string, name: string, stage: MusicRenderStage): Pick<JobRecord, "progressPercent" | "stage"> {
+  if (!isMusicRenderJob(name)) return {};
+  return musicRenderProgress(stage, getJob(jobId)?.progressPercent ?? 0);
+}
+
+async function authorizeJobFresh(jobId: string, ctx: ToolContext): Promise<JobRecord | undefined> {
+  return getJobForOwnerFresh(jobId, ctx.userId);
 }
 
 // Not-found and not-owned are reported identically so the job-id space cannot be enumerated
@@ -85,52 +183,145 @@ function safeUpdateRunningJob(jobId: string, update: Partial<Omit<JobRecord, "id
   updateJob(jobId, update);
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number | undefined): Promise<T | { timeout: true }> {
-  if (!timeoutMs) return promise;
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => resolve({ timeout: true }), timeoutMs);
-    promise.then((value) => {
-      clearTimeout(timer);
-      resolve(value);
-    }, (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-  });
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("Background job was cancelled.");
 }
 
 // Runs the wrapped tool to completion in the background and folds its ToolResult into the job
 // record. Dynamic import of the router avoids a module-init cycle (router -> registry ->
 // tools/index -> this module).
-async function runJob(jobId: string, name: string, args: Record<string, unknown>, ctx: ToolContext, timeoutMs?: number): Promise<void> {
+export async function runQueuedJob(
+  jobId: string,
+  name: string,
+  args: Record<string, unknown>,
+  ctx: ToolContext,
+  timeoutMs?: number,
+  parentSignal: AbortSignal | undefined = ctx.abortSignal
+): Promise<void> {
+  const controller = new AbortController();
+  activeJobControllers.set(jobId, controller);
+  const onParentAbort = () => controller.abort(abortReason(parentSignal!));
+  if (parentSignal?.aborted) controller.abort(abortReason(parentSignal));
+  else parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+  let timedOut = false;
+  const timeout = timeoutMs ? setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error(`Timeout after ${timeoutMs}ms.`));
+  }, timeoutMs) : undefined;
   try {
     const current = getJob(jobId);
     if (!current || terminal(current.status)) return;
-    updateJob(jobId, { status: "running", summary: `Running ${name} in the background...` });
+    updateJob(jobId, {
+      status: "running",
+      summary: `Running ${name} in the background...`,
+      startedAt: new Date().toISOString(),
+      ...musicProgressForJob(jobId, name, "running")
+    });
+    await flushJobPersistence(jobId);
+    if (controller.signal.aborted) throw abortReason(controller.signal);
     // Re-check enablement at run time, not just at submit time: a tool may have been disabled
     // between submit and this deferred execution.
     const { isToolEffectivelyEnabled } = await import("../../tool-state.js");
     if (!isToolEffectivelyEnabled(name)) {
-      safeUpdateRunningJob(jobId, { status: "error", summary: `${name} was disabled before it ran.`, errors: [`Tool ${name} is disabled.`] });
+      safeUpdateRunningJob(jobId, {
+        status: "error",
+        summary: `${name} was disabled before it ran.`,
+        errors: [`Tool ${name} is disabled.`],
+        completedAt: new Date().toISOString(),
+        ...musicProgressForJob(jobId, name, "error")
+      });
       return;
     }
     const { callTool } = await import("../router.js");
-    const result = await withTimeout(callTool(name, args, ctx), timeoutMs);
-    if (typeof result === "object" && result && "timeout" in result) {
-      safeUpdateRunningJob(jobId, { status: "timeout", summary: `${name} timed out after ${timeoutMs}ms.`, errors: [`Timeout after ${timeoutMs}ms.`] });
-      return;
-    }
+    const result = await callTool(name, args, { ...ctx, abortSignal: controller.signal });
+    if (controller.signal.aborted) throw abortReason(controller.signal);
     safeUpdateRunningJob(jobId, {
       status: result.ok ? "success" : "error",
       summary: result.summary,
       logs: result.logs ?? [],
       artifacts: result.artifacts ?? [],
-      errors: result.errors ?? []
+      errors: result.errors ?? [],
+      completedAt: new Date().toISOString(),
+      ...musicProgressForJob(jobId, name, result.ok ? "completed" : "error")
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Async tool execution failed.";
-    safeUpdateRunningJob(jobId, { status: "error", summary: `${name} failed.`, errors: [message] });
+    const cancelled = controller.signal.aborted && !timedOut;
+    safeUpdateRunningJob(jobId, {
+      status: timedOut ? "timeout" : cancelled ? "cancelled" : "error",
+      summary: timedOut ? `${name} timed out after ${timeoutMs}ms.` : cancelled ? `${name} was cancelled.` : `${name} failed.`,
+      errors: [message],
+      completedAt: new Date().toISOString(),
+      ...(cancelled ? { cancelledAt: new Date().toISOString() } : {}),
+      ...musicProgressForJob(jobId, name, timedOut ? "timeout" : cancelled ? "cancelled" : "error")
+    });
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    parentSignal?.removeEventListener("abort", onParentAbort);
+    if (activeJobControllers.get(jobId) === controller) activeJobControllers.delete(jobId);
   }
+}
+
+function startJob(jobId: string, name: string, args: Record<string, unknown>, ctx: ToolContext, timeoutMs?: number): void {
+  // Queueing protects the event loop and expensive external runtimes. The job remains in
+  // `created` until a slot is available, which also makes congestion observable to clients.
+  if (isJobDatabaseEnabled()) return;
+  pendingJobs.push({ jobId, name, args, ctx, timeoutMs });
+  drainPendingJobs();
+}
+
+export async function enqueueToolAsync(
+  input: { name: string; arguments?: unknown; timeoutMs?: number; maxAttempts?: number },
+  ctx: ToolContext
+): Promise<ToolResult> {
+  if (!isAsyncEligibleTool(input.name)) {
+    throw new Error(`Tool ${input.name} is not eligible for async execution. Eligible: ${asyncEligibleTools.join(", ")}.`);
+  }
+  const parsed = runToolAsyncSchema.parse({
+    name: input.name,
+    arguments: input.arguments ?? {},
+    timeoutMs: input.timeoutMs,
+    maxAttempts: input.maxAttempts
+  });
+  const { isToolEffectivelyEnabled } = await import("../../tool-state.js");
+  if (!isToolEffectivelyEnabled(parsed.name)) {
+    throw new Error(`Tool ${parsed.name} is disabled and cannot be run asynchronously.`);
+  }
+  const jobId = `job_${randomUUID()}`;
+  const now = new Date().toISOString();
+  const musicRender = isMusicRenderJob(parsed.name);
+  const initialProgress = musicRender ? musicRenderProgress("queued") : { progressPercent: 0, stage: "queued" };
+  saveJob({
+    id: jobId,
+    status: "created",
+    ownerUserId: ctx.userId,
+    title: parsed.name,
+    summary: `Queued ${parsed.name} for background execution.`,
+    logs: [], artifacts: [], errors: [],
+    sourceToolName: parsed.name,
+    sourceArgs: parsed.arguments,
+    attempt: 1,
+    maxAttempts: parsed.maxAttempts,
+    timeoutMs: parsed.timeoutMs,
+    executionClass: executionClass(parsed.name),
+    ...initialProgress,
+    ...(musicRender ? { estimatedWorkload: estimateMusicRenderWorkload(parsed.arguments) } : {}),
+    createdAt: now,
+    updatedAt: now
+  });
+  await flushJobPersistence(jobId);
+  startJob(jobId, parsed.name, parsed.arguments, ctx, parsed.timeoutMs);
+  const statusUrl = `${ctx.publicBaseUrl.replace(/\/$/, "")}/outcome/${jobId}`;
+  return {
+    ok: true,
+    summary: `Queued ${parsed.name} as background job ${jobId}. Poll get_job_status until it reaches a terminal status.`,
+    jobId,
+    previewUrl: statusUrl,
+    artifacts: [],
+    structuredContent: { jobId, status: "created", statusUrl, tool: parsed.name, timeoutMs: parsed.timeoutMs, maxAttempts: parsed.maxAttempts, queue: { class: executionClass(parsed.name), maxConcurrentPerUser: maxConcurrentJobsPerUser }, ...initialProgress, ...(musicRender ? { estimatedWorkload: estimateMusicRenderWorkload(parsed.arguments) } : {}) },
+    logs: [`Background job ${jobId} queued for ${parsed.name}.`],
+    errors: []
+  };
 }
 
 function summarizeJobs(jobs: JobRecord[]) {
@@ -153,6 +344,9 @@ function jobSummary(job: JobRecord) {
     title: job.title,
     summary: job.summary,
     sourceToolName: job.sourceToolName,
+    progressPercent: job.progressPercent,
+    stage: job.stage,
+    estimatedWorkload: job.estimatedWorkload,
     updatedAt: job.updatedAt,
     canRetry: Boolean(job.sourceToolName && job.sourceArgs && terminal(job.status) && (!job.maxAttempts || (job.attempt ?? 1) < job.maxAttempts))
   };
@@ -182,7 +376,7 @@ export const asyncJobTools: ToolModule[] = [
     definition: {
       name: "run_tool_async",
       description:
-        "Run a long-running tool in the background and return a jobId immediately, instead of blocking the request. Use this for tools that may exceed ~100 seconds (build, npm install, video recording, webpage capture) to avoid proxy/gateway timeouts (e.g. Cloudflare 524). Poll get_job_status with the returned jobId until status is success or error. Only long-running tools are eligible.",
+        "Run a long-running tool in the background and return a jobId immediately, instead of blocking the request. Use this for tools that may exceed ~100 seconds (build, npm install, video recording, webpage capture, or music rendering) to avoid proxy/gateway timeouts (e.g. Cloudflare 524). Poll get_job_status with the returned jobId until it reaches a terminal status. Only long-running tools are eligible.",
       inputSchema: {
         type: "object",
         properties: {
@@ -197,55 +391,16 @@ export const asyncJobTools: ToolModule[] = [
     },
     enabledByDefault: true,
     schema: runToolAsyncSchema,
-    handler: async (input: unknown, ctx: ToolContext): Promise<ToolResult> => {
+    handler: (input: unknown, ctx: ToolContext): Promise<ToolResult> => {
       const parsed = input as z.infer<typeof runToolAsyncSchema>;
-      if (!asyncEligibleSet.has(parsed.name)) {
-        throw new Error(`Tool ${parsed.name} is not eligible for async execution. Eligible: ${asyncEligibleTools.join(", ")}.`);
-      }
-      // Respect the same enable/skill gating the synchronous path enforces, so async cannot be
-      // used to run a tool the operator has disabled. Dynamic import keeps the init cycle out.
-      const { isToolEffectivelyEnabled } = await import("../../tool-state.js");
-      if (!isToolEffectivelyEnabled(parsed.name)) {
-        throw new Error(`Tool ${parsed.name} is disabled and cannot be run asynchronously.`);
-      }
-      const jobId = `job_${randomUUID()}`;
-      const now = new Date().toISOString();
-      saveJob({
-        id: jobId,
-        status: "running",
-        ownerUserId: ctx.userId,
-        title: parsed.name,
-        summary: `Running ${parsed.name} in the background...`,
-        logs: [],
-        artifacts: [],
-        errors: [],
-        sourceToolName: parsed.name,
-        sourceArgs: parsed.arguments,
-        attempt: 1,
-        maxAttempts: parsed.maxAttempts,
-        timeoutMs: parsed.timeoutMs,
-        createdAt: now,
-        updatedAt: now
-      });
-      void runJob(jobId, parsed.name, parsed.arguments, ctx, parsed.timeoutMs);
-      const statusUrl = `${ctx.publicBaseUrl.replace(/\/$/, "")}/outcome/${jobId}`;
-      return {
-        ok: true,
-        summary: `Started ${parsed.name} as background job ${jobId}. Poll get_job_status with this jobId until it is success or error.`,
-        jobId,
-        previewUrl: statusUrl,
-        artifacts: [],
-        structuredContent: { jobId, status: "running", statusUrl, tool: parsed.name, timeoutMs: parsed.timeoutMs, maxAttempts: parsed.maxAttempts },
-        logs: [`Background job ${jobId} started for ${parsed.name}.`],
-        errors: []
-      };
+      return enqueueToolAsync(parsed, ctx);
     }
   },
   {
     definition: {
       name: "get_job_status",
       description:
-        "Get the current status and result of a background job started with run_tool_async. Returns status (running | success | error) plus the wrapped tool's logs, artifacts, and errors once finished. Poll until status is no longer running.",
+        "Get the current status and result of a background job started with run_tool_async. Returns the full job record, including coarse progress/stage metadata when available, plus logs, artifacts, and errors. Poll until the status is terminal.",
       inputSchema: {
         type: "object",
         properties: { jobId: { type: "string", description: "The jobId returned by run_tool_async." } },
@@ -255,9 +410,9 @@ export const asyncJobTools: ToolModule[] = [
     },
     enabledByDefault: true,
     schema: getJobStatusSchema,
-    handler: (input: unknown, ctx: ToolContext): ToolResult => {
+    handler: async (input: unknown, ctx: ToolContext): Promise<ToolResult> => {
       const parsed = input as z.infer<typeof getJobStatusSchema>;
-      const job = authorizeJob(parsed.jobId, ctx);
+      const job = await authorizeJobFresh(parsed.jobId, ctx);
       if (!job) {
         return jobNotFound(parsed.jobId);
       }
@@ -281,9 +436,9 @@ export const asyncJobTools: ToolModule[] = [
     },
     enabledByDefault: true,
     schema: listBackgroundJobsSchema,
-    handler: (input: unknown, ctx: ToolContext): ToolResult => {
+    handler: async (input: unknown, ctx: ToolContext): Promise<ToolResult> => {
       const parsed = listBackgroundJobsSchema.parse(input);
-      const jobs = listJobsForOwner(ctx.userId, parsed);
+      const jobs = await listJobsForOwnerFresh(ctx.userId, parsed);
       return { ok: true, summary: `Found ${jobs.length} background job(s).`, artifacts: [], structuredContent: { jobs, count: jobs.length }, logs: jobs.map((job) => `${job.id} ${job.status} ${job.title}: ${job.summary}`), errors: [] };
     }
   },
@@ -307,7 +462,7 @@ export const asyncJobTools: ToolModule[] = [
     schema: diagnoseCodeMcpStatusSchema,
     handler: async (input: unknown, ctx: ToolContext): Promise<ToolResult> => {
       const parsed = diagnoseCodeMcpStatusSchema.parse(input);
-      const jobs = listJobsForOwner(ctx.userId, { limit: 20 });
+      const jobs = await listJobsForOwnerFresh(ctx.userId, { limit: 20 });
       const jobState = summarizeJobs(jobs);
       const projects = await listProjects(ctx.projectRoot, false);
       const selectedProjectId = parsed.projectId ?? projects[0]?.id;
@@ -434,19 +589,18 @@ export const asyncJobTools: ToolModule[] = [
   {
     definition: {
       name: "cancel_background_job",
-      description: "Mark a non-terminal background job as cancelled so late results cannot overwrite the cancelled state.",
+      description: "Cancel a queued or running background job. Running tools receive an AbortSignal so supported browser, network, and child-process work stops promptly.",
       inputSchema: { type: "object", properties: { jobId: { type: "string" }, reason: { type: "string" } }, required: ["jobId"], additionalProperties: false }
     },
     enabledByDefault: true,
     schema: cancelBackgroundJobSchema,
-    handler: (input: unknown, ctx: ToolContext): ToolResult => {
+    handler: async (input: unknown, ctx: ToolContext): Promise<ToolResult> => {
       const parsed = cancelBackgroundJobSchema.parse(input);
-      // Authorize ownership BEFORE mutating: a non-owner must not be able to cancel.
-      if (!authorizeJob(parsed.jobId, ctx)) return jobNotFound(parsed.jobId);
-      const job = cancelJob(parsed.jobId, parsed.reason);
+      const job = await cancelJobForOwnerFresh(parsed.jobId, ctx.userId, parsed.reason);
       if (!job) return jobNotFound(parsed.jobId);
+      activeJobControllers.get(parsed.jobId)?.abort(new Error(parsed.reason));
       const changed = job.status === "cancelled";
-      return { ok: changed, summary: changed ? `Cancelled ${parsed.jobId}.` : `Job ${parsed.jobId} is already terminal (${job.status}).`, jobId: job.id, artifacts: job.artifacts, structuredContent: { job, done: terminal(job.status) }, logs: job.logs, errors: changed ? [] : [`Job is already ${job.status}.`] };
+      return { ok: changed, summary: changed ? `Cancelled ${parsed.jobId}; the worker will abort supported underlying work.` : `Job ${parsed.jobId} is already terminal (${job.status}).`, jobId: job.id, artifacts: job.artifacts, structuredContent: { job, done: terminal(job.status) }, logs: job.logs, errors: changed ? [] : [`Job is already ${job.status}.`] };
     }
   },
   {
@@ -461,7 +615,7 @@ export const asyncJobTools: ToolModule[] = [
       const parsed = retryBackgroundJobSchema.parse(input);
       // Ownership FIRST — this is the check that closes cross-tenant code execution: without it
       // a tenant could re-run another tenant's stored sourceArgs in their own workspace ctx.
-      const previous = authorizeJob(parsed.jobId, ctx);
+      const previous = await authorizeJobFresh(parsed.jobId, ctx);
       if (!previous) return jobNotFound(parsed.jobId);
       if (!previous.sourceToolName || !previous.sourceArgs) return { ok: false, summary: `Job ${parsed.jobId} has no retry source metadata.`, artifacts: [], logs: [], errors: ["Missing sourceToolName/sourceArgs."] };
       if (!asyncEligibleSet.has(previous.sourceToolName as (typeof asyncEligibleTools)[number])) return { ok: false, summary: `${previous.sourceToolName} is not eligible for async retry.`, artifacts: [], logs: [], errors: [`Ineligible tool: ${previous.sourceToolName}.`] };
@@ -470,9 +624,12 @@ export const asyncJobTools: ToolModule[] = [
       const now = new Date().toISOString();
       const jobId = `job_${randomUUID()}`;
       const timeoutMs = parsed.timeoutMs ?? previous.timeoutMs;
+      const musicRender = isMusicRenderJob(previous.sourceToolName);
+      const initialProgress = musicRender ? musicRenderProgress("queued") : { progressPercent: 0, stage: "queued" };
+      const initialStatus = "created";
       saveJob({
         id: jobId,
-        status: "running",
+        status: initialStatus,
         ownerUserId: ctx.userId,
         title: previous.sourceToolName,
         summary: `Retrying ${previous.sourceToolName} from ${parsed.jobId}...`,
@@ -485,11 +642,15 @@ export const asyncJobTools: ToolModule[] = [
         attempt: nextAttempt,
         maxAttempts: previous.maxAttempts,
         timeoutMs,
+        executionClass: executionClass(previous.sourceToolName),
+        ...initialProgress,
+        ...(musicRender ? { estimatedWorkload: previous.estimatedWorkload ?? estimateMusicRenderWorkload(previous.sourceArgs) } : {}),
         createdAt: now,
         updatedAt: now
       });
-      void runJob(jobId, previous.sourceToolName, previous.sourceArgs, ctx, timeoutMs);
-      return { ok: true, summary: `Retry started as ${jobId}.`, jobId, artifacts: [], structuredContent: { jobId, parentJobId: previous.id, attempt: nextAttempt, status: "running" }, logs: [`Retry ${jobId} started from ${previous.id}.`], errors: [] };
+      await flushJobPersistence(jobId);
+      startJob(jobId, previous.sourceToolName, previous.sourceArgs, ctx, timeoutMs);
+      return { ok: true, summary: `Retry started as ${jobId}.`, jobId, artifacts: [], structuredContent: { jobId, parentJobId: previous.id, attempt: nextAttempt, status: initialStatus, ...initialProgress }, logs: [`Retry ${jobId} started from ${previous.id}.`], errors: [] };
     }
   },
   {
@@ -500,9 +661,9 @@ export const asyncJobTools: ToolModule[] = [
     },
     enabledByDefault: true,
     schema: recoverJobPartialResultSchema,
-    handler: (input: unknown, ctx: ToolContext): ToolResult => {
+    handler: async (input: unknown, ctx: ToolContext): Promise<ToolResult> => {
       const parsed = recoverJobPartialResultSchema.parse(input);
-      const job = authorizeJob(parsed.jobId, ctx);
+      const job = await authorizeJobFresh(parsed.jobId, ctx);
       if (!job) return jobNotFound(parsed.jobId);
       const partial = { logs: job.logs, artifacts: job.artifacts, errors: job.errors, summary: job.summary };
       const canRetry = Boolean(job.sourceToolName && job.sourceArgs && (!job.maxAttempts || (job.attempt ?? 1) < job.maxAttempts));
@@ -511,7 +672,7 @@ export const asyncJobTools: ToolModule[] = [
         partial,
         canRetry,
         nextActions: [
-          ...(job.status === "running" ? ["Poll get_job_status again before retrying."] : []),
+          ...(job.status === "created" || job.status === "running" ? ["Poll get_job_status again before retrying."] : []),
           ...(canRetry ? ["Call retry_background_job if the partial result is insufficient."] : []),
           ...(job.artifacts.length ? ["Inspect recovered artifacts before repeating expensive work."] : []),
           ...(job.errors.length ? ["Use errors/logs to narrow the next attempt."] : [])

@@ -73,9 +73,11 @@ and `create_preview` tools. Each entry has a `definition` (the schema ChatGPT se
 
 | File | Key exports | Role |
 | --- | --- | --- |
-| `mcp/tools/index.ts` | `allToolModules: ToolModule[]` | The live registry source — every tool group is imported and spread into one array. **Add a new tool group here.** |
-| `mcp/registry.ts` | `toolRegistry`, `toolDefinitions`, `getToolModule(name)`, `hasToolModule(name)` | Builds a name→module map and **throws on duplicate tool names**. |
-| `mcp/router.ts` | `callTool(name, rawInput, ctx)` | Looks up the module, runs `schema.parse(input)`, calls `handler(input, ctx)`, wraps failures via `errorResult`. |
+| `mcp/tools/index.ts` | `toolGroupLoaders`, `hotToolGroupIds` | Maps each group to a dynamic import and defines the small startup hot set. **Add a new tool group here.** |
+| `mcp/tool-manifest.generated.ts` | `toolManifest` | Generated discovery definitions/defaults for every tool; refresh with `npm run generate:tool-manifest`. |
+| `mcp/lazy-registry.ts` | `LazyToolRuntime` | Memoizes concurrent group imports, validates manifest drift atomically, and records load state/errors. |
+| `mcp/registry.ts` | `toolRegistry`, `toolDefinitions`, `getToolModule(name)`, `loadToolModule(name)`, `hasToolModule(name)` | Serves static discovery and resolves real schemas/handlers on first use. |
+| `mcp/router.ts` | `callTool(name, rawInput, ctx)` | Awaits the real module, runs `schema.parse(input)`, calls `handler(input, ctx)`, wraps failures via `errorResult`. |
 | `mcp/result.ts` | `createJobResult`, `makePreviewUrl`, `makeShareUrl`, `errorResult`, `formatZodError` | Result/URL builders; flattens Zod errors into actionable `field: reason` strings. |
 | `mcp/types.ts` | `ToolModule`, `ToolDefinition`, `ToolResult`, `ToolContext` | The contracts every tool implements. |
 | `mcp/child-env.ts` | `childEnv`, `gitChildEnv` | Sanitized env for spawned child processes / git. |

@@ -61,6 +61,7 @@ Configuration is via environment variables (see the full list in the root
 | `NODE_ENV` | `development` / `production` |
 | `MCP_DEV_TOKEN` | a bearer token that bypasses OAuth **only** in non-production (disabled when `NODE_ENV=production`) |
 | `MCP_RATE_LIMIT_MAX_REQUESTS` / `MCP_RATE_LIMIT_WINDOW_MS` | per-user/per-client `/mcp` request limit (defaults: 100 requests / 60s) |
+| `CONVERSATION_FILE_MAX_BYTES` / `FILE_TRANSFER_TIMEOUT_MS` | native ChatGPT connector-file transfer ceiling/timeout (defaults: 100 MiB / 5 minutes) |
 | `PUBLIC_BASE_URL` | external base URL used to build share/preview links (default `https://gmb01.xyz`) |
 | `WORKSPACE_ROOT` | the directory tools are allowed to operate in |
 | `DATABASE_URL` | Postgres connection (the store falls back to JSON files if absent) |
@@ -76,9 +77,10 @@ Run these constantly. They are fast and they are the same checks CI runs.
 
 | Command | What it does | When |
 |---|---|---|
-| `npm run typecheck` | `tsc --noEmit` over server + admin-ui | after any edit |
+| `npm run typecheck` | checks generated tool-manifest drift, then runs `tsc --noEmit` over server + admin-ui | after any edit |
 | `npm test` | typecheck **then** `tsx --test tests/*.test.ts` | before every commit |
-| `npm run check:mcp` | builds `dist/`, then validates the tool registry (uniqueness, critical tools present, high-risk disabled, command tools have package scripts, skill references resolve) | before shipping tool changes |
+| `npm run check:mcp` | builds `dist/`, then validates registry contracts, skill references, and that heavy tool groups stay cold during discovery | before shipping tool changes |
+| `npm run benchmark:registry` | measures registry/server cold import and RSS, verifies cold groups remain unloaded, and times first load of browser, music, and presentation groups in isolated processes | after changing registry grouping or imports |
 | `npm run lint` | eslint over `src/` + `tests/` | before commit |
 | `npm run build` | `tsc` server build + admin-ui build | release / docker |
 

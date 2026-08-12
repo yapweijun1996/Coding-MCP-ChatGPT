@@ -412,7 +412,7 @@ export const videoEditorTools: ToolModule[] = [
             maxBuffer: maxFfmpegLogBytes,
             env: childEnv()
           });
-          const artifact = await createArtifact({ artifactRoot: ctx.artifactRoot, filename: `frame-${index + 1}.png`, contentType: "image/png", content: await readFile(outputPath) });
+          const artifact = await createArtifact({ artifactRoot: ctx.artifactRoot, filename: `frame-${index + 1}.png`, contentType: "image/png", content: await readFile(outputPath), projectId: parsed.projectId });
           const artifactUrl = makeArtifactUrl(ctx.contentBaseUrl ?? ctx.publicBaseUrl, artifact.id, artifact.filename);
           artifacts.push(artifactUrl);
           frames.push({ timeSeconds, artifactUrl });
@@ -507,7 +507,7 @@ export const videoEditorTools: ToolModule[] = [
         const args = buildVideoOnlyRenderArgs(inputPaths, videoClips, timeline, outputPath, parsed.format);
         await writeFile(path.join(tmpDir, "ffmpeg-args.json"), `${JSON.stringify(args, null, 2)}\n`);
         const { stderr } = await execFileAsync(ffmpegExecutable(), args, { timeout: parsed.timeoutMs, maxBuffer: maxFfmpegLogBytes, env: childEnv() });
-        const artifact = await createArtifact({ artifactRoot: ctx.artifactRoot, filename: `video-render${renderExtension(parsed.format)}`, contentType: renderContentType(parsed.format), content: await readFile(outputPath) });
+        const artifact = await createArtifact({ artifactRoot: ctx.artifactRoot, filename: `video-render${renderExtension(parsed.format)}`, contentType: renderContentType(parsed.format), content: await readFile(outputPath), projectId: parsed.projectId });
         const artifactUrl = makeArtifactUrl(ctx.contentBaseUrl ?? ctx.publicBaseUrl, artifact.id, artifact.filename);
         const report = { projectId: parsed.projectId, timelinePath: parsed.timelinePath, format: parsed.format, artifactUrl, clipCount: videoClips.length, renderer: "ffmpeg", audioIncluded: false };
         await appendProjectTaskHistory(ctx.projectRoot, parsed.projectId, { toolName: "render_video_timeline", ok: true, summary: `Rendered video timeline to ${parsed.format}.`, details: report });

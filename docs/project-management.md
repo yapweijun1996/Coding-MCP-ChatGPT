@@ -22,7 +22,8 @@ This MCP stores ChatGPT-created coding projects on disk under `.projects/`.
 - `createdAt`
 - `updatedAt`
 - `createdByClientId`
-- `status`: `draft`, `published`, or `deleted`
+- `status`: `draft`, `private`, `published`, or `deleted`
+- `shareAccess`: `anyone_with_link` by default for new projects; users can explicitly set `private`
 - `entryFile`
 - `publishedUrl`
 - `workspaceBinding`: optional real local workspace path and detected Git root
@@ -38,12 +39,32 @@ This MCP stores ChatGPT-created coding projects on disk under `.projects/`.
 - `get_project_activity`: get task history, latest validation, publish status, and creator connector.
 - `deliver_static_project`: create a project from multiple text files, validate, publish, browser-check, and return a delivery report.
 - `write_project_file`: write a text file inside the project.
+- `promote_conversation_file_to_project`: stream a ChatGPT attachment, image_gen result, or connector file reference into project asset storage with exact-byte verification. Use this for files originating in the current ChatGPT conversation; it is not a local-path or Base64 tool.
 - `read_project_file`: read a text file inside the project.
 - `delete_project_file`: delete a project file with `confirm=true`.
 - `validate_project`: validate entry file, safe paths, file sizes, basic HTML structure, and public URL readiness.
 - `publish_project`: publish the project entry file. MCP tool calls default to public `anyone_with_link` access for final handoff; pass `shareAccess: "private"` for internal previews.
 - `publish_and_report`: validate, publish, and return a stable delivery report with `publishedUrl` and `shareAccess`.
 - `delete_project`: soft-delete a project with `confirm=true`; disabled by default in Admin tool access.
+- `get_my_storage_usage`: report the current user's project/workspace bytes, quota state, and warnings without exposing filesystem paths.
+- `purge_project`: permanently remove one project and safe bound workspace; disabled by default and requires `confirm=true`.
+
+## ChatGPT File → Project Asset
+
+The ChatGPT connector and the Code-MCP server run in different filesystems. A ChatGPT sandbox path such as `/mnt/data/...` is not a valid server-local path. `promote_conversation_file_to_project` bridges that boundary through the native top-level file parameter declared as `_meta["openai/fileParams"]: ["file"]`.
+
+The connector supplies an opaque file reference containing `download_url` and `file_id` (with optional MIME type and filename). The server accepts only the connector's approved HTTPS download host, re-checks every redirect for SSRF safety, and never accepts a model-supplied local path or guessed API endpoint. The transfer is streamed into `files/.tmp-<uuid>`, hashed with SHA-256, validated using magic bytes, `fsync`ed, and atomically renamed after quota and destination checks.
+
+Promotion is lossless by default. It does not resize, recompress, convert PNG/JPEG to WebP, crop, strip alpha, or otherwise optimize. Successful promotion returns `sourceSha256`, `destinationSha256`, `byteExact:true`, `qualityPreserved:true`, and `transformed:false`; `alreadyPresent:true` is returned for an identical retry. `overwrite` defaults to `false`. SVG is checked against the existing unsafe-content policy and is rejected when unsafe rather than silently sanitized.
+
+Use the tools according to the source boundary:
+
+- Conversation attachment, `image_gen` output, or connector file reference → `promote_conversation_file_to_project`.
+- File already on the Code-MCP server → `import_project_asset_from_local_file`.
+- Safe reachable HTTPS source → `import_project_asset_from_url`.
+- Explicit legacy Base64 compatibility → `write_project_asset`.
+
+The native file reference is deliberately small and does not require the legacy `40mb` JSON body to carry binary data. `CONVERSATION_FILE_MAX_BYTES` controls the native transfer (default `100MiB`); ordinary image/document assets are limited to `100MiB`, PPTX to `25MiB`, and ZIP to `50MiB`. Project/user/global storage quotas are checked before staging when the source size is known. Optimization remains a separate explicit action such as `optimize_project_assets`.
 - `create_app_project`: create a Vite app source workspace for React, Vue, or vanilla demos.
 - `write_app_project_file` / `read_app_project_file`: edit and inspect source files under the project `workspace/`.
 - `install_project_dependencies`: run controlled `npm install` in the app workspace.
@@ -77,7 +98,7 @@ Recommended ChatGPT workflow:
 - `/admin/projects/:projectId`: React project detail route for status, files, validation, and task history.
 - `/admin/api/projects/:projectId`: authenticated JSON project detail.
 - `/admin/api/projects/:projectId/download.zip`: authenticated dynamic ZIP download of project files.
-- `/share/:projectId/:filename`: published project file. Projects default to `private`; agent delivery tools explicitly publish handoff URLs as `anyone_with_link` unless `shareAccess: "private"` is passed.
+- `/share/:projectId/:filename`: published project file. New projects default to `anyone_with_link`; set `shareAccess: "private"` when an owner/admin-only preview is required.
 
 ## Safety boundaries
 
@@ -85,10 +106,13 @@ Recommended ChatGPT workflow:
 - Absolute paths are rejected.
 - `..` path traversal is rejected.
 - Hidden path segments such as `.env` are rejected.
-- Single file content is limited to 1 MiB.
-- Only text-first static files are enabled in this version: `.html`, `.css`, `.js`, `.json`, `.txt`, `.md`, `.svg`.
+- Text project files are limited to 1 MiB; promoted binary/image assets are limited to 100 MiB by default (PPTX 25 MiB, ZIP 50 MiB) and still subject to storage quotas.
+- Text-first static files remain `.html`, `.css`, `.js`, `.json`, `.txt`, `.md`, and `.svg`; binary assets use the explicit asset tools and are served by their detected extension MIME type.
 - ZIP download includes `published/` and app source `workspace/`, excluding `node_modules` and built `dist`.
 - Revoking a connector does not delete its projects.
+- Soft-deleted projects are retained for the configured `DELETED_PROJECT_RETENTION_DAYS` period, then the storage monitor purges them. The admin HTTP equivalent is `POST /admin/api/projects/:projectId/purge` with `{ "confirm": true }`.
+
+Storage quota and root accounting are documented in [`docs/storage-governance.md`](storage-governance.md).
 
 ## Current limitation
 

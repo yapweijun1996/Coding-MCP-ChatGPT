@@ -709,7 +709,8 @@ export const webRebuildTools: ToolModule[] = [
           summary: `Browser validation for ${project.id}.`,
           filename: `design-conversion-inspection-${project.id}.html`,
           html: renderWebpageInspectionReport(publishedUrl, browserResults),
-          ownerUserId: ctx.userId
+          ownerUserId: ctx.userId,
+          projectId: project.id
         });
         inspectionReportUrl = makeShareUrl(ctx.publicBaseUrl, inspectionShare.id, inspectionShare.filename);
         const inspectionSummary = {
@@ -782,7 +783,7 @@ export const webRebuildTools: ToolModule[] = [
     schema: captureWebpageSchema,
     handler: async (input, ctx) => {
       const parsed = input as z.infer<typeof captureWebpageSchema>;
-      const capture = await captureWebpage(parsed);
+      const capture = await captureWebpage(parsed, ctx.abortSignal);
       const captureRoot = getCaptureRoot(ctx.workspaceRoot);
       await saveWebpageCapture(captureRoot, capture);
       const share = await createShareArtifact({
@@ -941,7 +942,8 @@ export const webRebuildTools: ToolModule[] = [
           summary: `Browser validation for ${project.id}.`,
           filename: `improved-inspection-${project.id}.html`,
           html: renderWebpageInspectionReport(published.publishedUrl!, browserResults),
-          ownerUserId: ctx.userId
+          ownerUserId: ctx.userId,
+          projectId: project.id
         });
         inspectionReportUrl = makeShareUrl(ctx.publicBaseUrl, inspectionShare.id, inspectionShare.filename);
         const inspectionSummary = {

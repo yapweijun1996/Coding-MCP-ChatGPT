@@ -285,14 +285,14 @@ test("publishProject keeps stable preview URLs", async () => {
     const published = await publishProject(root, projectId, "https://example.test");
 
     assert.equal(published.publishedUrl, `https://example.test/share/${projectId}/index.html`);
-    assert.equal(published.shareAccess, "private");
+    assert.equal(published.shareAccess, "anyone_with_link");
   });
 });
 
-test("new projects are private by default but can be link-shared explicitly", async () => {
+test("new projects are link-shared by default and remain link-shared when explicitly requested", async () => {
   await withProject(async (root, projectId) => {
     const manifest = await getProjectManifest(root, projectId);
-    assert.equal(manifest.metadata.shareAccess, "private");
+    assert.equal(manifest.metadata.shareAccess, "anyone_with_link");
 
     await writeProjectFile(root, projectId, "index.html", "<!doctype html><html><body>Shareable</body></html>");
     const published = await publishProject(root, projectId, "https://example.test", "index.html", {

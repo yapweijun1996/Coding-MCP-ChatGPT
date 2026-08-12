@@ -1,8 +1,23 @@
 import path from "node:path";
 import { mkdirSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { atomicWriteSync } from "../shared/atomic-write.js";
+import {
+  cancelPersistedJobForOwner,
+  getPersistedJob,
+  getPersistedJobForOwner,
+  isJobDatabaseEnabled,
+  listPersistedJobsForOwner,
+  persistJobSnapshot
+} from "./database.js";
 
 export type JobStatus = "created" | "running" | "success" | "error" | "cancelled" | "timeout";
+export type JobExecutionClass = "browser" | "build" | "audio";
+
+export interface JobEstimatedWorkload {
+  kind: "music_render";
+  complexity: "unknown" | "short" | "standard" | "long";
+  targetDurationSeconds?: number;
+}
 
 export interface JobRecord {
   id: string;
@@ -19,6 +34,8 @@ export interface JobRecord {
   errors: string[];
   createdAt: string;
   updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
   sourceToolName?: string;
   sourceArgs?: Record<string, unknown>;
   parentJobId?: string;
@@ -26,12 +43,20 @@ export interface JobRecord {
   maxAttempts?: number;
   timeoutMs?: number;
   cancelledAt?: string;
+  progressPercent?: number;
+  stage?: string;
+  estimatedWorkload?: JobEstimatedWorkload;
+  executionClass?: JobExecutionClass;
+  /** Monotonic per-job revision used to reject delayed cross-process writes. */
+  revision?: number;
 }
 
 // In-memory index for fast reads, backed by one JSON file per job under jobsRoot. Writes are
 // synchronous (atomicWriteSync) so the public API stays synchronous for its callers. When
 // jobsRoot is unset (tests, or persistence disabled) the store behaves as pure in-memory.
 const jobs = new Map<string, JobRecord>();
+const persistenceChains = new Map<string, Promise<void>>();
+const leaseTokens = new Map<string, string>();
 let jobsRoot = "";
 
 function jobFilePath(id: string): string {
@@ -40,6 +65,28 @@ function jobFilePath(id: string): string {
 }
 
 function persist(job: JobRecord): void {
+  // PostgreSQL is the durable queue backend when configured. Avoid synchronous per-request
+  // file writes in that mode; file snapshots are the local-development fallback only.
+  if (isJobDatabaseEnabled()) {
+    const previous = persistenceChains.get(job.id) ?? Promise.resolve();
+    const snapshot = structuredClone(job);
+    const leaseToken = leaseTokens.get(job.id);
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const persisted = await persistJobSnapshot(snapshot, leaseToken);
+        if (leaseToken && !persisted) throw new Error(`Job ${job.id} lease is no longer valid.`);
+      });
+    persistenceChains.set(job.id, next);
+    const cleanup = () => {
+      if (persistenceChains.get(job.id) === next) persistenceChains.delete(job.id);
+    };
+    void next.then(cleanup, (error) => {
+      console.error("Job queue persistence failed:", error instanceof Error ? error.message : error);
+      cleanup();
+    });
+    return;
+  }
   if (!jobsRoot) return;
   try {
     mkdirSync(jobsRoot, { recursive: true });
@@ -54,6 +101,8 @@ function persist(job: JobRecord): void {
 export function initializeJobStore(root: string, retentionDays = 7): void {
   jobsRoot = root;
   jobs.clear();
+  persistenceChains.clear();
+  leaseTokens.clear();
   let files: string[];
   try {
     files = readdirSync(jobsRoot).filter((file) => file.endsWith(".json"));
@@ -83,6 +132,7 @@ export function initializeJobStore(root: string, retentionDays = 7): void {
         const reconciled: JobRecord = {
           ...job,
           status: "error",
+          stage: job.estimatedWorkload?.kind === "music_render" ? "error" : job.stage,
           summary: `${job.title} was interrupted by a server restart.`,
           errors: [...(job.errors ?? []), "Job did not finish before the server stopped; re-run it."],
           updatedAt: new Date().toISOString()
@@ -99,13 +149,84 @@ export function initializeJobStore(root: string, retentionDays = 7): void {
 }
 
 export function saveJob(job: JobRecord): JobRecord {
-  jobs.set(job.id, job);
-  persist(job);
-  return job;
+  const next = { ...job, revision: job.revision ?? 1 };
+  jobs.set(next.id, next);
+  persist(next);
+  return next;
 }
 
 export function getJob(id: string): JobRecord | undefined {
   return jobs.get(id);
+}
+
+export function replaceJobsFromPersistentStore(records: JobRecord[]): void {
+  for (const record of records) {
+    const current = jobs.get(record.id);
+    if (!current || (record.revision ?? 0) >= (current.revision ?? 0)) jobs.set(record.id, record);
+  }
+}
+
+export function pruneJobCache(maxRecords = 5000): void {
+  if (jobs.size <= maxRecords) return;
+  const removable = [...jobs.values()]
+    .filter((job) => ["success", "error", "cancelled", "timeout"].includes(job.status))
+    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+  for (const job of removable) {
+    if (jobs.size <= maxRecords) break;
+    jobs.delete(job.id);
+    leaseTokens.delete(job.id);
+    persistenceChains.delete(job.id);
+  }
+}
+
+export function attachJobLease(id: string, leaseToken: string): void {
+  leaseTokens.set(id, leaseToken);
+}
+
+export function clearJobLease(id: string): void {
+  leaseTokens.delete(id);
+}
+
+export async function flushJobPersistence(id: string): Promise<void> {
+  await persistenceChains.get(id);
+}
+
+export async function getJobFresh(id: string): Promise<JobRecord | undefined> {
+  if (!isJobDatabaseEnabled()) return getJob(id);
+  const job = await getPersistedJob(id);
+  if (job) replaceJobsFromPersistentStore([job]);
+  return job;
+}
+
+export async function getJobForOwnerFresh(id: string, ownerUserId: string | undefined): Promise<JobRecord | undefined> {
+  if (!isJobDatabaseEnabled()) {
+    const job = getJob(id);
+    return job?.ownerUserId === ownerUserId ? job : undefined;
+  }
+  const job = await getPersistedJobForOwner(id, ownerUserId);
+  if (job) replaceJobsFromPersistentStore([job]);
+  return job;
+}
+
+export async function listJobsForOwnerFresh(
+  ownerUserId: string | undefined,
+  options: { status?: JobStatus; sourceToolName?: string; limit?: number } = {}
+): Promise<JobRecord[]> {
+  if (!isJobDatabaseEnabled()) return listJobsForOwner(ownerUserId, options);
+  const records = await listPersistedJobsForOwner(ownerUserId, options);
+  replaceJobsFromPersistentStore(records);
+  return records;
+}
+
+export async function cancelJobForOwnerFresh(id: string, ownerUserId: string | undefined, reason = "Cancelled by request."): Promise<JobRecord | undefined> {
+  if (!isJobDatabaseEnabled()) {
+    const existing = getJob(id);
+    if (!existing || existing.ownerUserId !== ownerUserId) return undefined;
+    return cancelJob(id, reason);
+  }
+  const job = await cancelPersistedJobForOwner(id, ownerUserId, reason);
+  if (job) replaceJobsFromPersistentStore([job]);
+  return job;
 }
 
 export function listJobs(options: { status?: JobStatus; sourceToolName?: string; limit?: number } = {}): JobRecord[] {
@@ -140,7 +261,8 @@ export function updateJob(id: string, update: Partial<Omit<JobRecord, "id" | "cr
   const next: JobRecord = {
     ...existing,
     ...update,
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
+    revision: (existing.revision ?? 0) + 1
   };
   jobs.set(id, next);
   persist(next);
@@ -153,8 +275,10 @@ export function cancelJob(id: string, reason = "Cancelled by request."): JobReco
   if (["success", "error", "cancelled", "timeout"].includes(existing.status)) return existing;
   return updateJob(id, {
     status: "cancelled",
+    stage: existing.estimatedWorkload?.kind === "music_render" ? "cancelled" : existing.stage,
     summary: reason,
     cancelledAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
     errors: [...existing.errors, reason]
   });
 }

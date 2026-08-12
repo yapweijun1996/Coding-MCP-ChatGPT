@@ -1,4 +1,4 @@
-import { publicApiRegistry, publicApiToolName } from "../mcp/tools/public-api.js";
+import { toolManifest } from "../mcp/tool-manifest.generated.js";
 
 export type SkillStatus = "stable" | "beta" | "disabled";
 export type SkillRiskLevel = "low" | "medium" | "high";
@@ -15,7 +15,9 @@ export interface SkillDefinition {
   protocolMarkdown: string;
 }
 
-const publicApiToolNames = publicApiRegistry.map((api) => publicApiToolName(api.id));
+const publicApiToolNames = toolManifest
+  .filter((entry) => entry.groupId === "publicApi")
+  .map((entry) => entry.definition.name);
 
 export const skillRegistry: readonly SkillDefinition[] = [
   {
@@ -47,6 +49,8 @@ export const skillRegistry: readonly SkillDefinition[] = [
       "file_info",
       "file_hash",
       "folder_size",
+      "get_my_storage_usage",
+      "purge_project",
       "tail_file",
       "git_status",
       "git_diff",
@@ -171,6 +175,7 @@ export const skillRegistry: readonly SkillDefinition[] = [
       "create_sandbox_profile",
       "prepare_sandbox_workspace",
       "run_sandboxed_command",
+      "promote_sandbox_artifact_to_project",
       "list_sandbox_runs",
       "cleanup_sandbox",
       "export_sandbox_report",
@@ -190,6 +195,7 @@ Use this skill to discover the available workspace/project context before taking
 - Use \`refactor_hints\` when the agent needs advisory signals for oversized or mixed-responsibility files before proposing refactor work.
 - Use \`list_agent_skills\` and \`get_agent_skill\` when the agent needs to know which protocols are available.
 - Use \`report_issue\` to flag any tool error, missing capability, or unclear behavior you hit instead of silently giving up; use \`list_reported_issues\` to check for an existing report before filing a duplicate.
+- Use \`get_my_storage_usage\` before large project operations; \`purge_project\` is disabled by default and requires explicit confirmation because it is irreversible.
 - Keep destructive file, process, and git actions out of this baseline path.`
   },
   {
@@ -288,6 +294,7 @@ Use this skill to discover the available workspace/project context before taking
       "publish_music_audition_demo",
       "extend_music_arrangement",
       "extend_original_music_arrangement",
+      "create_music_production",
       "assemble_original_music_session",
       "assemble_music_session",
       "normalize_music_loudness",
@@ -298,6 +305,8 @@ Use this skill to discover the available workspace/project context before taking
       "process_music_revision_feedback",
       "import_musicxml_score",
       "validate_music_ensemble",
+      "validate_music_constraints",
+      "validate_music_development",
       "edit_midi",
       "render_midi_to_audio",
       "check_music_render_environment",
@@ -331,6 +340,7 @@ Use this skill to discover the available workspace/project context before taking
       "optimize_3d_asset",
       "write_project_file",
       "write_project_asset",
+      "promote_conversation_file_to_project",
       "import_project_asset_from_url",
       "deliver_static_project",
       "create_app_project",
@@ -563,6 +573,7 @@ Use this skill to discover the available workspace/project context before taking
       "create_sandbox_profile",
       "prepare_sandbox_workspace",
       "run_sandboxed_command",
+      "promote_sandbox_artifact_to_project",
       "list_sandbox_runs",
       "cleanup_sandbox",
       "export_sandbox_report",
@@ -727,6 +738,7 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "publish_music_audition_demo",
       "extend_music_arrangement",
       "extend_original_music_arrangement",
+      "create_music_production",
       "assemble_original_music_session",
       "assemble_music_session",
       "normalize_music_loudness",
@@ -737,6 +749,8 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "process_music_revision_feedback",
       "import_musicxml_score",
       "validate_music_ensemble",
+      "validate_music_constraints",
+      "validate_music_development",
       "edit_midi",
       "render_midi_to_audio",
       "check_music_render_environment",
@@ -930,6 +944,7 @@ Use this skill when the user asks the agent to build, edit, validate, or publish
       "create_sandbox_profile",
       "prepare_sandbox_workspace",
       "run_sandboxed_command",
+      "promote_sandbox_artifact_to_project",
       "list_sandbox_runs",
       "cleanup_sandbox",
       "export_sandbox_report",
@@ -1299,6 +1314,7 @@ Use this skill for project-local 3D assets, game scene planning, gameplay QA, an
       "publish_music_audition_demo",
       "extend_music_arrangement",
       "extend_original_music_arrangement",
+      "create_music_production",
       "assemble_original_music_session",
       "assemble_music_session",
       "normalize_music_loudness",
@@ -1324,7 +1340,9 @@ Use this skill for project-local 3D assets, game scene planning, gameplay QA, an
       "audition_music_variations",
       "author_handwritten_music_score",
       "validate_music_audition_distinctness",
-      "validate_music_ensemble"
+      "validate_music_ensemble",
+      "validate_music_constraints",
+      "validate_music_development"
     ],
     protocolMarkdown: `# Music Workflow
 
@@ -1333,6 +1351,8 @@ Use this skill for score-driven MusicXML import, strict handwritten solo piano, 
 - Start with \`create_music_style_brief\` when the user references a venue, brand, artist, or vibe; convert it into broad non-copying musical traits.
 - **Default composition path:** the AI agent must author the score itself as explicit MusicXML first, then call \`import_musicxml_score\` to convert that score into the project composition manifest + MIDI. Do not use generic MIDI composition tools for user-facing music.
 - **Professional / client-ready solo piano:** write explicit RH/LH MusicXML (or use \`author_handwritten_music_score\` when note arrays are already the source of truth), run \`import_musicxml_score\`, run \`validate_music_audition_distinctness\` when producing multiple versions, install/register \`salamander_grand\` with \`install_free_soundfont_pack\`, render with \`render_midi_with_soundfont(soundfontPackId="salamander_grand")\`, then run \`inspect_audio_quality\`. If Salamander is unavailable, fail closed or report the required install steps; do not silently relabel a fallback.
+- For hard solo/ensemble requirements, persist \`instrumentPolicy\` in the composition and run \`validate_music_constraints\` before rendering. Solo piano must have only piano tracks, one non-percussion MIDI channel, no empty/unknown tracks, and no channel 10.
+- For long-form work, run \`validate_music_development\` before rendering to verify source lineage, melodic identity, section coverage, and real variation instead of exact source-window cloning. Use \`create_music_production\` for the one-call arrangement → hard constraints → development QA → optional realistic render/audio QA → revision-ready manifest workflow; submit it through \`run_tool_async\` when rendering long audio.
 - **MusicXML import path:** use \`import_musicxml_score\` for user-provided or agent-authored MusicXML; it writes a composition manifest + MIDI with \`scoreSource.scoreDriven=true\`, \`compositionPlan\`, and \`performance\` already populated so \`inspect_audio_quality\` does not reject it.
 - Use \`import_musicxml_score\` when the user provides MusicXML or wants score-first generation; it writes the normal composition manifest plus standard MIDI, defaults missing tempo/instrument metadata conservatively, and records warnings in the manifest.
 - Use \`validate_music_ensemble\` before publishing duet/ensemble requests to fail closed when a requested instrument is silent, only sequential, or missing meaningful overlap.
@@ -2188,6 +2208,7 @@ Use this skill before relying on databases, APIs, files, calendars, email, stora
       "create_sandbox_profile",
       "prepare_sandbox_workspace",
       "run_sandboxed_command",
+      "promote_sandbox_artifact_to_project",
       "list_sandbox_runs",
       "cleanup_sandbox",
       "export_sandbox_report"
@@ -2197,6 +2218,7 @@ Use this skill before relying on databases, APIs, files, calendars, email, stora
 Use this skill when an agent needs to run code, scripts, builds, data jobs, or experiments without using arbitrary shell execution.
 
 - Use \`create_sandbox_profile\` to define kind, allowed commands, timeout, output limit, artifact limit, and cleanup policy. It is optional — \`prepare_sandbox_workspace\` takes the same profile object inline.
+- Use \`promote_sandbox_artifact_to_project\` to copy a collected live-sandbox binary into project storage with server-side size/SHA-256 verification; never relay MIDI, audio, or SoundFont bytes through Base64 in the model context.
 - Use \`prepare_sandbox_workspace\` to create a dedicated artifact sandbox and write bounded input files.
 - Use \`run_sandboxed_command\` to execute only allowlisted \`node\`, \`python3\`, or constrained \`npm\` commands without a shell.
 

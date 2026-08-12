@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { hasToolModule, toolRegistry } from "./mcp/registry.js";
-import { getEnabledSkillIdsForTool, getSkillIdsForTool, isToolEnabledByAnySkill } from "./skills/state.js";
+import { getEnabledSkillIdsForTool, getSkillIdsForTool, getSkillStateRevision, isToolEnabledByAnySkill } from "./skills/state.js";
 import { atomicWriteSync } from "./shared/atomic-write.js";
 
 export interface ToolStateFile {
@@ -13,6 +13,7 @@ export interface ToolStateFile {
 let statePath = path.join(process.cwd(), ".state", "tool-state.json");
 let loaded = false;
 const enabledTools = new Set<string>();
+let stateRevision = 0;
 
 function defaultEnabledToolNames(): string[] {
   return toolRegistry.filter((tool) => tool.enabledByDefault).map((tool) => tool.definition.name);
@@ -55,6 +56,7 @@ export function initializeToolState(pathname: string): void {
   statePath = pathname;
   loaded = false;
   loadState();
+  stateRevision += 1;
 }
 
 export interface EffectiveToolState {
@@ -80,6 +82,7 @@ export function resetToolStatesForTests(pathname?: string): void {
   for (const tool of toolRegistry) {
     if (tool.enabledByDefault) enabledTools.add(tool.definition.name);
   }
+  stateRevision += 1;
 }
 
 export function setToolEnabled(name: string, enabled: boolean): void {
@@ -88,6 +91,13 @@ export function setToolEnabled(name: string, enabled: boolean): void {
   if (enabled) enabledTools.add(name);
   else enabledTools.delete(name);
   persistState();
+  stateRevision += 1;
+}
+
+export function getEffectiveToolStateRevision(): string {
+  // The skill revision is included because the effective list is an AND of both
+  // catalogs. A string avoids accidental numeric collisions between revisions.
+  return `${stateRevision}:${getSkillStateRevision()}`;
 }
 
 export function listToolStates(): Array<{ name: string; description: string; enabled: boolean }> {

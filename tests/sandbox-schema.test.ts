@@ -110,6 +110,7 @@ const sandboxToolNames = [
   "create_sandbox_profile",
   "prepare_sandbox_workspace",
   "run_sandboxed_command",
+  "promote_sandbox_artifact_to_project",
   "list_sandbox_runs",
   "cleanup_sandbox",
   "export_sandbox_report"

@@ -3,7 +3,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
 import { registerAdminApi } from "./admin-api.js";
-import { closeAllBrowserSessions } from "./mcp/tools/browser.js";
 import { jsonRpcError } from "./http/json-rpc.js";
 import { registerMcpRoutes } from "./http/mcp-routes.js";
 import { registerOAuthRoutes } from "./http/oauth-routes.js";
@@ -16,10 +15,25 @@ import { initializeSkillState } from "./skills/state.js";
 import { initializeTelemetry } from "./telemetry/store.js";
 import { initializeToolState } from "./tool-state.js";
 import { initializeJobStore } from "./jobs/store.js";
+import { pruneJobCache, replaceJobsFromPersistentStore } from "./jobs/store.js";
+import { closeJobDatabase, initializeJobDatabase, isJobDatabaseEnabled, listPersistedJobChanges, listRecentPersistedJobs, prunePersistedJobs } from "./jobs/database.js";
 import { initializeShareStore } from "./share/store.js";
+import { configureStoragePolicy, configureStorageRootProvider } from "./storage/manager.js";
+import { startStorageMonitor } from "./storage/monitor.js";
+import { collectStorageScopes } from "./storage/scopes.js";
 import { getUserByEmail, initializeUserStore } from "./user-store.js";
 
 export const app = express();
+
+const storagePolicy = config.storagePolicy ?? {
+  projectQuotaBytes: 0,
+  userQuotaBytes: 0,
+  globalQuotaBytes: 0,
+  warningThreshold: 0.8,
+  deletedProjectRetentionDays: 7,
+  monitorIntervalMs: 0
+};
+configureStoragePolicy(storagePolicy);
 
 // Surface configuration warnings (e.g. a disabled or production-enabled dev-token bypass)
 // loudly at startup so a misconfigured deployment is visible in the logs.
@@ -32,7 +46,7 @@ initializeSkillState(config.skillStatePath);
 initializeToolState(config.toolStatePath);
 initializeSiteState(config.siteStatePath);
 initializeTelemetry(config.telemetryRoot);
-initializeJobStore(config.jobsRoot, config.jobRetentionDays);
+initializeJobStore("");
 await initializeShareStore(config.shareRoot);
 await initializeBlogStore({ databaseUrl: process.env.DATABASE_URL, statePath: config.blogStatePath });
 await initializeUserStore({
@@ -45,9 +59,59 @@ await initializeUserStore({
   fallbackAdminPasscode: config.adminPasscode,
   sessionTtlMs: 8 * 60 * 60 * 1000
 });
+// The HTTP process keeps a read cache for cheap status endpoints while the separate worker
+// claims and executes durable jobs from Postgres. If Postgres is not configured, the existing
+// file-backed in-process queue remains the local-development fallback.
+if (await initializeJobDatabase(process.env.DATABASE_URL)) {
+  const initialJobs = await listRecentPersistedJobs();
+  let jobsCursor = initialJobs.cursor;
+  let jobsRefreshInFlight: Promise<void> | undefined;
+  replaceJobsFromPersistentStore(initialJobs.jobs);
+  const refreshJobs = async () => {
+    for (let page = 0; page < 5; page += 1) {
+      const changes = await listPersistedJobChanges(jobsCursor);
+      if (!changes.jobs.length) break;
+      replaceJobsFromPersistentStore(changes.jobs);
+      jobsCursor = changes.cursor;
+      if (changes.jobs.length < 1000) break;
+    }
+    pruneJobCache();
+  };
+  const scheduleJobRefresh = () => {
+    if (jobsRefreshInFlight) return;
+    jobsRefreshInFlight = refreshJobs()
+      .catch((error) => console.error("Job queue refresh failed:", error))
+      .finally(() => { jobsRefreshInFlight = undefined; });
+  };
+  setInterval(scheduleJobRefresh, 1000).unref();
+  setInterval(() => void prunePersistedJobs(config.jobRetentionDays).catch((error) => console.error("Job queue retention failed:", error)), 60 * 60 * 1000).unref();
+  void prunePersistedJobs(config.jobRetentionDays).catch((error) => console.error("Job queue retention failed:", error));
+  if (isJobDatabaseEnabled()) console.log("Postgres job queue enabled.");
+} else {
+  initializeJobStore(config.jobsRoot, config.jobRetentionDays);
+}
 const legacyUser = await getUserByEmail("legacy-user@local");
 if (legacyUser) assignUnownedClientsToUser(legacyUser.id);
 
+configureStorageRootProvider(async () => {
+  const scopes = await collectStorageScopes({ projectRoot: config.projectRoot, workspaceRoot: config.workspaceRoot });
+  return [
+    ...scopes.flatMap((scope) => [scope.projectRoot, scope.workspaceRoot]),
+    config.artifactRoot,
+    config.shareRoot,
+    config.telemetryRoot
+  ];
+});
+
+const storageMonitor = startStorageMonitor({
+  policy: storagePolicy,
+  collectScopes: () => collectStorageScopes({ projectRoot: config.projectRoot, workspaceRoot: config.workspaceRoot }),
+  roots: { artifactRoot: config.artifactRoot, shareRoot: config.shareRoot, telemetryRoot: config.telemetryRoot }
+});
+
+// Native ChatGPT file promotion carries a short JSON file reference and downloads the
+// binary server-side. Keep the legacy Base64 JSON ceiling explicit; it is not the native
+// file-transfer path and should not be increased to accommodate large images.
 app.use(express.json({ limit: "40mb" }));
 app.use(express.urlencoded({ extended: false, limit: "64kb" }));
 
@@ -77,7 +141,9 @@ registerAdminApi(app, {
   workspaceRoot: config.workspaceRoot,
   shareRoot: config.shareRoot,
   artifactRoot: config.artifactRoot,
-  feedbackRoot: config.feedbackRoot
+  feedbackRoot: config.feedbackRoot,
+  telemetryRoot: config.telemetryRoot,
+  storagePolicy
 });
 
 app.use("/admin/assets", express.static(path.join(config.adminDistPath, "assets"), {
@@ -150,8 +216,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
     console.log(`Received ${signal}, shutting down gracefully...`);
     server.close(() => console.log("HTTP server closed."));
     try {
+      storageMonitor.stop();
+      const { closeAllBrowserSessions } = await import("./mcp/tools/browser.js");
       const closed = await closeAllBrowserSessions();
       if (closed.length) console.log(`Closed ${closed.length} browser session(s).`);
+      await closeJobDatabase();
     } catch (error) {
       console.error("Error while closing browser sessions:", error);
     }

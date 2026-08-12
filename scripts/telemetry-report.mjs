@@ -42,7 +42,11 @@ if (files.length === 0) {
 const tools = new Map();
 const clients = new Map();
 const protocolVersions = new Map();
+const failureCategories = new Map();
 const focusFailures = [];
+const performanceSamples = Object.fromEntries([
+  "queueWaitMs", "executionMs", "queueDepth", "eventLoopDelayMs", "rssBytes", "toolListCount", "toolListBytes"
+].map((name) => [name, []]));
 let totalCalls = 0;
 let totalFailures = 0;
 
@@ -61,6 +65,9 @@ for (const file of files) {
       continue; // a torn final line during an in-flight write is not worth failing over
     }
     if (event.clientType) bump(clients, event.clientType);
+    for (const [name, samples] of Object.entries(performanceSamples)) {
+      if (typeof event[name] === "number" && Number.isFinite(event[name])) samples.push(event[name]);
+    }
     // protocolVersion is only present on records written after the 2026-07-30 change; older
     // rows are counted as "(unrecorded)" rather than silently dropped, so the report never
     // implies more coverage than it has.
@@ -76,6 +83,7 @@ for (const file of files) {
     if (typeof event.durationMs === "number") entry.durations.push(event.durationMs);
     if (event.ok === false) {
       totalFailures += 1;
+      bump(failureCategories, event.failureCategory ?? "execution");
       entry.failures += 1;
       const message = event.errorMessage || event.summary || "";
       if (!entry.sampleError) entry.sampleError = String(message).slice(0, 200);
@@ -88,6 +96,18 @@ for (const file of files) {
 }
 
 const percentile = (sorted, p) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] : 0);
+const summarizeValues = (samples) => {
+  const sorted = [...samples].sort((a, b) => a - b);
+  const sum = sorted.reduce((total, value) => total + value, 0);
+  return {
+    samples: sorted.length,
+    p50: sorted.length ? percentile(sorted, 0.5) : null,
+    p95: sorted.length ? percentile(sorted, 0.95) : null,
+    p99: sorted.length ? percentile(sorted, 0.99) : null,
+    max: sorted.at(-1) ?? null,
+    avg: sorted.length ? Number((sum / sorted.length).toFixed(3)) : null
+  };
+};
 
 const rows = [...tools.entries()]
   .map(([name, entry]) => {
@@ -99,6 +119,7 @@ const rows = [...tools.entries()]
       failureRate: entry.calls ? entry.failures / entry.calls : 0,
       p50Ms: percentile(sorted, 0.5),
       p95Ms: percentile(sorted, 0.95),
+      p99Ms: percentile(sorted, 0.99),
       sampleError: entry.sampleError
     };
   })
@@ -114,6 +135,8 @@ const report = {
   },
   clients: Object.fromEntries([...clients.entries()].sort((a, b) => b[1] - a[1])),
   protocolVersions: Object.fromEntries([...protocolVersions.entries()].sort((a, b) => b[1] - a[1])),
+  failureCategories: Object.fromEntries([...failureCategories.entries()].sort((a, b) => b[1] - a[1])),
+  performance: Object.fromEntries(Object.entries(performanceSamples).map(([name, samples]) => [name, summarizeValues(samples)])),
   tools: rows
 };
 
@@ -145,6 +168,15 @@ console.log(`  ${"fails".padStart(6)} ${"calls".padStart(6)} ${"rate".padStart(6
 for (const row of rows.filter((r) => r.failures > 0).slice(0, 25)) {
   console.log(`  ${String(row.failures).padStart(6)} ${String(row.calls).padStart(6)} ${pct(row.failureRate).padStart(6)}  ${row.tool}`);
   if (row.sampleError) console.log(`         ↳ ${row.sampleError}`);
+}
+
+console.log("\nFailure categories:");
+for (const [name, count] of Object.entries(report.failureCategories)) console.log(`  ${String(count).padStart(6)}  ${name}`);
+
+console.log("\nRuntime and queue metrics:");
+for (const [name, metric] of Object.entries(report.performance)) {
+  if (!metric.samples) continue;
+  console.log(`  ${name.padEnd(18)} p50=${metric.p50}  p95=${metric.p95}  p99=${metric.p99}  max=${metric.max}  n=${metric.samples}`);
 }
 
 console.log("\nSlowest tools (p95, calls >= 5):");

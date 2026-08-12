@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getToolModule } from "../src/mcp/registry.js";
+import { loadToolModule } from "../src/mcp/registry.js";
 import { skillRegistry } from "../src/skills/registry.js";
 
-test("inspect_network_conditions is registered with offline and weak-network defaults", () => {
-  const tool = getToolModule("inspect_network_conditions");
+test("inspect_network_conditions is registered with offline and weak-network defaults", async () => {
+  const tool = await loadToolModule("inspect_network_conditions");
   assert.ok(tool, "inspect_network_conditions registered");
   const parsed = tool!.schema!.parse({ url: "https://example.com/" }) as {
     scenarios: string[];

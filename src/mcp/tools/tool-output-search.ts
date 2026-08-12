@@ -72,7 +72,13 @@ interface SearchIndex {
 }
 
 function storagePath(feedbackRoot: string, relativePath: string): string {
-  return path.join(feedbackRoot, relativePath);
+  const resolvedRoot = path.resolve(feedbackRoot);
+  const resolvedPath = path.resolve(resolvedRoot, relativePath);
+  const relativeToRoot = path.relative(resolvedRoot, resolvedPath);
+  if (!relativeToRoot || relativeToRoot === ".." || relativeToRoot.startsWith(`..${path.sep}`) || path.isAbsolute(relativeToRoot)) {
+    throw new Error("Tool output search paths must stay inside feedbackRoot.");
+  }
+  return resolvedPath;
 }
 
 function slug(input: string): string {
@@ -126,13 +132,14 @@ async function readIndex(feedbackRoot: string, indexPath: string): Promise<Searc
 }
 
 async function writeIndex(feedbackRoot: string, indexPath: string, records: IndexRecord[]): Promise<SearchIndex> {
-  await mkdir(feedbackRoot, { recursive: true });
+  const output = storagePath(feedbackRoot, indexPath);
+  await mkdir(path.dirname(output), { recursive: true });
   const payload: SearchIndex = {
     version: 1,
     updatedAt: new Date().toISOString(),
     records: [...new Map(records.map((record) => [record.id, record])).values()].sort((left, right) => (right.createdAt ?? "").localeCompare(left.createdAt ?? ""))
   };
-  await atomicWrite(storagePath(feedbackRoot, indexPath), `${JSON.stringify(payload, null, 2)}\n`);
+  await atomicWrite(output, `${JSON.stringify(payload, null, 2)}\n`);
   return payload;
 }
 

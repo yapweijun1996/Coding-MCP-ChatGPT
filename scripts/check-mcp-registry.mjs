@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
-import { toolRegistry, toolDefinitions } from "../dist/mcp/registry.js";
+import { getToolGroupRuntimeStates, toolRegistry, toolDefinitions } from "../dist/mcp/registry.js";
+import { heavyToolGroupIds, hotToolGroupIds } from "../dist/mcp/tools/index.js";
 import { skillRegistry } from "../dist/skills/registry.js";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -7,6 +8,7 @@ const packageScripts = packageJson.scripts ?? {};
 const names = toolDefinitions.map((tool) => tool.name);
 const duplicateNames = names.filter((name, index) => names.indexOf(name) !== index);
 const moduleNames = toolRegistry.map((tool) => tool.definition.name);
+const runtimeStates = getToolGroupRuntimeStates();
 const criticalTools = [
   "ping",
   "list_agent_skills",
@@ -54,6 +56,7 @@ const defaultEnabledTools = [
 ];
 const defaultDisabledTools = [
   "delete_project",
+  "purge_project",
   "create_share",
   "check_url",
   "open_local_server",
@@ -83,6 +86,18 @@ if (duplicateNames.length > 0) {
 
 if (moduleNames.length !== names.length) {
   errors.push(`Registry/module count mismatch: modules=${moduleNames.length}, definitions=${names.length}`);
+}
+
+for (const groupId of hotToolGroupIds) {
+  if (runtimeStates[groupId]?.status !== "loaded") {
+    errors.push(`Expected hot tool group ${groupId} to be loaded, got ${runtimeStates[groupId]?.status ?? "missing"}`);
+  }
+}
+
+for (const groupId of heavyToolGroupIds) {
+  if (runtimeStates[groupId]?.status !== "unloaded") {
+    errors.push(`Heavy tool group ${groupId} loaded during registry discovery (${runtimeStates[groupId]?.status ?? "missing"})`);
+  }
 }
 
 for (const toolName of criticalTools) {
@@ -167,6 +182,8 @@ const summary = {
   toolCount: names.length,
   skillCount: skillRegistry.length,
   duplicateCount: duplicateNames.length,
+  hotGroupCount: hotToolGroupIds.length,
+  verifiedColdGroups: heavyToolGroupIds,
   defaultEnabledTools,
   defaultDisabledTools,
   criticalTools

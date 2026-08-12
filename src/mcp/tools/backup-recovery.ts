@@ -15,6 +15,7 @@ import {
 } from "../../projects/store.js";
 import type { ProjectManifest } from "../../projects/store.js";
 import type { ToolModule } from "../types.js";
+import { withGlobalStorageQuota } from "../../storage/manager.js";
 
 const backupIdSchema = z.string().regex(/^backup_[a-zA-Z0-9_-]{1,80}$/);
 
@@ -217,33 +218,37 @@ export const backupRecoveryTools: ToolModule[] = [
       const project = await getProjectManifest(ctx.projectRoot, parsed.projectId);
       const id = parsed.backupId ?? createBackupId(parsed.projectId);
       const root = backupRoot(ctx.artifactRoot, id);
-      await mkdir(backupFilesRoot(root), { recursive: true });
       const files = selectFiles(project, parsed.includeFiles);
-      for (const file of files) {
-        const source = await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, file.path);
-        const target = resolveBackupFile(root, file.path);
-        await mkdir(path.dirname(target), { recursive: true });
-        await cp(source, target);
-        const fileStat = await stat(target);
-        file.size = fileStat.size;
-        file.sha256 = await sha256File(target);
-        file.contentType = getProjectFileContentType(file.path);
-      }
-      const manifest: BackupManifest = {
-        version: 1,
-        backupId: id,
-        projectId: parsed.projectId,
-        label: parsed.label,
-        reason: parsed.reason,
-        entryFile: project.entryFile,
-        projectStatus: project.metadata.status,
-        publishedUrl: project.publishedUrl,
-        createdAt: new Date().toISOString(),
-        fileCount: files.length,
-        totalBytes: files.reduce((sum, file) => sum + file.size, 0),
-        files
-      };
-      await writeBackupManifest(root, manifest);
+      const estimatedBytes = files.reduce((sum, file) => sum + file.size, 0) + 512 * 1024;
+      const manifest = await withGlobalStorageQuota({ root: ctx.artifactRoot, additionalBytes: estimatedBytes }, async () => {
+        await mkdir(backupFilesRoot(root), { recursive: true });
+        for (const file of files) {
+          const source = await getProjectStoredFilePath(ctx.projectRoot, parsed.projectId, file.path);
+          const target = resolveBackupFile(root, file.path);
+          await mkdir(path.dirname(target), { recursive: true });
+          await cp(source, target);
+          const fileStat = await stat(target);
+          file.size = fileStat.size;
+          file.sha256 = await sha256File(target);
+          file.contentType = getProjectFileContentType(file.path);
+        }
+        const backupManifest: BackupManifest = {
+          version: 1,
+          backupId: id,
+          projectId: parsed.projectId,
+          label: parsed.label,
+          reason: parsed.reason,
+          entryFile: project.entryFile,
+          projectStatus: project.metadata.status,
+          publishedUrl: project.publishedUrl,
+          createdAt: new Date().toISOString(),
+          fileCount: files.length,
+          totalBytes: files.reduce((sum, file) => sum + file.size, 0),
+          files
+        };
+        await writeBackupManifest(root, backupManifest);
+        return backupManifest;
+      });
       return { ok: true, summary: `Created backup ${id} with ${files.length} file(s).`, jobId: parsed.projectId, artifacts: [root, backupManifestPath(root)], structuredContent: { backup: manifest }, logs: [JSON.stringify(manifest, null, 2)], errors: [] };
     }
   },
@@ -377,7 +382,10 @@ export const backupRecoveryTools: ToolModule[] = [
       };
       const target = path.join(root, safeArchivePath(parsed.outputPath));
       await mkdir(path.dirname(target), { recursive: true });
-      await atomicWrite(target, `${JSON.stringify(archive, null, 2)}\n`);
+      const content = `${JSON.stringify(archive, null, 2)}\n`;
+      await withGlobalStorageQuota({ root: ctx.artifactRoot, additionalBytes: Buffer.byteLength(content, "utf8") }, async () => {
+        await atomicWrite(target, content);
+      });
       return { ok: true, summary: `Exported backup archive for ${parsed.backupId}.`, artifacts: [target], structuredContent: { path: target, fileCount: manifest.fileCount }, logs: [JSON.stringify({ path: target, fileCount: manifest.fileCount }, null, 2)], errors: [] };
     }
   }

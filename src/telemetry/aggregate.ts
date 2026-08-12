@@ -8,6 +8,7 @@ export interface TelemetryMetric {
   errorRate: number; // 0..1
   p50Ms: number | null;
   p95Ms: number | null;
+  p99Ms: number | null;
   maxMs: number | null;
   avgMs: number | null;
 }
@@ -20,6 +21,25 @@ export interface TelemetryErrorSample {
   errorMessage?: string;
 }
 
+export interface TelemetryValueSummary {
+  samples: number;
+  p50: number | null;
+  p95: number | null;
+  p99: number | null;
+  max: number | null;
+  avg: number | null;
+}
+
+export interface TelemetryPerformanceSummary {
+  queueWaitMs: TelemetryValueSummary;
+  executionMs: TelemetryValueSummary;
+  queueDepth: TelemetryValueSummary;
+  eventLoopDelayMs: TelemetryValueSummary;
+  rssBytes: TelemetryValueSummary;
+  toolListCount: TelemetryValueSummary;
+  toolListBytes: TelemetryValueSummary;
+}
+
 export interface TelemetrySummary {
   windowDays: number;
   from: string;
@@ -29,6 +49,8 @@ export interface TelemetrySummary {
   errorRate: number;
   byTool: TelemetryMetric[];
   byClient: TelemetryMetric[];
+  byFailureCategory: TelemetryMetric[];
+  performance: TelemetryPerformanceSummary;
   recentErrors: TelemetryErrorSample[];
 }
 
@@ -64,6 +86,7 @@ function metricsByKey(calls: TelemetryEvent[], keyOf: (event: TelemetryEvent) =>
       errorRate: events.length === 0 ? 0 : errors / events.length,
       p50Ms: percentile(durations, 50),
       p95Ms: percentile(durations, 95),
+      p99Ms: percentile(durations, 99),
       maxMs: durations.length ? durations[durations.length - 1] : null,
       avgMs: durations.length ? Math.round(sum / durations.length) : null
     });
@@ -71,6 +94,22 @@ function metricsByKey(calls: TelemetryEvent[], keyOf: (event: TelemetryEvent) =>
   // Most problematic first: highest error count, then highest call volume.
   metrics.sort((a, b) => b.errors - a.errors || b.calls - a.calls);
   return metrics;
+}
+
+function summarizeValues(events: TelemetryEvent[], valueOf: (event: TelemetryEvent) => number | undefined): TelemetryValueSummary {
+  const values = events
+    .map(valueOf)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+    .sort((a, b) => a - b);
+  const sum = values.reduce((total, value) => total + value, 0);
+  return {
+    samples: values.length,
+    p50: percentile(values, 50),
+    p95: percentile(values, 95),
+    p99: percentile(values, 99),
+    max: values.length ? values[values.length - 1] : null,
+    avg: values.length ? Math.round((sum / values.length) * 1000) / 1000 : null
+  };
 }
 
 // Pure aggregation over an event set — no I/O, no clock. Tests drive this directly.
@@ -94,6 +133,16 @@ export function aggregateEvents(events: TelemetryEvent[]): Omit<TelemetrySummary
     errorRate: calls.length === 0 ? 0 : totalErrors / calls.length,
     byTool: metricsByKey(calls, (event) => event.toolName),
     byClient: metricsByKey(calls, (event) => event.clientType ?? "unknown"),
+    byFailureCategory: metricsByKey(calls.filter((event) => !event.ok), (event) => event.failureCategory ?? "execution"),
+    performance: {
+      queueWaitMs: summarizeValues(events, (event) => event.queueWaitMs),
+      executionMs: summarizeValues(events, (event) => event.executionMs),
+      queueDepth: summarizeValues(events, (event) => event.queueDepth),
+      eventLoopDelayMs: summarizeValues(events, (event) => event.eventLoopDelayMs),
+      rssBytes: summarizeValues(events, (event) => event.rssBytes),
+      toolListCount: summarizeValues(events, (event) => event.toolListCount),
+      toolListBytes: summarizeValues(events, (event) => event.toolListBytes)
+    },
     recentErrors
   };
 }

@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { StoragePolicy } from "../storage/manager.js";
 
 export interface ToolResult {
   ok: boolean;
@@ -16,6 +17,11 @@ export interface ToolDefinition {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** Host-specific descriptor metadata, e.g. ChatGPT Apps SDK file parameters. */
+  _meta?: Record<string, unknown>;
+  /** MCP tool annotations such as readOnlyHint/openWorldHint/destructiveHint. */
+  annotations?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
 }
 
 export interface ToolContext {
@@ -30,6 +36,13 @@ export interface ToolContext {
   clientId: string;
   userId?: string;
   publicShareBasePath?: string;
+  storagePolicy?: StoragePolicy;
+  conversationFileMaxBytes?: number;
+  fileTransferTimeoutMs?: number;
+  /** Host-owned cancellation for queued jobs; tool inputs can never set this. */
+  abortSignal?: AbortSignal;
+  /** Test/embedding seam for a trusted connector-file resolver; never populated from tool input. */
+  conversationFileResolver?: unknown;
 }
 
 export interface ToolModule {

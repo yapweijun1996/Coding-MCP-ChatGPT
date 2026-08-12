@@ -9,7 +9,11 @@ const sensitiveExactKeys = new Set([
   "clientsecret",
   "authorization",
   "cookie",
-  "secret"
+  "secret",
+  // ChatGPT connector file references contain short-lived signed URLs and opaque IDs.
+  // They must not be copied into activity or telemetry previews.
+  "downloadurl",
+  "fileid"
 ]);
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

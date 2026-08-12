@@ -312,6 +312,103 @@ export function assertPcmWav(buffer: Buffer, label: string): PcmWavInfo {
   return parsed.info;
 }
 
+export type WavSilenceGap = { startSeconds: number; durationSeconds: number };
+
+/**
+ * Return silence gaps that overlap the intended programme by at least one second.
+ *
+ * `wavAnalysis` deliberately keeps every measured gap in `technicalReport`. Renderers
+ * commonly append a release tail or codec-alignment padding after a non-looping piece's
+ * declared duration, however, and that tail is not an arrangement defect. Loopable audio
+ * keeps the stricter rule because silence at the end becomes an audible loop seam.
+ */
+export function actionableSilenceGaps(
+  gaps: readonly WavSilenceGap[],
+  options: { declaredDurationSeconds?: number; loopable: boolean }
+) {
+  if (options.loopable || !Number.isFinite(options.declaredDurationSeconds)) return [...gaps];
+  const declaredDurationSeconds = Math.max(0, options.declaredDurationSeconds ?? 0);
+  return gaps.filter((gap) => {
+    const interiorEnd = Math.min(gap.startSeconds + gap.durationSeconds, declaredDurationSeconds);
+    return interiorEnd - gap.startSeconds >= 1;
+  });
+}
+
+type NoiseFloorEstimate = {
+  rms: number;
+  candidateBlockCount: number;
+  noiseLikeBlockRatio: number;
+  relativeSpread: number;
+  medianZeroCrossingRatio: number;
+  medianNormalizedDifference: number;
+  detected: boolean;
+};
+
+const noiseFloorThresholds = {
+  lowerEnvelopeFraction: 0.25,
+  minimumCandidateBlocks: 4,
+  maximumRelativeSpread: 0.35,
+  minimumNoiseLikeBlockRatio: 0.60,
+  minimumZeroCrossingRatio: 0.12,
+  minimumNormalizedDifference: 0.45
+} as const;
+
+function percentile(sorted: readonly number[], fraction: number) {
+  if (!sorted.length) return 0;
+  const index = Math.max(0, Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * fraction)));
+  return sorted[index];
+}
+
+/**
+ * Estimate a persistent broadband floor from stable, low-energy, noise-textured blocks.
+ * A low RMS percentile alone is not a noise estimate: in expressive music it mostly
+ * selects quiet notes and decays. The estimator therefore requires the lower envelope
+ * to be both level-stable and dominated by high zero-crossing/sample-difference texture.
+ */
+function estimateNoiseFloor(
+  blockRms: readonly number[],
+  blockZeroCrossingRatio: readonly number[],
+  blockNormalizedDifference: readonly number[]
+): NoiseFloorEstimate {
+  const audibleIndexes = blockRms
+    .map((rms, index) => ({ rms, index }))
+    .filter(({ rms }) => rms >= 0.002);
+  const sortedAudibleRms = audibleIndexes.map(({ rms }) => rms).sort((a, b) => a - b);
+  if (sortedAudibleRms.length < 4) {
+    return { rms: 0, candidateBlockCount: sortedAudibleRms.length, noiseLikeBlockRatio: 0, relativeSpread: 0, medianZeroCrossingRatio: 0, medianNormalizedDifference: 0, detected: false };
+  }
+
+  const lowerEnvelopeLimit = percentile(sortedAudibleRms, noiseFloorThresholds.lowerEnvelopeFraction);
+  const candidates = audibleIndexes.filter(({ rms }) => rms <= lowerEnvelopeLimit);
+  const candidateRms = candidates.map(({ rms }) => rms).sort((a, b) => a - b);
+  const medianRms = percentile(candidateRms, 0.5);
+  const lowerQuartileRms = percentile(candidateRms, 0.25);
+  const upperQuartileRms = percentile(candidateRms, 0.75);
+  const relativeSpread = medianRms > 0 ? (upperQuartileRms - lowerQuartileRms) / medianRms : Number.POSITIVE_INFINITY;
+  const candidateZeroCrossingRatios = candidates.map(({ index }) => blockZeroCrossingRatio[index] ?? 0).sort((a, b) => a - b);
+  const candidateNormalizedDifferences = candidates.map(({ index }) => blockNormalizedDifference[index] ?? 0).sort((a, b) => a - b);
+  const medianZeroCrossingRatio = percentile(candidateZeroCrossingRatios, 0.5);
+  const medianNormalizedDifference = percentile(candidateNormalizedDifferences, 0.5);
+  const noiseLikeBlocks = candidates.filter(({ index }) =>
+    (blockZeroCrossingRatio[index] ?? 0) >= noiseFloorThresholds.minimumZeroCrossingRatio &&
+    (blockNormalizedDifference[index] ?? 0) >= noiseFloorThresholds.minimumNormalizedDifference
+  ).length;
+  const noiseLikeBlockRatio = noiseLikeBlocks / Math.max(1, candidates.length);
+  const detected =
+    candidates.length >= noiseFloorThresholds.minimumCandidateBlocks &&
+    relativeSpread <= noiseFloorThresholds.maximumRelativeSpread &&
+    noiseLikeBlockRatio >= noiseFloorThresholds.minimumNoiseLikeBlockRatio;
+  return {
+    rms: detected ? medianRms : 0,
+    candidateBlockCount: candidates.length,
+    noiseLikeBlockRatio,
+    relativeSpread: Number.isFinite(relativeSpread) ? relativeSpread : 0,
+    medianZeroCrossingRatio,
+    medianNormalizedDifference,
+    detected
+  };
+}
+
 export function wavAnalysis(buffer?: Buffer) {
   const parsed = parsePcmWav(buffer);
   if (!parsed.ok) {
@@ -330,6 +427,7 @@ export function wavAnalysis(buffer?: Buffer) {
       dynamicRange: 0,
       crestFactor: 0,
       noiseFloorRms: 0,
+      noiseFloorEstimate: { method: "stable_low_energy_noise_blocks", thresholds: noiseFloorThresholds, candidateBlockCount: 0, noiseLikeBlockRatio: 0, relativeSpread: 0, medianZeroCrossingRatio: 0, medianNormalizedDifference: 0, detected: false },
       silenceRatio: 1,
       noiseLikeFlatnessProxy: 0,
       silenceGaps: [] as Array<{ startSeconds: number; durationSeconds: number }>,
@@ -352,8 +450,13 @@ export function wavAnalysis(buffer?: Buffer) {
   let bassSum = 0;
   const blockSize = Math.max(1, Math.floor(sampleRate * 0.5));
   const blockRms: number[] = [];
+  const blockZeroCrossingRatio: number[] = [];
+  const blockNormalizedDifference: number[] = [];
   let blockSum = 0;
   let blockCount = 0;
+  let blockZeroCrossings = 0;
+  let blockDifferenceSum = 0;
+  let previousMono = 0;
   for (let frame = 0; frame < frameCount; frame += 1) {
     let mono = 0;
     for (let channel = 0; channel < channelCount; channel += 1) {
@@ -365,24 +468,43 @@ export function wavAnalysis(buffer?: Buffer) {
     samples.push(mono);
     peak = Math.max(peak, Math.abs(mono));
     rmsSum += mono * mono;
-    if (frame > 0) highDiffSum += Math.abs(mono - samples[frame - 1]);
+    if (frame > 0) {
+      const difference = Math.abs(mono - previousMono);
+      highDiffSum += difference;
+      blockDifferenceSum += difference;
+      if ((mono >= 0) !== (previousMono >= 0)) blockZeroCrossings += 1;
+    }
+    previousMono = mono;
     lowPass = lowPass * 0.995 + mono * 0.005;
     bassSum += Math.abs(lowPass);
     blockSum += mono * mono;
     blockCount += 1;
     if (blockCount >= blockSize) {
-      blockRms.push(Math.sqrt(blockSum / blockCount));
+      const rms = Math.sqrt(blockSum / blockCount);
+      blockRms.push(rms);
+      blockZeroCrossingRatio.push(blockZeroCrossings / Math.max(1, blockCount - 1));
+      blockNormalizedDifference.push(rms > 0 ? blockDifferenceSum / Math.max(1, blockCount - 1) / rms : 0);
       blockSum = 0;
       blockCount = 0;
+      blockZeroCrossings = 0;
+      blockDifferenceSum = 0;
     }
   }
-  if (blockCount) blockRms.push(Math.sqrt(blockSum / blockCount));
+  if (blockCount) {
+    const rms = Math.sqrt(blockSum / blockCount);
+    blockRms.push(rms);
+    blockZeroCrossingRatio.push(blockZeroCrossings / Math.max(1, blockCount - 1));
+    blockNormalizedDifference.push(rms > 0 ? blockDifferenceSum / Math.max(1, blockCount - 1) / rms : 0);
+  }
   const rms = Math.sqrt(rmsSum / Math.max(1, frameCount));
   const sortedBlocks = [...blockRms].sort((a, b) => a - b);
-  const noiseFloorRms = sortedBlocks.length ? sortedBlocks[Math.floor(sortedBlocks.length * 0.1)] : 0;
+  const audibleSortedBlocks = sortedBlocks.filter((value) => value >= 0.002);
+  const quietSignalRms = percentile(audibleSortedBlocks, 0.1);
+  const noiseFloorEstimate = estimateNoiseFloor(blockRms, blockZeroCrossingRatio, blockNormalizedDifference);
+  const noiseFloorRms = noiseFloorEstimate.rms;
   const loudestBlock = sortedBlocks[sortedBlocks.length - 1] ?? 0;
-  const dynamicRange = loudestBlock && noiseFloorRms ? 20 * Math.log10(loudestBlock / Math.max(0.000001, noiseFloorRms)) : 0;
-  const silenceGaps = [];
+  const dynamicRange = loudestBlock && quietSignalRms ? 20 * Math.log10(loudestBlock / Math.max(0.000001, quietSignalRms)) : 0;
+  const silenceGaps: WavSilenceGap[] = [];
   let silentBlocks = 0;
   let silenceStart: number | undefined;
   for (let index = 0; index < blockRms.length; index += 1) {
@@ -417,6 +539,16 @@ export function wavAnalysis(buffer?: Buffer) {
     dynamicRange: Number(dynamicRange.toFixed(2)),
     crestFactor: Number((peak / Math.max(0.000001, rms)).toFixed(2)),
     noiseFloorRms: Number(noiseFloorRms.toFixed(5)),
+    noiseFloorEstimate: {
+      method: "stable_low_energy_noise_blocks",
+      thresholds: noiseFloorThresholds,
+      candidateBlockCount: noiseFloorEstimate.candidateBlockCount,
+      noiseLikeBlockRatio: Number(noiseFloorEstimate.noiseLikeBlockRatio.toFixed(3)),
+      relativeSpread: Number(noiseFloorEstimate.relativeSpread.toFixed(3)),
+      medianZeroCrossingRatio: Number(noiseFloorEstimate.medianZeroCrossingRatio.toFixed(3)),
+      medianNormalizedDifference: Number(noiseFloorEstimate.medianNormalizedDifference.toFixed(3)),
+      detected: noiseFloorEstimate.detected
+    },
     silenceRatio: Number((silentBlocks / Math.max(1, blockRms.length)).toFixed(3)),
     noiseLikeFlatnessProxy: Number(noiseLikeFlatnessProxy.toFixed(3)),
     silenceGaps,

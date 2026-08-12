@@ -4,7 +4,6 @@ import type { ServerConfig } from "../config.js";
 import { toolDefinitions } from "../mcp/registry.js";
 import { callTool } from "../mcp/router.js";
 import type { ToolResult } from "../mcp/types.js";
-import { closeVisibleBrowserSessions } from "../mcp/tools/browser.js";
 import {
   getClientIdForAccessToken,
   getUserIdForAccessToken,
@@ -12,7 +11,7 @@ import {
   recordClientUse
 } from "../oauth.js";
 import { consumeVisibleBrowserExpiredCleanup } from "../special-tools.js";
-import { getToolAccess, isToolEffectivelyEnabled, listEffectiveToolStates } from "../tool-state.js";
+import { getEffectiveToolStateRevision, getToolAccess, isToolEffectivelyEnabled, listEffectiveToolStates } from "../tool-state.js";
 import {
   getProjectRootForUser,
   getWorkspaceRootForUser,
@@ -39,6 +38,27 @@ const clientTypeById = new Map<string, string>();
 const protocolVersionById = new Map<string, string>();
 const maxArgsPreviewChars = 4000;
 const mcpRateLimitBuckets = new Map<string, { tokens: number; updatedAt: number }>();
+
+interface EnabledToolCatalog {
+  revision: string;
+  definitions: typeof toolDefinitions;
+  serializedBytes: number;
+}
+
+let cachedEnabledToolDefinitions: EnabledToolCatalog | undefined;
+
+function enabledToolCatalog(): EnabledToolCatalog {
+  const revision = getEffectiveToolStateRevision();
+  if (cachedEnabledToolDefinitions?.revision === revision) return cachedEnabledToolDefinitions;
+  const enabledToolNames = new Set(listEffectiveToolStates().filter((tool) => tool.enabled).map((tool) => tool.name));
+  const definitions = toolDefinitions.filter((tool) => enabledToolNames.has(tool.name));
+  cachedEnabledToolDefinitions = {
+    revision,
+    definitions,
+    serializedBytes: Buffer.byteLength(JSON.stringify(definitions), "utf8")
+  };
+  return cachedEnabledToolDefinitions;
+}
 
 // Bounded preview of tool arguments for telemetry: returns the byte size of the full input
 // plus a preview that is truncated so a large payload (e.g. a base64 asset upload) can never
@@ -117,6 +137,7 @@ function resultToMcpContent(result: ToolResult): Record<string, unknown> {
 
 async function cleanupExpiredVisibleBrowserControl(): Promise<void> {
   if (!consumeVisibleBrowserExpiredCleanup()) return;
+  const { closeVisibleBrowserSessions } = await import("../mcp/tools/browser.js");
   // Only headed sessions. The control governs having a real window open on the server's
   // display, not browser automation as such — headless sessions are ordinary tool work and
   // must survive expiry.
@@ -131,7 +152,7 @@ async function cleanupExpiredVisibleBrowserControl(): Promise<void> {
 }
 
 export function registerMcpRoutes(app: express.Express, config: ServerConfig): void {
-  const { publicBaseUrl, contentBaseUrl, projectRoot, workspaceRoot, shareRoot, artifactRoot, feedbackRoot, commandTimeoutMs, devToken, mcpRateLimit } = config;
+  const { publicBaseUrl, contentBaseUrl, projectRoot, workspaceRoot, shareRoot, artifactRoot, feedbackRoot, commandTimeoutMs, devToken, mcpRateLimit, storagePolicy, conversationFileMaxBytes, fileTransferTimeoutMs } = config;
 
   function unauthorized(res: express.Response): undefined {
     res
@@ -260,9 +281,20 @@ export function registerMcpRoutes(app: express.Express, config: ServerConfig): v
     }
 
     if (request.method === "tools/list") {
-      recordActivity({ userId, clientId, protocolVersion: protocolVersionById.get(clientId), method: request.method, ok: true, summary: "Listed tools." });
-      const enabledToolNames = new Set(listEffectiveToolStates().filter((tool) => tool.enabled).map((tool) => tool.name));
-      res.json(jsonRpcResult(request.id, { tools: toolDefinitions.filter((tool) => enabledToolNames.has(tool.name)) }));
+      const startedAt = Date.now();
+      const catalog = enabledToolCatalog();
+      recordActivity({
+        userId,
+        clientId,
+        protocolVersion: protocolVersionById.get(clientId),
+        method: request.method,
+        ok: true,
+        summary: "Listed tools.",
+        durationMs: Date.now() - startedAt,
+        toolListCount: catalog.definitions.length,
+        toolListBytes: catalog.serializedBytes
+      });
+      res.json(jsonRpcResult(request.id, { tools: catalog.definitions }));
       return;
     }
 
@@ -288,7 +320,7 @@ export function registerMcpRoutes(app: express.Express, config: ServerConfig): v
       const { inputBytes, preview } = previewArgs(toolArgs);
       const startedAt = Date.now();
       try {
-        const result = await callTool(name, toolArgs, {
+        const toolContext = {
           publicBaseUrl,
           contentBaseUrl,
           workspaceRoot: auth.workspaceRoot,
@@ -299,8 +331,18 @@ export function registerMcpRoutes(app: express.Express, config: ServerConfig): v
           projectRoot: auth.projectRoot,
           clientId,
           userId,
-          publicShareBasePath: auth.publicShareBasePath
-        });
+          publicShareBasePath: auth.publicShareBasePath,
+          storagePolicy,
+          conversationFileMaxBytes,
+          fileTransferTimeoutMs
+        };
+        // Direct calls to expensive tools are transparently queued. The public tool name
+        // and arguments stay unchanged; clients get a normal ToolResult with a jobId instead
+        // of holding a Cloudflare/connector HTTP request open for minutes.
+        const { enqueueToolAsync, isAsyncEligibleTool } = await import("../mcp/tools/async-jobs.js");
+        const result = isAsyncEligibleTool(name)
+          ? await enqueueToolAsync({ name, arguments: toolArgs }, toolContext)
+          : await callTool(name, toolArgs, toolContext);
         recordActivity({
           userId,
           clientId,

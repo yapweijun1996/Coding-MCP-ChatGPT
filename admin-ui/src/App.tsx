@@ -10,12 +10,14 @@ import {
   Eye,
   FileCode2,
   Gauge,
+  HardDrive,
   Home,
   Inbox,
   KeyRound,
   LogOut,
   Menu,
   RotateCcw,
+  RefreshCw,
   Search,
   Settings,
   Users,
@@ -47,12 +49,14 @@ import type {
   ProjectSummary,
   SettingsResult,
   SkillState,
+  StorageQuotaStatus,
+  StorageResult,
   SpecialToolState,
   ToolState,
   ValidationStatus
 } from "./types";
 
-type Route = "overview" | "projects" | "blog" | "project-detail" | "tools" | "connectors" | "activity" | "observability" | "feedback" | "users" | "settings" | "login" | "register";
+type Route = "overview" | "projects" | "blog" | "project-detail" | "tools" | "connectors" | "activity" | "observability" | "feedback" | "users" | "settings" | "storage" | "login" | "register";
 type Toast = { id: number; tone: "success" | "error"; message: string };
 type MutableProjectStatus = Exclude<ProjectStatus, "deleted">;
 type ConfirmState = {
@@ -65,6 +69,7 @@ type ConfirmState = {
 
 const navItems: Array<{ route: Route; href: string; label: string; icon: ReactNode }> = [
   { route: "overview", href: "/admin", label: "Overview", icon: <Activity size={18} /> },
+  { route: "storage", href: "/admin/storage", label: "Storage", icon: <HardDrive size={18} /> },
   { route: "projects", href: "/admin/projects", label: "Projects", icon: <Archive size={18} /> },
   { route: "blog", href: "/admin/blog", label: "Blog", icon: <FileCode2 size={18} /> },
   { route: "tools", href: "/admin/tools", label: "Tools & Skills", icon: <Wrench size={18} /> },
@@ -80,6 +85,7 @@ function currentRoute(): { route: Route; projectId?: string } {
   const path = window.location.pathname.replace(/\/+$/, "") || "/admin";
   if (path === "/admin/login") return { route: "login" };
   if (path === "/admin/register") return { route: "register" };
+  if (path === "/admin/storage") return { route: "storage" };
   if (path === "/admin/projects") return { route: "projects" };
   if (path === "/admin/blog") return { route: "blog" };
   const projectMatch = /^\/admin\/projects\/([^/]+)$/.exec(path);
@@ -112,19 +118,19 @@ function validationStatus(project: ProjectSummary): ValidationStatus {
 
 function badgeClass(value: string): string {
   if (["published", "valid", "ok", "enabled", "low", "anyone_with_link"].includes(value)) return "badge good";
-  if (["warnings", "private", "medium", "draft", "not_checked"].includes(value)) return "badge warn";
-  if (["failed", "deleted", "fail", "high", "disabled"].includes(value)) return "badge bad";
+  if (["warnings", "warning", "private", "medium", "draft", "not_checked"].includes(value)) return "badge warn";
+  if (["failed", "deleted", "fail", "high", "disabled", "over_quota"].includes(value)) return "badge bad";
   return "badge neutral";
 }
 
 const projectStatusActions: Array<{ status: MutableProjectStatus; label: string; confirmLabel: string; body: (title: string) => string; tone?: "danger" | "primary" }> = [
-  { status: "published", label: "Publish", confirmLabel: "Publish", tone: "primary", body: (title) => `Publish ${title}. Preview links stay private unless sharing is set to anyone with the link.` },
+  { status: "published", label: "Publish", confirmLabel: "Publish", tone: "primary", body: (title) => `Publish ${title}. New projects are public to anyone with the link by default; use Sharing to make this project private.` },
   { status: "private", label: "Make private", confirmLabel: "Make private", body: (title) => `Make ${title} private. Public preview access will be removed.` },
   { status: "draft", label: "Move to draft", confirmLabel: "Move to draft", body: (title) => `Move ${title} back to draft. It will no longer appear as a published project.` }
 ];
 
 function shareAccessLabel(value: ProjectShareAccess | undefined): string {
-  return value === "anyone_with_link" ? "Anyone with link" : "Private";
+  return value === "anyone_with_link" ? "Public — anyone with link" : "Private";
 }
 
 function useRoute(): { route: Route; projectId?: string } {
@@ -333,6 +339,7 @@ export function App() {
         </header>
         <div className="content">
           {route.route === "overview" && <OverviewPage />}
+          {route.route === "storage" && <StoragePage />}
           {route.route === "projects" && <ProjectsPage setConfirm={setConfirm} toast={toast} publicIndexHref={publicIndexHref} isAdmin={currentUser?.role === "admin"} />}
           {route.route === "blog" && <BlogPage setConfirm={setConfirm} toast={toast} isAdmin={currentUser?.role === "admin"} />}
           {route.route === "project-detail" && route.projectId && <ProjectDetailPage projectId={route.projectId} setConfirm={setConfirm} toast={toast} />}
@@ -463,6 +470,103 @@ function OverviewPage() {
   );
 }
 
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes)) return "-";
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  const unitIndex = Math.min(units.length - 1, Math.floor(Math.log(Math.abs(bytes)) / Math.log(1024)));
+  const value = bytes / 1024 ** unitIndex;
+  return `${value >= 100 || unitIndex === 0 ? Math.round(value) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function StorageQuotaBar({ quota, label = "Usage" }: { quota: StorageQuotaStatus; label?: string }) {
+  const percent = quota.quotaBytes === null ? null : Math.max(0, Math.min(100, quota.percentUsed ?? 0));
+  return (
+    <div className="quota-block">
+      <div className="quota-header"><strong>{label}</strong><span>{quota.quotaBytes === null ? `${formatBytes(quota.usedBytes)} used` : `${formatBytes(quota.usedBytes)} / ${formatBytes(quota.quotaBytes)} (${quota.percentUsed ?? 0}%)`}</span></div>
+      {percent === null
+        ? <div className="quota-unlimited">No hard limit configured</div>
+        : <div className="quota-track" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}><span className={`quota-fill ${quota.state}`} style={{ width: `${percent}%` }} /></div>}
+    </div>
+  );
+}
+
+function StoragePage() {
+  const [data, setData] = useState<StorageResult>();
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [reloadToken, setReloadToken] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    api<StorageResult>("/storage")
+      .then((result) => {
+        if (!active) return;
+        setData(result);
+        setError("");
+      })
+      .catch((err: unknown) => {
+        if (active) setError(err instanceof Error ? err.message : "Unable to load storage report.");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [reloadToken]);
+
+  if (!data && loading) return <div className="panel">Loading storage report...</div>;
+  if (!data && error) return <EmptyState title="Storage report unavailable" body={error} />;
+  if (!data) return <EmptyState title="Storage report unavailable" body="No storage data was returned." />;
+
+  const storage = data.storage;
+  const totals = storage.totals;
+  const cards = [
+    ["Tracked storage", totals.totalBytes, <HardDrive size={20} />],
+    ["Project files", totals.projectBytes, <Archive size={20} />],
+    ["Workspaces", totals.workspaceBytes, <Wrench size={20} />],
+    ["Artifacts", totals.artifactBytes, <Download size={20} />],
+    ["Shares", totals.shareBytes, <ExternalLink size={20} />],
+    ["Telemetry", totals.telemetryBytes, <Activity size={20} />]
+  ] as const;
+
+  return (
+    <div className="storage-page">
+      <div className="panel-title">
+        <div><h2>Storage usage</h2><p className="muted">Generated {fmtDate(storage.generatedAt)}. Filesystem paths are intentionally hidden.</p></div>
+        <button className="button subtle" type="button" onClick={() => setReloadToken((value) => value + 1)} disabled={loading}><RefreshCw size={16} /> {loading ? "Refreshing..." : "Refresh"}</button>
+      </div>
+      {error && <div className="form-alert error" role="alert">{error}</div>}
+      <section className="metric-grid storage-metric-grid">{cards.map(([label, value, icon]) => <div className="metric-card" key={label}><span>{icon}</span><strong>{formatBytes(value)}</strong><small>{label}</small></div>)}</section>
+      <section className="panel storage-global-panel">
+        <PanelTitle title="Global quota" action={<span className={badgeClass(storage.globalQuota.state)}>{storage.globalQuota.state.replace("_", " ")}</span>} />
+        <StorageQuotaBar quota={storage.globalQuota} label="All tracked storage" />
+        {storage.warnings.length > 0 && <div className="storage-warning" role="alert"><strong>Storage warnings</strong><ul>{storage.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div>}
+      </section>
+      <div className="stack">
+        {storage.scopes.length === 0
+          ? <EmptyState title="No storage scopes" body="There are no project roots visible to this account." />
+          : storage.scopes.map((scope) => (
+            <section className="panel storage-scope" key={scope.id}>
+              <PanelTitle title={scope.label} action={<span className="badge neutral">{scope.projectCount} project{scope.projectCount === 1 ? "" : "s"}</span>} />
+              <StorageQuotaBar quota={scope.quota} label="Scope usage" />
+              <div className="storage-scope-breakdown">
+                <div><span>Project files</span><strong>{formatBytes(scope.projectUsage.bytes)}</strong><small>{scope.projectUsage.files} files</small></div>
+                <div><span>Workspace files</span><strong>{formatBytes(scope.workspaceUsage.bytes)}</strong><small>{scope.workspaceUsage.files} files</small></div>
+                <div><span>Total</span><strong>{formatBytes(scope.totalBytes)}</strong><small>{scope.quota.state.replace("_", " ")}</small></div>
+              </div>
+              {scope.projects.length === 0
+                ? <EmptyState title="No projects in this scope" body="Project-level usage will appear here when a project is created." />
+                : <div className="table-wrap"><table><thead><tr><th>Project</th><th>Status</th><th>Project files</th><th>Workspace</th><th>Total</th><th>Quota</th></tr></thead><tbody>{scope.projects.map((project) => <tr key={project.id}><td data-label="Project"><strong>{project.title}</strong><code>{project.id}</code></td><td data-label="Status"><span className={badgeClass(project.status)}>{project.status}</span></td><td data-label="Project files">{formatBytes(project.projectBytes)}</td><td data-label="Workspace">{formatBytes(project.workspaceBytes)}</td><td data-label="Total"><strong>{formatBytes(project.totalBytes)}</strong></td><td data-label="Quota"><span className={badgeClass(project.quota.state)}>{project.quota.percentUsed === null ? "unlimited" : `${project.quota.percentUsed}%`}</span></td></tr>)}</tbody></table></div>}
+            </section>
+          ))}
+      </div>
+    </div>
+  );
+}
+
 type HomepageInfo = { projectId: string; title: string | null; status?: string } | null;
 
 function ProjectsPage({ setConfirm, toast, publicIndexHref, isAdmin }: { setConfirm: (state: ConfirmState) => void; toast: (tone: Toast["tone"], message: string) => void; publicIndexHref: string; isAdmin: boolean }) {
@@ -488,6 +592,7 @@ function ProjectsPage({ setConfirm, toast, publicIndexHref, isAdmin }: { setConf
   return (
     <section className="panel">
       <PanelTitle title="Projects" action={<a className="button subtle" href={publicIndexHref} target="_blank" rel="noreferrer"><ExternalLink size={16} /> Public index</a>} />
+      <div className="form-alert success" role="note">New projects are public to anyone with the link by default. Use the Sharing control to make a published project private.</div>
       {isAdmin && (
         <div className="form-alert" role="status" style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
           <Home size={16} />
@@ -922,6 +1027,7 @@ function ObservabilityPage({ toast }: { toast: (tone: Toast["tone"], message: st
       <td data-label="Error rate"><span className={badgeClass(errorRateLevel(metric.errorRate))}>{(metric.errorRate * 100).toFixed(0)}%</span></td>
       <td data-label="p50">{fmtMs(metric.p50Ms)}</td>
       <td data-label="p95">{metric.p95Ms !== null && metric.p95Ms >= slowP95ThresholdMs ? <span className={badgeClass("high")}>{fmtMs(metric.p95Ms)}</span> : fmtMs(metric.p95Ms)}</td>
+      <td data-label="p99">{fmtMs(metric.p99Ms)}</td>
       <td data-label="Max">{fmtMs(metric.maxMs)}</td>
     </tr>
   );
@@ -941,17 +1047,38 @@ function ObservabilityPage({ toast }: { toast: (tone: Toast["tone"], message: st
         ) : null}
       </section>
 
+      {data && Object.values(data.performance).some((metric) => metric.samples > 0) && (
+        <section className="panel">
+          <PanelTitle title="Runtime and queue performance (p95)" />
+          <div className="metric-grid">
+            <div className="metric-card"><strong>{fmtMs(data.performance.queueWaitMs.p95)}</strong><small>Queue wait</small></div>
+            <div className="metric-card"><strong>{fmtMs(data.performance.executionMs.p95)}</strong><small>Job execution</small></div>
+            <div className="metric-card"><strong>{data.performance.queueDepth.p95 ?? "-"}</strong><small>Queue depth</small></div>
+            <div className="metric-card"><strong>{fmtMs(data.performance.eventLoopDelayMs.p95)}</strong><small>Event-loop delay</small></div>
+            <div className="metric-card"><strong>{data.performance.rssBytes.p95 === null ? "-" : formatBytes(data.performance.rssBytes.p95)}</strong><small>Process RSS</small></div>
+            <div className="metric-card"><strong>{data.performance.toolListBytes.p95 === null ? "-" : formatBytes(data.performance.toolListBytes.p95)}</strong><small>Tool list payload</small></div>
+          </div>
+        </section>
+      )}
+
       {data && data.totalCalls > 0 && (
         <section className="panel">
           <PanelTitle title="By tool (most problematic first)" />
-          <div className="table-wrap"><table><thead><tr><th>Tool</th><th>Calls</th><th>Errors</th><th>Error rate</th><th>p50</th><th>p95</th><th>Max</th></tr></thead><tbody>{data.byTool.map(metricRow)}</tbody></table></div>
+          <div className="table-wrap"><table><thead><tr><th>Tool</th><th>Calls</th><th>Errors</th><th>Error rate</th><th>p50</th><th>p95</th><th>p99</th><th>Max</th></tr></thead><tbody>{data.byTool.map(metricRow)}</tbody></table></div>
         </section>
       )}
 
       {data && data.byClient.length > 0 && (
         <section className="panel">
           <PanelTitle title="By client" />
-          <div className="table-wrap"><table><thead><tr><th>Client</th><th>Calls</th><th>Errors</th><th>Error rate</th><th>p50</th><th>p95</th><th>Max</th></tr></thead><tbody>{data.byClient.map(metricRow)}</tbody></table></div>
+          <div className="table-wrap"><table><thead><tr><th>Client</th><th>Calls</th><th>Errors</th><th>Error rate</th><th>p50</th><th>p95</th><th>p99</th><th>Max</th></tr></thead><tbody>{data.byClient.map(metricRow)}</tbody></table></div>
+        </section>
+      )}
+
+      {data && data.byFailureCategory.length > 0 && (
+        <section className="panel">
+          <PanelTitle title="Failures by category" />
+          <div className="table-wrap"><table><thead><tr><th>Category</th><th>Calls</th><th>Errors</th><th>Error rate</th><th>p50</th><th>p95</th><th>p99</th><th>Max</th></tr></thead><tbody>{data.byFailureCategory.map(metricRow)}</tbody></table></div>
         </section>
       )}
 

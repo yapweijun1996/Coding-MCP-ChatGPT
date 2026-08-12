@@ -18,8 +18,9 @@ either invisible or un-callable, no matter how good the code is:
 2. **`schema`** — a parallel **zod** schema used for runtime validation inside the handler.
    The JSON-Schema describes the input; the zod schema *enforces* it on the way in.
 3. **`handler`** — the function that does the work and returns the standard `ToolResult`.
-4. **registration + skill exposure** — the tool module must be added to `allToolModules`
-   (so the server knows it exists) **and** named in at least one *enabled* skill's `toolNames`
+4. **registration + skill exposure** — the tool group must have a dynamic loader in
+   `toolGroupLoaders` (so the server knows how to import it), the generated manifest must be
+   refreshed, **and** the tool must be named in at least one *enabled* skill's `toolNames`
    (so the access gate will actually surface it). A tool that is registered but in no skill
    catalog can **never** appear in `tools/list` — and `npm run check:mcp` turns that into a
    build failure.
@@ -131,33 +132,30 @@ Notes:
 - Export an **array** of modules (`textStatsTools: ToolModule[]`), even for a single tool. That
   matches how every other module is aggregated.
 
-### Step (b) — register it in the tool index
+### Step (b) — register its lazy group and regenerate discovery metadata
 
-The registry ([`src/mcp/registry.ts`](../src/mcp/registry.ts)) re-exports `allToolModules` from
-[`src/mcp/tools/index.ts`](../src/mcp/tools/index.ts). Add your module there: an `import` at the
-top and a spread in the `allToolModules` array.
-
-```ts
-// near the other imports in src/mcp/tools/index.ts
-import { textStatsTools } from "./text-stats.js";
-
-// inside the `export const allToolModules: ToolModule[] = [ ... ]` array
-  ...textStatsTools,
-```
-
-`registry.ts` then aggregates and **enforces name uniqueness** — a duplicate name throws at
-startup:
+[`src/mcp/tools/index.ts`](../src/mcp/tools/index.ts) maps group ids to dynamic imports. Add a
+loader; do not add a static top-level import, or every schema and handler in that dependency tree
+will return to the cold-start path.
 
 ```ts
-for (const tool of toolRegistry) {
-  if (toolByName.has(tool.definition.name)) {
-    throw new Error(`Duplicate MCP tool registration: ${tool.definition.name}`);
-  }
-  toolByName.set(tool.definition.name, tool);
-}
+export const toolGroupLoaders = {
+  // ...existing groups...
+  textStats: async () => (await import("./text-stats.js")).textStatsTools
+} satisfies Record<string, ToolGroupLoader>;
 ```
 
-You can look a tool up later with `getToolModule(name)` / `hasToolModule(name)`.
+Leave the group out of `hotToolGroupIds` unless a measured common path needs its handler ready at
+startup. Generate its static discovery entry:
+
+```bash
+npm run generate:tool-manifest
+```
+
+Generation **enforces name uniqueness**. Runtime first load also verifies every definition and
+`enabledByDefault` value against the manifest before exposing any handler from the group. Use
+`getToolModule(name)` / `hasToolModule(name)` for discovery; use `await loadToolModule(name)` when
+code needs the real zod schema or handler.
 
 ### Step (c) — expose it via a skill pack
 
@@ -296,7 +294,7 @@ On the error path, set `ok: false`, put the message in `errors`, and still retur
   model and the validator disagree: the model may send a field the validator rejects, or send junk
   the validator silently drops. Use `.strict()` on the zod object and `additionalProperties: false`
   on the JSON-Schema, and add a test that an unknown key fails (step e).
-- **Forgetting skill exposure.** A tool can be registered in `allToolModules` and still be
+- **Forgetting skill exposure.** A tool can be registered in `toolGroupLoaders` and still be
   **completely un-callable** because it is in no skill `toolNames`. The access gate returns
   `blocked_by_skill` and reconnecting the client does not help. `npm run check:mcp` makes this a
   build failure for `enabledByDefault` tools — but if you mark a tool `enabledByDefault: false`
@@ -318,16 +316,17 @@ On the error path, set `ok: false`, put the message in `errors`, and still retur
   `src/security/url.js` (as `public-api.ts` does) — it blocks non-`https` URLs and private/reserved
   IPs and follows redirects safely. Do not call bare `fetch` on a caller-supplied URL.
 - **Name format.** Tool names are lower_snake_case and must be unique across the whole registry;
-  a collision throws at startup (see step b).
+  a collision fails manifest generation (see step b).
 
 ## Checklist
 
 1. Write `src/mcp/tools/<your-tool>.ts` with `definition` + zod `schema` + `handler`, exported as a `ToolModule[]`.
-2. Import and spread it into `allToolModules` in `src/mcp/tools/index.ts`.
-3. Add the tool name to the right skill(s) in `src/skills/registry.ts`.
-4. Set `enabledByDefault` correctly (destructive ⇒ `false` + `high-risk` only).
-5. Add a test in `tests/<your-tool>.test.ts`.
-6. Run `npm run typecheck`, `npm test`, and `npm run check:mcp` — all green.
+2. Add a dynamic group loader in `src/mcp/tools/index.ts` and keep it cold unless measurements justify warming it.
+3. Run `npm run generate:tool-manifest` and commit the generated manifest change.
+4. Add the tool name to the right skill(s) in `src/skills/registry.ts`.
+5. Set `enabledByDefault` correctly (destructive ⇒ `false` + `high-risk` only).
+6. Add a test in `tests/<your-tool>.test.ts`.
+7. Run `npm run typecheck`, `npm test`, and `npm run check:mcp` — all green.
 
 Then follow [`updating-tools.md`](./updating-tools.md) to rebuild the server and open a new
 ChatGPT conversation so the tool appears.

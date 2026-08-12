@@ -14,6 +14,7 @@ RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src
 COPY admin-ui ./admin-ui
+COPY scripts ./scripts
 RUN NODE_OPTIONS=--max-old-space-size=2048 npm run build
 
 FROM mcr.microsoft.com/playwright:v1.61.0-noble AS runtime
@@ -129,6 +130,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # `xvfb-run --auto-servernum sh -c 'echo MARKER; touch /tmp/ran_marker'` in a one-off
 # container: zero output, no marker file, exit 0. Under `docker run -d` that means node never
 # starts, the container sits there with only the wrapper and Xvfb alive, and the healthcheck
-# fails forever with no logs to explain it. `exec` keeps node as PID 1 so it still receives
-# SIGTERM for the graceful shutdown path.
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp & export DISPLAY=:99; exec node dist/server.js"]
+# fails forever with no logs to explain it. The supervising shell stays PID 1 and forwards
+# termination to both Node processes so the HTTP server drains and the worker stops claiming,
+# finishes within its grace window, or leaves its lease to expire safely.
+CMD ["bash", "-c", "Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp & xvfb_pid=$!; export DISPLAY=:99; node dist/worker.js & worker_pid=$!; node dist/server.js & server_pid=$!; terminate(){ kill -TERM \"$server_pid\" \"$worker_pid\" \"$xvfb_pid\" 2>/dev/null || true; }; trap terminate TERM INT; wait -n \"$server_pid\" \"$worker_pid\"; status=$?; terminate; wait \"$server_pid\" \"$worker_pid\" 2>/dev/null || true; exit \"$status\""]

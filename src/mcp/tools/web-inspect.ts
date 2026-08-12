@@ -11,6 +11,7 @@ import type { ToolContext, ToolModule, ToolResult } from "../types.js";
 import { childEnv } from "../child-env.js";
 import { assertSafePublicUrl } from "../../security/url.js";
 import { installSsrfRouteGuard } from "../../security/playwright-guard.js";
+import { bindAbort, throwIfAborted } from "../../shared/abort.js";
 import type { Page, Request, Response } from "playwright";
 
 const INSPECTION_PROTOCOLS = ["http:", "https:"];
@@ -367,7 +368,8 @@ function setupNetworkCapture(page: Page, slowRequestMs: number, maxIssues: numbe
   return summary;
 }
 
-async function inspectWithPlaywright(url: string, options: InspectWebpagePlusOptions, ctx?: ToolContext, allowPrivateNetwork = false, browserName: BrowserName = "chromium"): Promise<ViewportResult[]> {
+async function inspectWithPlaywright(url: string, options: InspectWebpagePlusOptions, ctx?: ToolContext, allowPrivateNetwork = false, browserName: BrowserName = "chromium", signal: AbortSignal | undefined = ctx?.abortSignal): Promise<ViewportResult[]> {
+  throwIfAborted(signal);
   const playwright = await import("playwright");
   const browserType = {
     chromium: playwright.chromium,
@@ -375,6 +377,7 @@ async function inspectWithPlaywright(url: string, options: InspectWebpagePlusOpt
     webkit: playwright.webkit
   }[browserName];
   const browser = await browserType.launch({ headless: true });
+  const unbindAbort = bindAbort(signal, () => browser.close());
   const results: ViewportResult[] = [];
   const runId = randomUUID();
   const traceDir = path.join(os.tmpdir(), `coding-mcp-trace-${runId}`);
@@ -382,6 +385,7 @@ async function inspectWithPlaywright(url: string, options: InspectWebpagePlusOpt
 
   try {
     for (const viewportName of options.viewports) {
+      throwIfAborted(signal);
       const preset = viewportPresets[viewportName];
       const context = await browser.newContext({ viewport: { width: preset.width, height: preset.height }, isMobile: preset.isMobile, deviceScaleFactor: viewportName === "desktop" ? 1 : 2 });
       if (options.captureTrace) await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
@@ -434,15 +438,16 @@ async function inspectWithPlaywright(url: string, options: InspectWebpagePlusOpt
       await context.close();
     }
   } finally {
-    await browser.close();
+    unbindAbort();
+    await browser.close().catch(() => undefined);
     if (options.captureTrace) await rm(traceDir, { recursive: true, force: true });
   }
   return results;
 }
 
-export async function inspectWebpageUrl(url: string, options: Partial<BrowserInspectionOptions> = {}): Promise<ViewportResult[]> {
+export async function inspectWebpageUrl(url: string, options: Partial<BrowserInspectionOptions> = {}, signal?: AbortSignal): Promise<ViewportResult[]> {
   const parsed = inspectWebpageSchema.parse({ url, ...options });
-  return inspectWithPlaywright(parsed.url, { ...parsed, captureNetwork: false, captureTrace: false, slowRequestMs: 2500 }, undefined);
+  return inspectWithPlaywright(parsed.url, { ...parsed, captureNetwork: false, captureTrace: false, slowRequestMs: 2500 }, undefined, false, "chromium", signal);
 }
 
 async function createHtmlReport(ctx: ToolContext, title: string, summary: string, filenamePrefix: string, html: string): Promise<string> {
@@ -533,6 +538,7 @@ async function handleNetworkConditions(input: unknown, ctx: ToolContext, allowPr
   await guardInspectionUrl(parsed.url, allowPrivateNetwork);
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true });
+  const unbindAbort = bindAbort(ctx.abortSignal, () => browser.close());
   const preset = viewportPresets[parsed.viewport];
   const scenarioResults: Array<Record<string, unknown>> = [];
   const screenshots: string[] = [];
@@ -630,7 +636,8 @@ async function handleNetworkConditions(input: unknown, ctx: ToolContext, allowPr
       await context.close();
     }
   } finally {
-    await browser.close();
+    unbindAbort();
+    await browser.close().catch(() => undefined);
   }
 
   const blocking = scenarioResults
@@ -666,6 +673,7 @@ async function handleAccessibility(input: unknown, ctx: ToolContext, allowPrivat
   const { chromium } = await import("playwright");
   const { AxeBuilder } = await import("@axe-core/playwright");
   const browser = await chromium.launch({ headless: true });
+  const unbindAbort = bindAbort(ctx.abortSignal, () => browser.close());
   const results: Array<Record<string, unknown>> = [];
   try {
     for (const viewportName of parsed.viewports) {
@@ -694,7 +702,8 @@ async function handleAccessibility(input: unknown, ctx: ToolContext, allowPrivat
       await context.close();
     }
   } finally {
-    await browser.close();
+    unbindAbort();
+    await browser.close().catch(() => undefined);
   }
   const sections = results.map((result) => {
     const violations = result.violations as Array<Record<string, unknown>>;
@@ -739,6 +748,7 @@ async function handleLighthouse(input: unknown, ctx: ToolContext, allowPrivateNe
     chromePath,
     chromeFlags: ["--headless=new", "--no-sandbox", "--disable-gpu"]
   });
+  const unbindAbort = bindAbort(ctx.abortSignal, () => chrome.kill());
   try {
     const result = await lighthouse(parsed.url, {
       port: chrome.port,
@@ -770,7 +780,8 @@ async function handleLighthouse(input: unknown, ctx: ToolContext, allowPrivateNe
     const reportUrl = await saveArtifactUrl(ctx, `lighthouse-${randomUUID()}.html`, "text/html", htmlReport);
     return toolResult(`Lighthouse audit completed for ${parsed.url}.`, reportUrl, { reportUrl, url: parsed.url, formFactor: parsed.formFactor, scores, failedAudits });
   } finally {
-    await chrome.kill();
+    unbindAbort();
+    await Promise.resolve(chrome.kill()).catch(() => undefined);
   }
 }
 
@@ -809,6 +820,7 @@ async function handleInteractionFlow(input: unknown, ctx: ToolContext): Promise<
   const { chromium } = await import("playwright");
   const preset = viewportPresets[parsed.viewport];
   const browser = await chromium.launch({ headless: true });
+  const unbindAbort = bindAbort(ctx.abortSignal, () => browser.close());
   const stepResults: Array<Record<string, unknown>> = [];
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
@@ -838,7 +850,8 @@ async function handleInteractionFlow(input: unknown, ctx: ToolContext): Promise<
     finalUrl = page.url();
     await context.close();
   } finally {
-    await browser.close();
+    unbindAbort();
+    await browser.close().catch(() => undefined);
   }
   const sections = [`<section><h2>Steps</h2><ul>${stepResults.map((step) => `<li><strong>${step.ok ? "pass" : "fail"} / ${step.index} / ${escapeHtml(String(step.action))}:</strong> ${escapeHtml(String(step.message ?? step.error ?? ""))}${step.screenshotUrl ? ` <a href="${escapeHtml(String(step.screenshotUrl))}">screenshot</a>` : ""}</li>`).join("")}</ul></section>`];
   const reportUrl = await createHtmlReport(ctx, "Interaction Flow Report", `Tested ${parsed.url}`, "interaction-flow", renderInspectionReport("Interaction Flow Report", parsed.url, sections, [`Final URL: ${finalUrl}`]));
@@ -851,6 +864,7 @@ async function handleAnalyzeVisual(input: unknown, ctx: ToolContext): Promise<To
   await guardInspectionUrl(parsed.url, false);
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true });
+  const unbindAbort = bindAbort(ctx.abortSignal, () => browser.close());
   const results: Array<Record<string, unknown>> = [];
   try {
     for (const viewportName of parsed.viewports) {
@@ -948,7 +962,8 @@ async function handleAnalyzeVisual(input: unknown, ctx: ToolContext): Promise<To
       await context.close();
     }
   } finally {
-    await browser.close();
+    unbindAbort();
+    await browser.close().catch(() => undefined);
   }
   const totalFindings = results.reduce((sum, result) => sum + ((result.findings as unknown[])?.length ?? 0), 0);
   const sections = results.map((result) => `<section><h2>${escapeHtml(String(result.viewport))}</h2><img src="${escapeHtml(String(result.screenshotUrl))}" alt="${escapeHtml(String(result.viewport))} visual analysis screenshot"><h3>Agent-readable visual findings</h3><pre>${escapeHtml(jsonForLog(result))}</pre></section>`);
@@ -962,6 +977,7 @@ async function handleDomAtPoint(input: unknown, ctx: ToolContext): Promise<ToolR
   const { chromium } = await import("playwright");
   const preset = viewportPresets[parsed.viewport];
   const browser = await chromium.launch({ headless: true });
+  const unbindAbort = bindAbort(ctx.abortSignal, () => browser.close());
   try {
     const context = await browser.newContext({ viewport: { width: preset.width, height: preset.height }, isMobile: preset.isMobile, deviceScaleFactor: parsed.viewport === "desktop" ? 1 : 2 });
     const page = await context.newPage();
@@ -1018,7 +1034,8 @@ async function handleDomAtPoint(input: unknown, ctx: ToolContext): Promise<ToolR
     payload.reportUrl = reportUrl;
     return toolResult(stack.length > 0 ? `Found ${stack.length} element(s) at ${parsed.x},${parsed.y}.` : `No element found at ${parsed.x},${parsed.y}.`, reportUrl, payload);
   } finally {
-    await browser.close();
+    unbindAbort();
+    await browser.close().catch(() => undefined);
   }
 }
 
@@ -1042,6 +1059,7 @@ async function handleInspect3dSceneVisuals(input: unknown, ctx: ToolContext, all
   await guardInspectionUrl(parsed.url, allowPrivateNetwork);
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true });
+  const unbindAbort = bindAbort(ctx.abortSignal, () => browser.close());
   const results: Array<Record<string, unknown>> = [];
   const screenshots: string[] = [];
 
@@ -1181,7 +1199,8 @@ async function handleInspect3dSceneVisuals(input: unknown, ctx: ToolContext, all
       await context.close();
     }
   } finally {
-    await browser.close();
+    unbindAbort();
+    await browser.close().catch(() => undefined);
   }
 
   const allFindings = results.flatMap((result) => (Array.isArray(result.findings) ? result.findings as Array<{ severity: string; issueType: string; message: string }> : []).map((finding) => ({ viewPreset: result.viewPreset, ...finding })));

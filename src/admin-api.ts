@@ -14,6 +14,7 @@ import {
   getProjectManifest,
   getProjectWithFiles,
   listProjects,
+  purgeProject,
   setProjectShareAccess,
   setProjectStatus
 } from "./projects/store.js";
@@ -32,7 +33,6 @@ import {
   enableVisibleBrowserControl,
   getSpecialToolStates
 } from "./special-tools.js";
-import { closeAllBrowserSessions } from "./mcp/tools/browser.js";
 import type { EffectiveToolState } from "./tool-state.js";
 import { listEffectiveToolStates, setToolEnabled } from "./tool-state.js";
 import type { PublicUser, UserRole, UserSession } from "./user-store.js";
@@ -43,6 +43,7 @@ import {
   disableUser,
   getPublicShareBasePathForUser,
   getProjectRootForUser,
+  getWorkspaceRootForUser,
   getRegistrationSettings,
   getSession as getUserSession,
   getUserById,
@@ -54,6 +55,8 @@ import {
   updateUserProfile,
   updateUserRole
 } from "./user-store.js";
+import { getStoragePolicy, getStorageReport, type StoragePolicy } from "./storage/manager.js";
+import { collectStorageScopes } from "./storage/scopes.js";
 
 interface AdminApiConfig {
   adminPasscode: string;
@@ -64,6 +67,8 @@ interface AdminApiConfig {
   shareRoot: string;
   artifactRoot: string;
   feedbackRoot: string;
+  telemetryRoot?: string;
+  storagePolicy?: StoragePolicy;
 }
 
 type SortDirection = "asc" | "desc";
@@ -496,6 +501,22 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
     });
   }));
 
+  api.get("/storage", asyncRoute(async (_req, res) => {
+    const user = res.locals.currentUser as PublicUser;
+    const scopes = await collectStorageScopes(
+      { projectRoot: config.projectRoot, workspaceRoot: config.workspaceRoot },
+      user.role === "admin" ? {} : { userId: user.id }
+    );
+    const report = await getStorageReport(
+      scopes,
+      config.storagePolicy ?? getStoragePolicy(),
+      user.role === "admin"
+        ? { artifactRoot: config.artifactRoot, shareRoot: config.shareRoot, telemetryRoot: config.telemetryRoot }
+        : {}
+    );
+    ok(res, { storage: report });
+  }));
+
   api.get("/projects", asyncRoute(async (req, res) => {
     const user = res.locals.currentUser as PublicUser;
     const { page, pageSize } = readPageQuery(req);
@@ -594,6 +615,31 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       ok(res, { project });
     } catch (error) {
       fail(res, 400, error instanceof Error ? error.message : "Project delete failed.");
+    }
+  }));
+
+  api.post("/projects/:projectId/purge", asyncRoute(async (req, res) => {
+    try {
+      const user = res.locals.currentUser as PublicUser;
+      if (!requireAdmin(user, res)) return;
+      if (readBody(req).confirm !== true) {
+        fail(res, 400, "Permanent deletion requires confirm=true.");
+        return;
+      }
+      const { root, owner } = await resolveProjectForUser(user, req.params.projectId, readStringQuery(req, "userId"));
+      const result = await purgeProject(root, req.params.projectId, {
+        workspaceRoot: owner ? await getWorkspaceRootForUser(owner.id) : config.workspaceRoot,
+        artifactRoot: config.artifactRoot,
+        shareRoot: config.shareRoot
+      });
+      const homepage = getHomepage();
+      if (homepage.homeProjectId === req.params.projectId && (!homepage.homeOwnerUserId || homepage.homeOwnerUserId === owner?.id)) {
+        clearHomepage();
+      }
+      recordActivity({ userId: user.id, clientId: "admin", method: "admin/projects/purge", toolName: req.params.projectId, ok: true, summary: `Permanently purged project ${req.params.projectId}.` });
+      ok(res, { result });
+    } catch (error) {
+      fail(res, 400, error instanceof Error ? error.message : "Project purge failed.");
     }
   }));
 
@@ -782,6 +828,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       const user = res.locals.currentUser as PublicUser;
       if (!requireAdmin(user, res)) return;
       disableVisibleBrowserControl("admin-disabled");
+      const { closeAllBrowserSessions } = await import("./mcp/tools/browser.js");
       const closed = await closeAllBrowserSessions();
       recordActivity({ userId: user.id, clientId: "admin", method: "admin/special-tools", toolName: "visible_browser_control", ok: true, summary: `Disabled visible browser control. Closed ${closed.length} browser session(s).` });
       ok(res, { closed });
@@ -795,6 +842,7 @@ export function registerAdminApi(app: express.Express, config: AdminApiConfig): 
       const user = res.locals.currentUser as PublicUser;
       if (!requireAdmin(user, res)) return;
       disableVisibleBrowserControl("admin-kill");
+      const { closeAllBrowserSessions } = await import("./mcp/tools/browser.js");
       const closed = await closeAllBrowserSessions();
       recordActivity({ userId: user.id, clientId: "admin", method: "admin/special-tools", toolName: "visible_browser_control", ok: true, summary: `Killed visible browser control. Closed ${closed.length} browser session(s).` });
       ok(res, { closed });
